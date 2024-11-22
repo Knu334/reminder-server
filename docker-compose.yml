@@ -8,6 +8,7 @@ services:
     image: reminder-server:latest
     volumes:
         - greenlock_data:/app/greenlock.d
+        - ./reminders.json:/app/reminders.json
     environment:
         TZ: Asia/Tokyo
         NODE_ENV: production

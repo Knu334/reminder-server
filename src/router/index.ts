@@ -10,7 +10,6 @@ router.put("/reminders", (req: Request, res: Response) => {
 });
 
 router.post("/reminders", (req: Request, res: Response) => {
-  console.log(req.ip);
   const { key } = req.body;
   res.status(200).send(getReminders(key));
 });

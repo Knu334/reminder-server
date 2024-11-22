@@ -134,7 +134,7 @@ dist
 
 # Application output
 greenlock.d/
-reminders.json
+reminders*.json
 
 # macOS meta file
 .DS_Store
