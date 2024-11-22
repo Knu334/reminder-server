@@ -1,6 +1,6 @@
 ARG ARCH=
 
-FROM ${ARCH}node:22.11.0-bookworm as build
+FROM ${ARCH}node:22.11.0-bookworm AS build
 ARG GREENLOCK_EMAIL GREENLOCK_SUBJECT
 WORKDIR /app/
 COPY package.json package-lock.json tsup.config.ts tsconfig.json ./
