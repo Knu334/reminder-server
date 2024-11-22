@@ -1,0 +1,24 @@
+services:
+  reminder-server:
+    build: 
+      context: .
+      args:
+          ARCH: 
+          GREENLOCK_SUBJECT: 
+    image: reminder-server:latest
+    volumes:
+        - greenlock_data:/app/greenlock.d
+    environment:
+        TZ: Asia/Tokyo
+        NODE_ENV: production
+        GREENLOCK_EMAIL: 
+        STORAGE_FILE: 
+        ALLOW_DOMAIN: 
+    ports:
+        - 80:80
+        - 443:443
+    init: true
+    restart: always
+
+volumes:
+    greenlock_data:
