@@ -4,22 +4,19 @@ services:
       context: .
       args:
           ARCH: 
-          GREENLOCK_SUBJECT: 
     image: reminder-server:latest
     volumes:
-        - greenlock_data:/app/greenlock.d
         - ./reminders.json:/app/reminders.json
+        - /etc/letsencrypt:/etc/letsencrypt:ro
     environment:
         TZ: Asia/Tokyo
         NODE_ENV: production
-        GREENLOCK_EMAIL: 
+        PORT: 
         STORAGE_FILE: 
         ALLOW_DOMAIN: 
+        SSL_KEY: 
+        SSL_CERT: 
     ports:
-        - 80:80
         - 443:443
     init: true
     restart: always
-
-volumes:
-    greenlock_data:
