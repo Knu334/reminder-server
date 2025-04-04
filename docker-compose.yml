@@ -17,6 +17,6 @@ services:
         SSL_KEY: 
         SSL_CERT: 
     ports:
-        - 443:443
+        - 3000:3000
     init: true
     restart: always

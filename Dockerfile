@@ -10,5 +10,5 @@ RUN npx tsup
 FROM ${ARCH}node:22.14.0-bookworm-slim
 WORKDIR /app/
 COPY --from=build /app/dist/app.js /app/app.js
-EXPOSE 443
+EXPOSE 3000
 CMD [ "node", "/app/app.js" ]
