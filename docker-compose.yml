@@ -14,8 +14,7 @@ services:
         PORT: 
         STORAGE_FILE: 
         ALLOW_DOMAIN: 
-        SSL_KEY: 
-        SSL_CERT: 
+        CERT_PATH: 
     ports:
         - 3000:3000
     init: true
