@@ -9,7 +9,7 @@
 - 本番モードでは HTTPS を使い、証明書ディレクトリの変更検知でサーバー再起動（ホットリロード）します
 
 ## 必要条件
-- Node.js 22 系（Docker イメージは Node 22.14.0 ベース）
+- Node.js 22 系（Docker イメージは Node 22.21.1 ベース）
 - npm
 - 開発時: `ts-node`, `nodemon`（devDependencies に含まれています）
 
