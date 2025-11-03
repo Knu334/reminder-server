@@ -1,6 +1,6 @@
 # reminder-server
 
-軽量なリマインダー管理用の Express サーバーです。
+[WebPageReminder](https://github.com/Knu334/WebPageReminder)用の Express サーバーです。
 
 主な特徴:
 - シンプルな REST API（`/reminders`）でリマインダーの取得・更新を行います
@@ -113,7 +113,7 @@ docker compose down
 - `CERT_PATH` を `docker-compose.yml` の `environment` か `volumes` と合わせて適切に設定してください（このリポジトリの例では `/etc/letsencrypt` をマウントしているので `CERT_PATH=/etc/letsencrypt/live/your-domain` のように指定します）。
 - `STORAGE_FILE` を設定すると、デフォルトの `./reminders.txt` ではなく指定ファイルを使用します（Compose ではボリュームマウントで永続化してください）。
 - `reminders.json` を `/app/reminders.json` にマウントしているため、Compose 構成の `STORAGE_FILE` を `/app/reminders.json` に合わせると動作が分かりやすくなります。
-- ホスト側で証明書を更新するとコンテナ内の `fs.watch` が検知してサーバーを再起動して新しい証明書を読み込みます。ただし、ボリュームマウント方式や OS によっては `fs.watch` が確実に検知しない場合があるため動作確認を行ってください。
+- ホスト側で証明書を更新するとコンテナ内の `chokidar` が検知してサーバーを再起動し新しい証明書を読み込みます。chokidarはDockerやボリュームマウント環境でも安定して変更検知できるようポーリング（`usePolling: true`）を利用しています。
 
 レスポンスは `src/util/reminderUtils.ts` に基づき、`STORAGE_FILE`（デフォルト `./reminders.txt`）に JSON オブジェクトとして保存／読取します。
 
@@ -132,4 +132,4 @@ curl -X POST -H "Content-Type: application/json" \
 
 ## 注意点 / 制限
 - 現状のストレージは単一ファイルの同期的な読み書きです。大量のデータや同時書き込みが発生するユースケースではデータ破損やパフォーマンス問題があります。必要ならデータベース（SQLite / PostgreSQL など）への移行を検討してください。
-- 証明書の再読み込みはファイルシステム監視（`fs.watch`）で行っていますが、環境によっては挙動が変わる場合があります（特にネットワークファイルシステム）。
+- 証明書の再読み込みは [chokidar](https://github.com/paulmillr/chokidar) を利用して行っています。

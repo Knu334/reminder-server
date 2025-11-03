@@ -6,6 +6,7 @@ import helmet from "helmet";
 import fs from "fs";
 import path from "path";
 import https from "https";
+import chokidar from "chokidar";
 
 import indexRouter from "@/router/index";
 import { allowOrigin, ipFilter } from "./middleware/reminderMiddleware";
@@ -43,14 +44,20 @@ app.use((err: HttpError, req: Request, res: Response, _next: NextFunction) => {
 
 if (process.env.NODE_ENV === "production") {
   let server: https.Server;
+  let restarting = false;
   const certPath = process.env.CERT_PATH || "";
-  const loadCertificates = () => {
+  const loadCertificates = (): https.ServerOptions => {
     return {
       key: fs.readFileSync(path.join(certPath, "privkey.pem")),
       cert: fs.readFileSync(path.join(certPath, "cert.pem")),
     };
   };
   const startServer = () => {
+    if (restarting) {
+      console.log("サーバー再起動中のため、再度のリロード要求を無視します");
+      return;
+    }
+    restarting = true;
     const credentials = loadCertificates();
 
     if (server) {
@@ -59,23 +66,37 @@ if (process.env.NODE_ENV === "production") {
         server = https.createServer(credentials, app);
         server.listen(Number(process.env.PORT || 3000), () => {
           console.log("新しい証明書でサーバーを再起動しました");
+          restarting = false;
         });
       });
     } else {
       server = https.createServer(credentials, app);
       server.listen(Number(process.env.PORT || 3000), () => {
         console.log("サーバーを起動しました");
+        restarting = false;
       });
     }
   };
 
-  // 証明書ファイルを監視
-  fs.watch(certPath, (_eventType, filename) => {
-    if (filename === "cert.pem" || filename === "privkey.pem") {
-      console.log("証明書の変更を検知しました。サーバーを再起動します...");
-      setTimeout(startServer, 1000); // 少し待ってから再起動
-    }
-  });
+  if (certPath && fs.existsSync(certPath)) {
+    const watcher = chokidar.watch(
+      [path.join(certPath, "cert.pem"), path.join(certPath, "privkey.pem")],
+      {
+        usePolling: true,
+        interval: 1000,
+        awaitWriteFinish: { stabilityThreshold: 500, pollInterval: 100 },
+      }
+    );
+
+    watcher.on("change", (p) => {
+      console.log(`${p} が変更されました。証明書を再読み込みします`);
+      setTimeout(startServer, 1000);
+    });
+
+    watcher.on("error", (err) => {
+      console.error("証明書監視中にエラーが発生しました:", err);
+    });
+  }
 
   startServer();
 } else {
