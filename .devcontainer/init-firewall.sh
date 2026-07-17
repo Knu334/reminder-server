@@ -95,9 +95,11 @@ for domain in \
     "update.code.visualstudio.com" \
     "context7.com" \
     "api.openai.com" \
+    "developers.openai.com" \
     "auth.openai.com" \
     "auth0.openai.com" \
     "chatgpt.com" \
+    "sdmntprnorthcentralus.oaiusercontent.com" \
     "proxy.bar504.net"; do
     echo "Resolving $domain..."
     ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}' | sort -u)
