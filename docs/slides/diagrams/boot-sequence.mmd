@@ -1,0 +1,11 @@
+flowchart LR
+  A["init-git.sh<br/>Git ユーザー設定<br/>gh 認証"]
+  B["init-playwright-cli.sh<br/>ブラウザ操作環境"]
+  C["init-firewall.sh<br/>（sudo）<br/>許可ドメイン以外を遮断"]
+  D["init-context7.sh<br/>ドキュメント取得設定"]
+  E["init-statusline.sh<br/>ステータスライン"]
+  F["ターミナルで<br/>Claude Code が使える"]
+
+  A --> B --> C --> D --> E --> F
+
+  style C fill:#ffe0e0

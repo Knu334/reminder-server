@@ -18,6 +18,22 @@ echo "==> Chromium: $CHROME_BIN"
 
 mkdir -p "$OUT_DIR"
 
+mkdir -p "$SLIDE_DIR/assets"
+
+# mmdc に既存 Chromium を使わせるための設定を一時ファイルとして生成する
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+printf '{"executablePath":"%s","args":["--no-sandbox"]}' "$CHROME_BIN" > "$TMP_DIR/puppeteer.json"
+
+for mmd in "$SLIDE_DIR"/diagrams/*.mmd; do
+  name="$(basename "$mmd" .mmd)"
+  echo "==> 図を生成中: $name.svg"
+  npx -y @mermaid-js/mermaid-cli@latest \
+    --puppeteerConfigFile "$TMP_DIR/puppeteer.json" \
+    -i "$mmd" -o "$SLIDE_DIR/assets/$name.svg" \
+    -b transparent
+done
+
 for EXT in html pdf pptx; do
   echo "==> スライドを変換中 (${EXT^^})"
   CHROME_PATH="$CHROME_BIN" npx -y @marp-team/marp-cli@latest \

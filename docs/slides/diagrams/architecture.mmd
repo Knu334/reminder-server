@@ -1,0 +1,34 @@
+flowchart TB
+  vscode["VS Code<br/>+ Dev Containers 拡張"]
+  repo["ローカルリポジトリ"]
+
+  subgraph container["DevContainer （隔離環境）"]
+    agent["Claude Code / Codex CLI"]
+    ws["/workspace<br/>（リポジトリを bind mount）"]
+    hook["PreToolUse フック<br/>check-bash-command.sh"]
+    fw["iptables + ipset<br/>init-firewall.sh"]
+  end
+
+  subgraph vol["名前付き volume（設定を永続化）"]
+    v1["claude-code-config"]
+    v2["codex-config"]
+    v3["codex-agents"]
+    v4["claude-code-bashhistory"]
+  end
+
+  ok["許可ドメイン 13 件<br/>api.anthropic.com / registry.npmjs.org<br/>context7.com / api.openai.com ほか"]
+  ng["その他すべての宛先"]
+
+  vscode --> agent
+  repo --> ws
+  agent --> ws
+  agent --> hook
+  agent --> fw
+  agent --> v1
+  agent --> v2
+  agent --> v3
+  agent --> v4
+  fw -->|許可| ok
+  fw -.->|遮断| ng
+
+  style ng stroke-dasharray: 5 5
