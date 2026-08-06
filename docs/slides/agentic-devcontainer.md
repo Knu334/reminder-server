@@ -142,6 +142,7 @@ git clone <新規リポジトリの URL>
 | --- | --- |
 | `GIT_USER_NAME` / `GIT_USER_EMAIL` | コミットに使う Git ユーザー情報 |
 | `GH_TOKEN` | GitHub Personal Access Token |
+| `TZ` | タイムゾーン。デフォルトは `Asia/Tokyo` |
 | `IMAGEARCH` | Mac は `arm64v8/`、Windows は `amd64/` |
 | `CONTEXT7_API_KEY` | Context7 を使う場合 |
 | `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` | プロキシ経由で使う場合 |
@@ -179,6 +180,8 @@ git clone <新規リポジトリの URL>
 
 ---
 
+<!-- _class: compact -->
+
 ## つまずきポイント
 
 **1. 通信が firewall で落ちる（最頻出）**
@@ -190,6 +193,8 @@ git clone <新規リポジトリの URL>
 # 許可ドメインの一覧を確認する
 grep -A 20 "for domain in" .devcontainer/init-firewall.sh
 ```
+
+GitHub と Google はこのリストには出てきません。スクリプト前半で IP レンジごと許可されています。
 
 対処: `init-firewall.sh` の `# Resolve and add other allowed domains` セクションに
 ドメインを追加し、**コンテナをリビルドする**（起動時にしか適用されない）。

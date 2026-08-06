@@ -23,6 +23,10 @@ section.lead {
   justify-content: center;
 }
 
+section.compact {
+  font-size: 0.85em;
+}
+
 section table {
   font-size: 0.8em;
 }
