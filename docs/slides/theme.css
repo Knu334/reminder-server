@@ -1,0 +1,37 @@
+/* @theme agentic */
+@import 'default';
+
+section {
+  font-family: "IPAGothic", "IPA Pゴシック", sans-serif;
+  font-size: 26px;
+  padding: 60px;
+  color: #24292f;
+}
+
+section h1 {
+  color: #1f3a5f;
+}
+
+section h2 {
+  color: #1f3a5f;
+  border-bottom: 3px solid #1f3a5f;
+  padding-bottom: 0.2em;
+}
+
+section.lead {
+  text-align: center;
+  justify-content: center;
+}
+
+section table {
+  font-size: 0.8em;
+}
+
+section code {
+  font-family: "DejaVu Sans Mono", monospace;
+  background: #f2f4f7;
+}
+
+section strong {
+  color: #b3261e;
+}
