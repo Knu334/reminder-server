@@ -47,7 +47,7 @@ AI コーディングエージェントを
 | --- | --- | --- |
 | エージェントの実行場所 | 開発者の PC | 使い捨てコンテナ |
 | 環境構築 | 各自が手順を追う | リポジトリを開くだけ |
-| 通信先 | 制限なし | 許可した 13 ドメインのみ |
+| 通信先 | 制限なし | 許可リストの宛先のみ |
 | 認証情報 | ファイルとして読める | 読み取りをツール側で拒否 |
 | 事故ったとき | PC の状態を戻す作業が必要 | コンテナを作り直すだけ |
 
@@ -57,14 +57,15 @@ AI コーディングエージェントを
 
 **1. ネットワーク層** — `init-firewall.sh`
 コンテナ起動時に `iptables` + `ipset` で、許可ドメイン以外への通信を破棄する。
-許可は 13 件のみ（Anthropic API、npm レジストリ、GitHub、VS Code、Context7、OpenAI API ほか）。
+許可されるのは、スクリプトに列挙された 13 ドメイン（Anthropic API、npm レジストリ、
+VS Code、Context7、OpenAI API ほか）と、GitHub・Google が公開する IP レンジのみ。
 ドメインの追加はスクリプトの編集が必要 = **レビューを通る**。
 
 **2. シークレット層** — `.claude/settings.json`
 `Read(**/.env)` と `Read(**/*.env)` を拒否。エージェントは `.env` をファイルとして読めない。
 
 **3. 実行層** — `.claude/hooks/check-bash-command.sh`
-`printenv` / `env` / `GH_TOKEN` / `.devcontainer/.env` を含むコマンドを、
+`printenv` / 単独の `env` / `GH_TOKEN` / `.devcontainer/.env` を含むコマンドを、
 実行される前にフックが検知して拒否する。
 
 ---
