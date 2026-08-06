@@ -58,7 +58,8 @@ AI コーディングエージェントを
 **1. ネットワーク層** — `init-firewall.sh`
 コンテナ起動時に `iptables` + `ipset` で、許可ドメイン以外への通信を破棄する。
 許可されるのは、スクリプトに列挙された 13 ドメイン（Anthropic API、npm レジストリ、
-VS Code、Context7、OpenAI API ほか）と、GitHub・Google が公開する IP レンジのみ。
+VS Code、Context7、OpenAI API ほか）と、GitHub・Google が公開する IP レンジ。
+例外として DNS（udp/53）と SSH（tcp/22）は宛先を問わず通す。
 ドメインの追加はスクリプトの編集が必要 = **レビューを通る**。
 
 **2. シークレット層** — `.claude/settings.json`
