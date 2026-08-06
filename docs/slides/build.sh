@@ -8,7 +8,7 @@ OUT_DIR="$SLIDE_DIR/dist"
 BASENAME="agentic-devcontainer"
 
 # Playwright 同梱の Chromium を解決する（パスにバージョン番号を直書きしない）
-CHROME_BIN="$(find "$HOME/.cache/ms-playwright" -type f -name chrome -perm -u+x 2>/dev/null | head -n 1)"
+CHROME_BIN="$(find "$HOME/.cache/ms-playwright" -type f -name chrome -perm -u+x 2>/dev/null | head -n 1)" || true
 if [ -z "$CHROME_BIN" ]; then
   echo "エラー: Playwright の Chromium が見つかりません。" >&2
   echo "  npx playwright install chromium を実行してください。" >&2
