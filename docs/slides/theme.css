@@ -29,7 +29,9 @@
   --font-body: "Inter", "Noto Sans JP", system-ui, "Hiragino Sans", sans-serif;
   /* 末尾の Liberation Mono は必須。汎用 monospace はコンテナ内で wqy-zenhei.ttc
      （TrueType Collection）に解決され、Chromium が PDF に埋め込めず文字が消える。 */
-  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, "Liberation Mono", monospace;
+  /* Noto Sans JP も必須。等幅フォント側は CJK を持たないため、これが無いと
+     コードブロック内の日本語だけが汎用 monospace = wqy-zenhei.ttc に落ちて消える。 */
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, "Liberation Mono", "Noto Sans JP", monospace;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
