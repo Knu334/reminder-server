@@ -2,9 +2,9 @@
 /* Modernist — agentic-devcontainer deck theme (1920x1080).
    docs/slides/theme.css を丸ごとこの内容に置き換える。 */
 
-@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;600;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&display=swap');
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700;900&display=swap');
-@import url('https://fonts.googleapis.com/css2?family=Roboto+Mono:wght@400;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
 
 :root {
   --color-bg: #f3f2f2;
@@ -25,11 +25,11 @@
   --pad-bottom: 120px;
   --baseline: 48px;
 
-  --font-heading: "Archivo", "Noto Sans JP", system-ui, "Hiragino Sans", sans-serif;
-  --font-body: "Archivo", "Noto Sans JP", system-ui, "Hiragino Sans", sans-serif;
+  --font-heading: "Inter", "Noto Sans JP", system-ui, "Hiragino Sans", sans-serif;
+  --font-body: "Inter", "Noto Sans JP", system-ui, "Hiragino Sans", sans-serif;
   /* 末尾の Liberation Mono は必須。汎用 monospace はコンテナ内で wqy-zenhei.ttc
      （TrueType Collection）に解決され、Chromium が PDF に埋め込めず文字が消える。 */
-  --mono: "Roboto Mono", ui-monospace, SFMono-Regular, Menlo, "Liberation Mono", monospace;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, "Liberation Mono", monospace;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -53,6 +53,14 @@ p { margin: 0; }
 a { color: var(--color-accent-700); text-underline-offset: 3px; }
 a:hover { color: var(--color-accent); }
 code { font-family: var(--mono); }
+
+/* JetBrains Mono のプログラミング用リガチャを無効化する。有効なままだと
+   -- や // が合字になり、コマンドの字面が変わるうえ PDF からのコピーも壊れる
+   （git clone --bare → /-bare）。--mono を使う要素すべてに効かせること。 */
+code, pre, .layer-file, .chip, .step-file {
+  font-variant-ligatures: none;
+  font-feature-settings: "liga" 0, "calt" 0;
+}
 
 /* — folio — */
 section::after {
