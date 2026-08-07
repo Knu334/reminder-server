@@ -14,9 +14,12 @@ flowchart TB
     v2["codex-config"]
     v3["codex-agents"]
     v4["claude-code-bashhistory"]
+    %% 2 列 2 行に畳んで横幅を抑える（不可視リンク）
+    v1 ~~~ v3
+    v2 ~~~ v4
   end
 
-  ok["許可される宛先<br/>列挙された 13 ドメイン<br/>api.anthropic.com / registry.npmjs.org<br/>context7.com / api.openai.com ほか<br/>＋ GitHub・Google の IP レンジ<br/>＋ DNS・SSH は宛先を問わず許可"]
+  ok["許可される宛先<br/>列挙されたドメイン<br/>＋ GitHub・Google の IP レンジ<br/>＋ DNS・SSH は宛先を問わず"]
   ng["その他すべての宛先"]
 
   vscode --> agent
@@ -26,9 +29,12 @@ flowchart TB
   agent --> fw
   agent --> v1
   agent --> v2
-  agent --> v3
-  agent --> v4
   fw -->|許可| ok
   fw -.->|遮断| ng
+
+  %% 不可視リンクで段を下げ、コンテナの横に並ばないようにする
+  hook ~~~ v1
+  hook ~~~ v2
+  ok ~~~ ng
 
   style ng stroke-dasharray: 5 5

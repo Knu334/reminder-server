@@ -57,13 +57,14 @@ AI コーディングエージェントを
 
 **1. ネットワーク層** — `init-firewall.sh`
 コンテナ起動時に `iptables` + `ipset` で、許可ドメイン以外への通信を破棄する。
-許可されるのは、スクリプトに列挙された 13 ドメイン（Anthropic API、npm レジストリ、
+許可されるのは、スクリプトに列挙されたドメイン（Anthropic API、npm レジストリ、
 VS Code、Context7、OpenAI API ほか）と、GitHub・Google が公開する IP レンジ。
 例外として DNS（udp/53）と SSH（tcp/22）は宛先を問わず通す。
 ドメインの追加はスクリプトの編集が必要 = **レビューを通る**。
 
 **2. シークレット層** — `.claude/settings.json`
-`Read(**/.env)` と `Read(**/*.env)` を拒否。エージェントは `.env` をファイルとして読めない。
+`Read(**/.env)` と `Read(**/*.env)` を拒否し、`Read` ツールでの読み取りを塞ぐ。
+`.devcontainer/.env` は Bash 経由でもフックが拒否する。
 
 **3. 実行層** — `.claude/hooks/check-bash-command.sh`
 `printenv` / 単独の `env` / `GH_TOKEN` / `.devcontainer/.env` を含むコマンドを、
@@ -120,10 +121,10 @@ VS Code、Context7、OpenAI API ほか）と、GitHub・Google が公開する I
 # 1. GitHub で新規リポジトリを作成しておく
 
 # 2-5. テンプレートを新規リポジトリに反映する
-git clone --bare https://github.com/Knu334/ClaudeCodeDevContainer.git
-cd ClaudeCodeDevContainer.git
+git clone --bare https://github.com/Knu334-Inc/agentic-devcontainer.git
+cd agentic-devcontainer.git
 git push --mirror <新規リポジトリの URL>
-cd .. && rm -rf ClaudeCodeDevContainer.git
+cd .. && rm -rf agentic-devcontainer.git
 
 # 6. 新規リポジトリをクローンする
 git clone <新規リポジトリの URL>
@@ -146,7 +147,7 @@ git clone <新規リポジトリの URL>
 | `TZ` | タイムゾーン。デフォルトは `Asia/Tokyo` |
 | `IMAGEARCH` | Mac は `arm64v8/`、Windows は `amd64/` |
 | `CONTEXT7_API_KEY` | Context7 を使う場合 |
-| `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` | プロキシ経由で使う場合 |
+| `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY` | 既定でプロキシ（`proxy.bar504.net`）経由。直接接続する場合は上書きする |
 
 **2. `CLAUDE.md`** — プロジェクト概要と作業ルールを書く
 `AGENTS.md` はこのファイルへのシンボリックリンク。Codex CLI も同じ内容を読む。
@@ -195,10 +196,10 @@ git clone <新規リポジトリの URL>
 grep -A 20 "for domain in" .devcontainer/init-firewall.sh
 ```
 
-GitHub と Google はこのリストには出てきません。スクリプト前半で IP レンジごと許可されています。
+GitHub と Google はこのリストには出てこない。スクリプト前半で IP レンジごと許可されている。
 
 対処: `init-firewall.sh` の `# Resolve and add other allowed domains` セクションに
-ドメインを追加し、**コンテナをリビルドする**（起動時にしか適用されない）。
+ドメインを追加し、**コンテナをリビルドする**（イメージに焼き込まれているため、リロードでは反映されない）。
 
 **2. `.env` が無くて起動に失敗する**
 `.devcontainer/.env.sample` をコピーして `.env` を作る。`.env` はコミットされない。
@@ -213,7 +214,7 @@ volume を削除しない限り、コンテナを作り直しても残る。
 
 ```bash
 # 初回のみ: テンプレートをリモートに追加する
-git remote add template https://github.com/Knu334/ClaudeCodeDevContainer.git
+git remote add template https://github.com/Knu334-Inc/agentic-devcontainer.git
 
 # 更新のたびに
 git fetch --all
@@ -227,14 +228,12 @@ git push
 
 ---
 
-<!-- _class: lead -->
+<!-- _class: closing -->
 
 ## 次のアクション
 
-**1.** 自分の担当リポジトリに、このテンプレートを導入する
-
-**2.** `.devcontainer/.env` を作り、`CLAUDE.md` にプロジェクト概要を書く
-
-**3.** 通信が必要な宛先があれば、firewall の許可ドメイン追加を PR で出す
+1. 自分の担当リポジトリに、このテンプレートを導入する
+2. `.devcontainer/.env` を作り、`CLAUDE.md` にプロジェクト概要を書く
+3. 通信が必要な宛先があれば、firewall の許可ドメイン追加を PR で出す
 
 質問・詰まった箇所は共有してください

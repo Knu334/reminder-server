@@ -2,7 +2,7 @@
 @import 'default';
 
 section {
-  font-family: "IPAGothic", "IPA Pゴシック", sans-serif;
+  font-family: "IPAPGothic", "IPA Pゴシック", "IPAGothic", sans-serif;
   font-size: 26px;
   padding: 60px;
   color: #24292f;
@@ -23,6 +23,22 @@ section.lead {
   justify-content: center;
 }
 
+/* 締めのスライド: 全体は中央寄せしつつ、番号付きリストだけは左揃えで縦に揃える */
+section.closing {
+  text-align: center;
+  justify-content: center;
+}
+
+section.closing ol {
+  display: inline-block;
+  text-align: left;
+  margin: 0.6em auto 1.2em;
+}
+
+section.closing ol li {
+  margin: 0.5em 0;
+}
+
 section.compact {
   font-size: 0.85em;
 }
@@ -32,7 +48,7 @@ section table {
 }
 
 section code {
-  font-family: "DejaVu Sans Mono", monospace;
+  font-family: "Liberation Mono", "DejaVu Sans Mono", monospace;
   background: #f2f4f7;
 }
 

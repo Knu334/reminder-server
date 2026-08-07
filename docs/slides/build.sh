@@ -25,11 +25,18 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 printf '{"executablePath":"%s","args":["--no-sandbox"]}' "$CHROME_BIN" > "$TMP_DIR/puppeteer.json"
 
+# htmlLabels: false = ラベルを <foreignObject> ではなく <text> で描く。
+# GitHub は SVG を <img> として配信するため、foreignObject のラベルは表示されない。
+# wrappingWidth はラベルの自動折り返し幅（既定 200px だと <br/> の行が再折り返しされる）。
+printf '{"htmlLabels":false,"flowchart":{"htmlLabels":false,"wrappingWidth":400}}' > "$TMP_DIR/mermaid.json"
+
+shopt -s nullglob
 for mmd in "$SLIDE_DIR"/diagrams/*.mmd; do
   name="$(basename "$mmd" .mmd)"
   echo "==> 図を生成中: $name.svg"
   npx -y @mermaid-js/mermaid-cli@latest \
     --puppeteerConfigFile "$TMP_DIR/puppeteer.json" \
+    -c "$TMP_DIR/mermaid.json" \
     -i "$mmd" -o "$SLIDE_DIR/assets/$name.svg" \
     -b transparent
 done
