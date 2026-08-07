@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 図はスライド内に HTML/CSS で直接描いているため、外部の画像ファイルは持たない。
+
 SLIDE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$SLIDE_DIR/agentic-devcontainer.md"
 THEME="$SLIDE_DIR/theme.css"
@@ -18,33 +20,13 @@ echo "==> Chromium: $CHROME_BIN"
 
 mkdir -p "$OUT_DIR"
 
-mkdir -p "$SLIDE_DIR/assets"
-
-# mmdc に既存 Chromium を使わせるための設定を一時ファイルとして生成する
-TMP_DIR="$(mktemp -d)"
-trap 'rm -rf "$TMP_DIR"' EXIT
-printf '{"executablePath":"%s","args":["--no-sandbox"]}' "$CHROME_BIN" > "$TMP_DIR/puppeteer.json"
-
-# htmlLabels: false = ラベルを <foreignObject> ではなく <text> で描く。
-# GitHub は SVG を <img> として配信するため、foreignObject のラベルは表示されない。
-# wrappingWidth はラベルの自動折り返し幅（既定 200px だと <br/> の行が再折り返しされる）。
-printf '{"htmlLabels":false,"flowchart":{"htmlLabels":false,"wrappingWidth":400}}' > "$TMP_DIR/mermaid.json"
-
-shopt -s nullglob
-for mmd in "$SLIDE_DIR"/diagrams/*.mmd; do
-  name="$(basename "$mmd" .mmd)"
-  echo "==> 図を生成中: $name.svg"
-  npx -y @mermaid-js/mermaid-cli@latest \
-    --puppeteerConfigFile "$TMP_DIR/puppeteer.json" \
-    -c "$TMP_DIR/mermaid.json" \
-    -i "$mmd" -o "$SLIDE_DIR/assets/$name.svg" \
-    -b transparent
-done
-
+# --html: スライド内の生 HTML（図版・表・コードブロック）を有効にする。
+# これが無いと構成図やコードブロックがエスケープされて出力される。
 for EXT in html pdf pptx; do
   echo "==> スライドを変換中 (${EXT^^})"
   CHROME_PATH="$CHROME_BIN" npx -y @marp-team/marp-cli@latest \
-    "$SRC" --theme "$THEME" --allow-local-files -o "$OUT_DIR/$BASENAME.$EXT"
+    "$SRC" --theme "$THEME" --html \
+    -o "$OUT_DIR/$BASENAME.$EXT"
 done
 
 echo "==> 完了: $OUT_DIR"
