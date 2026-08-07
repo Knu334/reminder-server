@@ -78,7 +78,7 @@ section.cover { justify-content: center; }
 section.cover h1, section.cover h2 {
   font-size: var(--type-display); line-height: 120px; letter-spacing: -0.02em;
 }
-.cover-sub { font-size: var(--type-subtitle); line-height: var(--baseline); max-width: 34ch; margin-top: 48px; }
+.cover-sub { font-size: var(--type-subtitle); line-height: var(--baseline); max-width: 50ch; margin-top: 48px; }
 .meta {
   position: absolute; left: var(--pad-x); right: var(--pad-x); bottom: var(--pad-bottom);
   display: flex; align-items: baseline; gap: 18px;
@@ -109,7 +109,7 @@ li::before { content: ""; position: absolute; left: -36px; top: 18px; width: 10p
 li code { font-size: 30px; }
 em { font-style: normal; color: var(--color-accent-700); }
 
-.lead { font-size: var(--type-subtitle); line-height: var(--baseline); max-width: 46ch; margin-top: 72px; }
+.lead { font-size: var(--type-subtitle); line-height: var(--baseline); max-width: 60ch; margin-top: 72px; }
 
 /* — columns — */
 .cols { display: grid; column-gap: var(--baseline); margin-top: 88px; }
@@ -184,7 +184,7 @@ section.dense td { padding-top: 12px; padding-bottom: 12px; }
 section.hero { justify-content: center; }
 .hero-num { font-family: var(--font-heading); font-weight: 900;
   font-size: 280px; line-height: 1; letter-spacing: -0.02em; color: var(--color-accent); }
-.hero-caption { font-size: var(--type-small); line-height: var(--baseline); max-width: 46ch; margin-top: 48px;
+.hero-caption { font-size: var(--type-small); line-height: var(--baseline); max-width: 70ch; margin-top: 48px;
   color: color-mix(in srgb, var(--color-text) 55%, transparent); }
 
 /* — code — */

@@ -13,7 +13,7 @@ paginate: true
 
 # agentic-devcontainer
 
-<p class="cover-sub">AI コーディングエージェントを安全に実務投入するための、DevContainer テンプレート。</p>
+<p class="cover-sub">AI コーディングエージェントを安全に実務投入するための、<br>DevContainer テンプレート。</p>
 
 <div class="meta"><span>開発基盤チーム</span><span>·</span><span>2026</span></div>
 
@@ -73,7 +73,7 @@ paginate: true
 
 ## 解決の方針
 
-<p class="lead">エージェントが動く場所を、開発者の PC から使い捨てのコンテナへ移す。そのうえで、コンテナに三つの制約をかける。</p>
+<p class="lead">エージェントが動く場所を、開発者の PC から使い捨てのコンテナへ移す。<br>そのうえで、コンテナに三つの制約をかける。</p>
 
 <div class="cols cols-3">
 <div>
@@ -240,7 +240,7 @@ paginate: true
 
 <p class="hero-num">2</p>
 
-<p class="hero-caption">前提として必要なのは Docker と VS Code の Dev Containers 拡張だけ。新しいツールの学習コストは発生せず、普段どおり VS Code でリポジトリを開く。</p>
+<p class="hero-caption">前提として必要なのは Docker と VS Code の Dev Containers 拡張だけ。<br>新しいツールの学習コストは発生せず、普段どおり VS Code でリポジトリを開く。</p>
 
 ---
 
