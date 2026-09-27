@@ -120,8 +120,10 @@ RUN sed -i \
 RUN curl -fsSL https://claude.ai/install.sh | zsh && \
   echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
 
-RUN echo 'alias claude="claude --dangerously-skip-permissions"' >> ~/.zshrc && \
-  echo 'alias codex="codex --dangerously-bypass-approvals-and-sandbox"' >> ~/.zshrc
+RUN echo 'alias codex="codex --no-daemon"' >> ~/.zshrc
 
 # Install Chromium for Playwright
 RUN playwright-cli install-browser chromium
+
+# Install uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh

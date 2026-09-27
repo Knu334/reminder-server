@@ -100,6 +100,8 @@ for domain in \
     "auth0.openai.com" \
     "chatgpt.com" \
     "sdmntprnorthcentralus.oaiusercontent.com" \
+    "pypi.org" \
+    "files.pythonhosted.org" \
     "proxy.bar504.net"; do
     echo "Resolving $domain..."
     ips=$(dig +noall +answer A "$domain" | awk '$4 == "A" {print $5}' | sort -u)

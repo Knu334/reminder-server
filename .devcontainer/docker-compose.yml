@@ -1,5 +1,6 @@
 services:
   devcontainer:
+    init: true
     command: sleep infinity
     build:
       context: .
@@ -12,6 +13,8 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
+    security_opt:
+      - seccomp=./seccomp.json
     volumes:
       - claude-code-bashhistory:/commandhistory
       - claude-code-config:/home/node/.claude
@@ -27,12 +30,6 @@ services:
       CONTEXT7_API_KEY: ${CONTEXT7_API_KEY:-}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://proxy.bar504.net}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-    networks:
-      - mcp-net
-
-networks:
-  mcp-net:
-    driver: bridge
 
 volumes:
   claude-code-bashhistory:
