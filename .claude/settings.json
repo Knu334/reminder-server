@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "deny": ["Read(**/.env)", "Read(**/*.env)"]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/workspace/.claude/hooks/check-bash-command.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
