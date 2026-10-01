@@ -7,7 +7,12 @@
   "forwardPorts": [],
   "customizations": {
     "vscode": {
-      "extensions": ["anthropic.claude-code", "eamodio.gitlens"],
+      "extensions": [
+        "anthropic.claude-code",
+        "eamodio.gitlens",
+        "ms-ceintl.vscode-language-pack-ja",
+        "esbenp.prettier-vscode"
+      ],
       "settings": {
         "terminal.integrated.defaultProfile.linux": "zsh",
         "terminal.integrated.profiles.linux": {

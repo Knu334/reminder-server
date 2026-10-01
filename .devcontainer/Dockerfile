@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   wget \
   curl \
   ca-certificates \
+  bubblewrap \
   && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Generate the Japanese UTF-8 locale used by the shell and CLI tools.
