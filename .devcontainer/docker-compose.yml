@@ -1,0 +1,38 @@
+services:
+  devcontainer:
+    init: true
+    command: sleep infinity
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        TZ: "${TZ:-Asia/Tokyo}"
+        IMAGEARCH: ${IMAGEARCH:-arm64v8/}
+        GIT_DELTA_VERSION: "0.18.2"
+        ZSH_IN_DOCKER_VERSION: "1.2.0"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    security_opt:
+      - seccomp=./seccomp.json
+    volumes:
+      - claude-code-bashhistory:/commandhistory
+      - claude-code-config:/home/node/.claude
+      - codex-config:/home/node/.codex
+      - codex-agents:/home/node/.agents
+      - ${LOCAL_WORKSPACE_FOLDER:-.}/..:/workspace
+    environment:
+      CLAUDE_CONFIG_DIR: /home/node/.claude
+      POWERLEVEL9K_DISABLE_GITSTATUS: "true"
+      GH_TOKEN: ${GH_TOKEN}
+      GIT_USER_NAME: ${GIT_USER_NAME:-}
+      GIT_USER_EMAIL: ${GIT_USER_EMAIL:-}
+      CONTEXT7_API_KEY: ${CONTEXT7_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://proxy.bar504.net}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+
+volumes:
+  claude-code-bashhistory:
+  claude-code-config:
+  codex-config:
+  codex-agents:

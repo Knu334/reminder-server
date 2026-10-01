@@ -1,0 +1,28 @@
+{
+  "name": "Coding Agent Sandbox",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "devcontainer",
+  "workspaceFolder": "/workspace",
+  "remoteUser": "node",
+  "forwardPorts": [],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "anthropic.claude-code",
+        "eamodio.gitlens",
+        "ms-ceintl.vscode-language-pack-ja",
+        "esbenp.prettier-vscode"
+      ],
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "terminal.integrated.profiles.linux": {
+          "bash": { "path": "bash", "icon": "terminal-bash" },
+          "zsh": { "path": "zsh" }
+        },
+        "remote.autoForwardPorts": false
+      }
+    }
+  },
+  "postStartCommand": "/usr/local/bin/init-git.sh && /usr/local/bin/init-playwright-cli.sh && sudo /usr/local/bin/init-firewall.sh && /usr/local/bin/init-context7.sh && /usr/local/bin/init-statusline.sh",
+  "waitFor": "postStartCommand"
+}
