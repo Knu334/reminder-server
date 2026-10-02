@@ -44,7 +44,9 @@ flowchart LR
     Client -->|短期URLで画像取得| Images
     Gateway --> Logs[CloudWatch]
     API --> Logs
-    GHA[GitHub Actions] -->|OIDC| TF[Terraform]
+    GHA[GitHub Actions] -->|OIDC token| STS[AWS STS・IAM role]
+    STS -->|短期AWS認証情報| GHA
+    GHA -->|runner上で実行| TF[Terraform CLI]
     GHA --> ECR[ECR\nイメージdigest]
     ECR --> API
     TF --> Gateway
@@ -296,6 +298,8 @@ prevent_destroyは設定ブロックそのものを削除すると保護がな�
 ## 10. GitHub ActionsのCI/CD
 
 GHAはAWS OIDCを使用し、AWS_ACCESS_KEY_ID等の長期キーをGitHub Secretsへ保存しない。audとsubを対象repository・environmentに限定し、実際のGitHub subject形式を確認する。2026年以降のimmutable subject形式を含め、推測したsubで構築しない。
+
+OIDCの接続先はAWSであり、Terraform自体ではない。GHAの`aws-actions/configure-aws-credentials`がGitHub発行のOIDC tokenでAWS STSの`AssumeRoleWithWebIdentity`を呼び、IAMロールの短期認証情報をrunnerへ設定する。runner上で動くTerraform CLIは、その認証情報をAWS providerによるリソース操作とS3 backendによるstateアクセスに使用する。HCP Terraformは使用せず、Terraformサービスへのログインは不要である。AWS認証なしで実行できるfmt等の静的検証にOIDCを要求しない。OIDCはTerraformの必須機能ではなく、今回のGHAからAWSへアクセスする認証方式として採用する。
 
 | workflow | 動作 |
 | --- | --- |
