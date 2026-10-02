@@ -97,15 +97,19 @@ HTTP APIにはAPIキーを利用者認証として追加しない。入力スキ
 
 Gatewayのstage/routeスロットリングは全体の保護であり、利用者ごとの厳密な上限やコスト上限ではない。認証済み所有者にはDynamoDBの条件付きカウンターで1分120リクエストの既定制限を設ける。時間窓と所有者ごとのキーを使用し、期限切れカウンターをTTLで清掃する。TTLの削除時刻を認証や制限解除の条件にはしない。Lambdaメモリ内のカウンターだけで分散した実行を制御しない。
 
+時間窓はサーバー時刻のUTC分境界で区切る固定窓とする。画像URL発行も含む認証対象のv2リクエストを数え、同じ所有者の全トークンで共有する。カウンターを条件付きで加算できた120件までを許可し、121件目以降は保存操作へ進まず429とcode `OWNER_RATE_LIMIT_EXCEEDED`を返す。`Retry-After`は次の分境界までの秒数を切り上げた整数で、最低1秒とする。固定窓は境界前後にリクエストが集中し得る方式であり、任意の連続60秒で120件という保証ではない。
+
+レート上限到達、カウンター処理自体の一時障害、保存容量上限は別の応答にする。カウンターへアクセスできない場合は制限を無視して保存せず503とする。クライアントの対処とGateway自身の429との差を§7で定義する。
+
 ## 5. DynamoDBの保存モデルと競合
 
 | テーブル | 内容 |
 | --- | --- |
 | reminders | ownerIdをpartition key、idをsort keyとする。属性、revision、日時、画像参照、削除状態を持つ |
 | identities | 所有者プロフィール、トークンハッシュ、所有者の件数・画像容量、レートカウンター、初回移行の公開状態。種類を区別したキーで保持する |
-| image_jobs | 画像ID、所有者、オブジェクトキー、versionId、状態、作成・更新時刻。未完了保存と不要画像を清掃できるよう追跡する |
+| image_jobs | 画像IDをpartition key `jobId`とし、所有者、オブジェクトキー、versionId、状態、作成・更新時刻を保持する。期限検索用のsparse GSI `cleanup_by_due`を持つ |
 
-画像そのものやBASE64をDynamoDBへ保存しない。画像の参照はS3のkey、versionId、MIME、デコード後サイズ、SHA-256を持つ。ユーザー入力のURLをS3キーにせず、サーバーが所有者IDと乱数から生成する。
+画像そのものやBASE64をDynamoDBへ保存しない。画像の参照はimageId、S3のkey、versionId、MIME、デコード後サイズ、SHA-256を持つ。ユーザー入力のURLをS3キーにせず、サーバーが所有者IDと乱数から生成する。
 
 作成はattribute_not_exists条件、更新は存在・有効状態・revision一致の条件で保護する。revisionは1から開始する。古いrevisionを自動的に上書きしない。GetItemと一覧のベーステーブルQueryはConsistentReadを使用し、通常APIにScanを使用しない。
 
@@ -114,6 +118,16 @@ Gatewayのstage/routeスロットリングは全体の保護であり、利用�
 削除はrevisionを照合し、内容と画像参照を除去してid・ownerId・revision・deletedAtだけを残す。削除済みIDの再利用を拒否する。これは古いクライアントの再送による復活を防ぐための記録で、削除復元APIではない。
 
 一覧はidの順序でQueryする。削除記録は応答から除外するが、評価したキーを含むLastEvaluatedKeyをカーソルへ反映する。空のitemsとnextCursorが同時に返る場合もクライアントがページングを継続できる契約にする。1回の読み取り量を制限し、削除記録を飛ばすための無制限なQueryループをしない。複数ページ全体のスナップショットは保証しない。
+
+### 画像清掃の検索キー
+
+`cleanup_by_due`はpartition key `cleanupPartition`、sort key `cleanupSortKey`、projection `KEYS_ONLY`とする。pending・retired・deletingのjobだけに両属性を持たせ、committed・doneからは除去する。`cleanupPartition`は`<state>#<shard>`で、shardは画像IDのSHA-256から決める00〜03の4分割とする。`cleanupSortKey`は13桁にゼロ埋めした期限のepoch millisecondsと画像IDを`#`で連結する。キーの生成方法は共通関数として固定する。
+
+pendingの期限は作成から24時間後、retiredの期限は**retiredへ移した時刻から24時間後**とする。deletingの期限は20分の処理leaseの満了時刻とし、中断した清掃を拾う。状態と索引属性の変更は同じベース項目の書き込みで行い、画像commit等のトランザクションに含める。
+
+清掃CLIは12個のstate/shardについて、partitionの等価条件と`cleanupSortKey < <今回開始時刻を13桁化>#~`のKeyConditionExpressionでQueryする。画像IDはサーバー生成のASCII UUIDに限定するため、同じmillisecondのIDもこの上限で取得できる。GSIの読み取りは結果整合性であり、候補取得だけで削除を決定しない。primary itemの現在状態・期限・leaseを条件付き書き込みで再確認する。通常の清掃にテーブルScanやS3バケット全体の列挙を使用しない。
+
+1ページのLimitは50候補。各partitionを1ページずつround-robinで巡回し、大量のpendingによってretired/deletingが後回しになり続けることを防ぐ。巡回位置と、全候補の処理・条件不一致による見送りを終えたページのLastEvaluatedKeyだけを、state/shardごとに清掃checkpointへ保存する。ページ途中で終了した場合はそのページの開始cursorを保持して再取得し、未処理候補を飛ばさない。再取得で既処理候補が見えても状態条件で見送る。checkpointはimage_jobs内の専用項目に置き、GSIのキーを付けない。末尾へ到達したpartitionはその実行では終了とし、全12個が終了したら清掃を終える。末尾まで進んだcursorは次の実行でリセットし、索引への遅延反映や過去期限の新しい候補も取得する。空のQueryを繰り返して実行時間を使い切らない。checkpoint更新も保守ロールの限定権限に含める。
 
 ## 6. 画像保存・取得・失敗時の整合性
 
@@ -131,7 +145,11 @@ Gatewayのstage/routeスロットリングは全体の保護であり、利用�
 
 S3とDynamoDBを跨ぐトランザクションは存在しない。そのため「完全に同時に保存される」と説明しない。クライアントに見える参照の切り替えはDynamoDBの成功時のみ行い、S3だけ成功した状態を追跡・清掃する。
 
-image_jobsはpending、committed、retired、deleting、doneを区別する。GHAの定期保守ジョブが24時間以上経過したpendingとretiredを清掃する。条件付きでdeletingへ移し、APIの画像commit条件はpendingと一致しなければ失敗する。これにより清掃中の画像が新しく参照されない。再実行できる処理とし、Lambdaのreturn後に未awaitの清掃を続ける設計にしない。
+image_jobsはpending、committed、retired、deleting、doneを区別する。GHAの定期保守ジョブが§5のGSIから期限を過ぎたpending・retiredとlease切れのdeletingを取得する。条件付きでdeletingへ移し、実行IDと20分のleaseを記録する。APIの画像commit条件はpendingと一致しなければ失敗する。これにより清掃中の画像が新しく参照されない。完了への更新にも実行ID・状態の条件を付ける。再実行できる処理とし、Lambdaのreturn後に未awaitの清掃を続ける設計にしない。
+
+CLIの1回の上限は評価した候補10,000件、S3削除操作5,000件、経過10分のいずれかを満たすまでとし、並行処理は最大4件とする。上限到達ではcheckpointと未処理ありの結果を記録し、次の日次実行または手動実行へ継続する。これらは清掃の完了時間を保証する値ではなく、未処理の長期滞留を監視して頻度・上限を調整する。GHAも環境ごとに清掃を直列化する。
+
+削除操作は§8と同じく固有キーへのdelete markerの作成とし、復旧期間内の画像versionを清掃CLIから永久削除しない。再実行時はそのキーの状態を照合し、既にmarkerがある場合もdoneへ収束させる。非現行versionの期限切れは60日保持のLifecycleで扱う。10分の期限に達する前に新しい処理の開始を止め、実行中のAWS操作を短い期限で終了させてcheckpointを保存する。
 
 追跡レコードがversionIdを記録する前に保存処理が停止した場合は、清掃CLIが生成済みキーを照合して処理する。通常の利用者が任意のS3キーを清掃対象に指定できないようにする。
 
@@ -139,10 +157,13 @@ image_jobsはpending、committed、retired、deleting、doneを区別する。GH
 
 取得は、認証済みAPIが現在参照する画像だけにS3のGET署名付きURLを発行し、クライアントがS3から取得する案を推奨する。URLの要求有効期間は15分とし、実際には署名元の短期AWS認証の有効期限によって短くなる場合も扱う。URLをDBやログに保存しない。
 
-リマインダーのJSONは画像の属性、取得URL、再取得の目安となる期限を持つ。取得URLは一時的な表示情報であり、永続IDではない。クライアントはowner/id/revisionを永続化し、URLが期限切れならAPIから現在の取得情報を再取得する。
+リマインダー本体のJSONは永続する画像IDと属性だけを持つ。短期URLは別の認証対象エンドポイント`GET /v2/reminders/{id}/thumbnail-url`から発行し、`url`、`expiresAt`、`imageId`、`revision`を返す。URL発行はリマインダーのrevisionを更新しない。この応答には`Cache-Control: no-store`を付け、本体のETagを流用しない。`expiresAt`は要求有効期間の終了目安であり、署名元認証の期限等による早期失敗もクライアントが扱う。
+
+URL発行時は所有者の現在の項目を強い整合性で読み、現在参照するkey/versionIdだけを署名する。項目が存在しない・削除済みなら404 `REMINDER_NOT_FOUND`、画像なしなら404 `THUMBNAIL_NOT_FOUND`とする。クライアントは返されたimageId/revisionと手元のメタデータを照合し、異なる場合は本体を更新してから表示を切り替える。取得URLは永続IDではなく、クライアントはowner/id/revision/imageIdと必要な画像バイト列を永続化する。URL期限切れ時はこの専用APIで再発行する。
 
 - 画像の読み込み済み表示がURL期限で直ちに消えるとは限らないが、再読み込みや新しい取得は失敗し得る。
 - オフライン表示にはURLではなく、取得した画像バイト列をクライアント側に保存する。
+- 同じimageId/checksumの取得済みバイト列は再利用し、未取得画像だけを必要時に取得する。一覧から全画像のURLを無条件に一斉発行しない。
 - 画像取得失敗時は認証を確認し、一度APIから再取得してから画像取得を再試行する。失敗を無限に再試行しない。
 - URLはそれを知る者が期限内にアクセスできる情報として扱う。トークン失効後も発行済みURLが短期間有効であり得ることを文書化する。
 - 通常の画像削除後も、versionIdを含む発行済みURLが期限まで取得できる場合がある。短期URLを即時失効と同じものとは扱わない。
@@ -153,8 +174,9 @@ image_jobsはpending、committed、retired、deleting、doneを区別する。GH
 
 | メソッド・パス | 動作 |
 | --- | --- |
-| GET /v2/reminders | items、nextCursorを返す。既定20件、最大50件。画像は取得情報を返す |
-| GET /v2/reminders/{id} | 現在の項目と画像取得情報、revision、ETag |
+| GET /v2/reminders | items、nextCursorを返す。既定20件、最大50件。画像は永続メタデータだけを返す |
+| GET /v2/reminders/{id} | 現在の項目と画像メタデータ、revision、強いETag |
+| GET /v2/reminders/{id}/thumbnail-url | 現在の画像の短期URLを発行。200、url・expiresAt・imageId・revision。no-store、本体のETagなし |
 | POST /v2/reminders | クライアント指定IDで1件作成。201、Location、作成結果、ETag |
 | PATCH /v2/reminders/{id} | If-Match必須で部分更新。200、更新結果、ETag |
 | DELETE /v2/reminders/{id} | If-Match必須で削除記録へ変更。200、id・deleted・revision |
@@ -163,11 +185,23 @@ image_jobsはpending、committed、retired、deleting、doneを区別する。GH
 
 旧POST/PUT /remindersは410と移行先を返し、旧一覧上書きを実行しない。v2と旧APIの互換期間は設けない。
 
-項目のid、url、title、reminderTime、autoOpen、webPush、createdAt、hiddenを維持し、updatedAtとrevisionを追加する。読み取りのthumbnailは、画像なしならnull、画像ありならurl、expiresAt、mime、bytes、sha256を持つオブジェクトとする。書き込みのthumbnailはBASE64/data URLの文字列とし、空文字列またはnullを画像なしにする。読み取りDTOと書き込みDTOを別に定義し、取得結果の全項目をそのままPATCHへ送らない。
+項目のid、url、title、reminderTime、autoOpen、webPush、createdAt、hiddenを維持し、updatedAtとrevisionを追加する。読み取りのthumbnailは、画像なしならnull、画像ありならimageId、mime、bytes、sha256を持つオブジェクトとする。取得URL・expiresAt・S3のkey/versionIdは本体へ含めない。書き込みのthumbnailはBASE64/data URLの文字列とし、空文字列またはnullを画像なしにする。読み取りDTOと書き込みDTOを別に定義し、取得結果の全項目をそのままPATCHへ送らない。
 
 新規作成のcreatedAt/updatedAtはサーバーが決定し、id、url、title、reminderTime、autoOpen、webPush、hiddenと画像入力を検証する。readonly項目や未知のフィールドを拒否する。PATCHは変更可能なフィールドが最低1つ必要である。
 
-ETagはrevisionを引用符で囲んだ値とする。If-Matchは単一の強いETagのみ受け付ける。欠落428、不一致412、存在しない項目404、IDの二重作成・再利用409、型・スキーマ違反422、壊れたJSON400、対応しないメディア型415、容量超過413、過負荷・一時障害503を使う。
+項目のGET/POST/PATCHは共通のserializerで同じUTF-8 JSON本体を生成し、フィールド順・日時表記・nullの扱いを固定する。現在時刻、URL期限、requestIdを本体へ混ぜない。強いETagは`"r<revision>-<JSON本体のSHA-256 hex>"`とする。revisionを変更する更新と表現バイト列の変化を両方検出でき、デプロイでserializerが変わった場合にも同じETagで異なるJSONを返さない。JSONはidentityのcontent codingで返し、`Cache-Control: private, no-store, no-transform`を付ける。一覧全体や画像URL応答に項目のETagを流用しない。
+
+If-Matchは単一の強いETagのみ受け付け、弱いETag・`*`・リスト形式は拒否する。サーバーは現在の項目からETag全体を照合し、そのrevisionをDynamoDBの書き込み条件にも使う。クライアントはETagを不透明な値として保存し、revisionから自作しない。一覧から更新する場合は項目GETでETagを取得する。欠落428、不一致412、存在しない項目404、IDの二重作成・再利用409、型・スキーマ違反422、壊れたJSON400、対応しないメディア型415、容量超過413、所有者レート超過429、過負荷・一時障害503を使う。
+
+| 状況 | ステータス・code | ヘッダーとクライアントの対処 |
+| --- | --- | --- |
+| 所有者の分単位上限到達 | 429 `OWNER_RATE_LIMIT_EXCEEDED` | `Retry-After: <整数秒>`必須。指定秒数とjitterを待ち、回数を制限して再試行する |
+| 所有者の件数・画像合計上限 | 413 `OWNER_STORAGE_LIMIT_EXCEEDED` | 自動再試行をせず、既存データ整理または保存内容の変更を案内する |
+| 単体の本文・画像サイズ上限 | 413 `PAYLOAD_TOO_LARGE` / `THUMBNAIL_TOO_LARGE` | 入力を減らす。待機だけでは解消しない |
+| 保存先・カウンター等の一時障害 | 503 `SERVICE_UNAVAILABLE` | 回数制限付きbackoff。書き込み結果不明時は先に項目を再取得して照合する |
+| Gatewayのstage/route上限到達 | 429、Gatewayのエラー形式 | アプリのcodeやRetry-Afterを保証しない。ヘッダーがなければ回数制限付きbackoffを使う |
+
+所有者429の本文は共通のcode・message・requestIdに`retryAfterSeconds`を追加する。Retry-Afterと同じ秒数とし、保存容量や認証情報を露出しない。レート解除後も古いETagでの更新が412になる場合は最新項目を取得し、競合を処理する。
 
 本文はapplication/jsonのみ受け付ける。JSONエラーは分類したcode、message、requestIdを持ち、入力の実値・SQL・AWS内部エラーを返さない。HTTP API自身が生成する認証失敗・スロットリング・サイズ超過の応答はLambdaのJSON形式と異なり得るため、Gatewayのステータスとエラー形式もクライアント契約に記載する。全ての障害がアプリ独自形式になるとは保証しない。
 
@@ -175,7 +209,7 @@ APIのJSON上限は2 MiB、画像はデコード後1 MiB/項目、所有者は�
 
 idは空でない制御文字なしの最大128文字、URLはhttp/httpsで最大4096文字、タイトルは最大1024文字とする。真偽値の文字列や数値への型強制変換をしない。reminderTimeは実在する日時でZまたはUTCオフセット必須とし、UTCへ正規化する。過去のリマインダーも保存・移行できる。
 
-CORSはAPI Gatewayに集約し、完全なorigin一覧、必要なGET/POST/PATCH/DELETE/OPTIONS、Authorization/Content-Type/If-Match、公開するETag/Location/X-Request-Idを設定する。credentialsは無効とする。HTTP APIが未許可originを自動で403にするとは扱わず、CORSのブラウザー制御と認証を区別する。S3の画像GETにも必要なoriginだけのCORSを設定する。OPTIONSはAuthorizerを通さず、CORS応答の振る舞いをAWSで検証する。
+CORSはAPI Gatewayに集約し、完全なorigin一覧、必要なGET/POST/PATCH/DELETE/OPTIONS、Authorization/Content-Type/If-Match、公開するETag/Location/X-Request-Id/Retry-Afterを設定する。credentialsは無効とする。HTTP APIが未許可originを自動で403にするとは扱わず、CORSのブラウザー制御と認証を区別する。S3の画像GETにも必要なoriginだけのCORSを設定する。OPTIONSはAuthorizerを通さず、CORS応答の振る舞いをAWSで検証する。
 
 ## 8. 初回JSON移行と復旧
 
@@ -193,7 +227,7 @@ CORSはAPI Gatewayに集約し、完全なorigin一覧、必要なGET/POST/PATCH
 
 DynamoDBはPITRを有効化し、復旧期間を35日とする。S3はversioningで各参照のversionIdを保持し、不要画像はdelete markerによって現行取得から外す。非現行画像バージョンは60日保持し、復旧期間より先に削除しない。使用中の現行オブジェクトを経過日数だけで期限切れにしない。
 
-PITRはS3と同一時点の原子的なバックアップではない。復旧は新しいDynamoDBテーブルへ行い、画像versionId、所有者、トークン、件数・容量、未完了画像処理を照合してから参照先を切り替える。トークン失効状態も復元されるため、必要な失効を再適用する。Terraform state復旧、アプリのイメージ切り戻し、利用者データの復旧は別の手順とする。
+PITRはS3と同一時点の原子的なバックアップではない。復旧は新しいDynamoDBテーブルへ行い、画像versionId、所有者、トークン、件数・容量、未完了画像処理を照合してから参照先を切り替える。復旧先が参照する非現行versionは元バイト列のまま新しい固有キーの現行versionへコピーし、復旧先の参照とjobを更新してLifecycleの期限切れ対象から外す。トークン失効状態も復元されるため、必要な失効を再適用する。Terraform state復旧、アプリのイメージ切り戻し、利用者データの復旧は別の手順とする。
 
 ## 9. Terraformの責務と初期構築
 
@@ -215,6 +249,16 @@ TerraformとAWS providerのバージョン制約、.terraform.lock.hclを管理�
 
 データテーブルとS3バケットは削除保護・prevent_destroyを設定し、S3 force_destroyは無効にする。通常のCI/CDにterraform destroyを含めない。これは全ての削除経路を防ぐ万能の保証ではなく、意図しない変更を計画段階で止めるための境界である。
 
+### 公開URLの維持条件と置換防止
+
+環境ごとにHTTP APIを1つ保持し、stage名は`$default`に固定する。公開ベースURLは`https://<api-id>.execute-api.<region>.amazonaws.com`となる。URLが維持される条件は、同じAPI ID・リージョン・stage・有効なexecute-api endpointを保持することである。ルート・integration・Lambda aliasの通常更新は既存APIへ適用する。APIの削除・再作成や別リージョンへの移転では新しいURLとなり、アプリ名を同じにしても元のID/URLは復元できない。[HTTP APIのstageとURL](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-stages.html)
+
+productionの`aws_apigatewayv2_api`と`aws_apigatewayv2_stage`に`lifecycle.prevent_destroy = true`を設定する。API本体へcreate_before_destroyを付けて置換してもURLは引き継げない。Terraformのresource/moduleアドレス整理はmoved blockを使い、既存APIを管理へ取り込む場合は明示的なimportで実体を維持する。
+
+prevent_destroyは設定ブロックそのものを削除すると保護がなくなる。そのためGHAは保存したplanのJSONを非公開の処理内で検査し、production APIまたはstageのresource_changesに`delete`を含むactionsがあれば、削除のみ・置換順序の両方を拒否してapplyしない。既存URLと計画後outputの差も確認し、通常リリースでのURL変更を止める。運用中URLがあるのに計画後URLがunknownなら、一致を確認できたものと扱わず通常昇格を止める。新規環境の初回作成は既存URLなしとして区別する。plan検査は§10のproduction昇格条件とする。[Terraform lifecycleの制約](https://developer.hashicorp.com/terraform/language/meta-arguments/lifecycle)
+
+置換が必要な変更は通常リリースから分け、旧・新URL、クライアント設定の更新、並行提供期間、移行後の廃止を具体化して別途レビューする。独自ドメインを採用しない初期構成では、任意のAPI置換後も同じ公開URLを保証することはできない。
+
 ## 10. GitHub ActionsのCI/CD
 
 GHAはAWS OIDCを使用し、AWS_ACCESS_KEY_ID等の長期キーをGitHub Secretsへ保存しない。audとsubを対象repository・environmentに限定し、実際のGitHub subject形式を確認する。2026年以降のimmutable subject形式を含め、推測したsubで構築しない。
@@ -232,6 +276,8 @@ untrustedなPRやforkのコードへAWSのデプロイ権限を渡さない。pu
 permissionsはcontents: readを基本とし、AWS認証のjobだけid-token: writeを付ける。外部Actionsを確認済みSHAで固定する。環境ごとにconcurrency groupを使用し、進行中のapplyを新しい実行で途中キャンセルしない。S3 stateロックも有効にする。
 
 productionにはGitHub Environmentのブランチ制限を設定する。利用できる場合は承認規則も設定する。手動リリースに選ぶdigestとplanをレビュー可能にし、保存したplanを同じworkflowのapplyで使用する。planは短い保持期間の非公開artifactとして扱う。main pushだけでproductionへの破壊的変更を実行する構成にはしない。
+
+production applyの前に§9のAPI/stage削除・置換と公開URL変更の検査を必須にし、検査した同じplanだけをapplyする。plan JSONを公開ログへ出さず、検査結果は対象resourceアドレスと変更種別に限定して記録する。
 
 AWSへの初回bootstrapと実際のデプロイは、リポジトリ内の設計・コード・planがレビュー可能になった後の別操作である。この設計段階のツールからGHAやAWSへ実行を送らない。
 
@@ -267,15 +313,35 @@ ECRの保持・清掃は、現在のaliasと切り戻し対象versionが参照�
 
 アプリの切り戻しは既知の前digestをTerraformへ指定し、version/aliasを更新する。データの削除やテーブル復元を通常のアプリ切り戻しに含めない。schema・APIの変更は、保持する旧versionが既存データを扱える互換性を検証し、破壊的変更は通常デプロイに混ぜない。
 
+切り戻しでも§9の同じAPI ID・リージョン・`$default` stageを保持する。公開URLをTerraform outputと運用台帳に記録し、デプロイ・切り戻しのsmokeで一致を確認する。API本体を削除した後は前のイメージやstateを戻すだけでは以前のURLを復元できず、URL移行として扱う。
+
 CloudWatchはLambdaとAPI Gatewayのログ、エラー、スロットリング、duration、DynamoDBの失敗、画像清掃の未完了数を扱う。ログ保持は30日、構造化JSONでrequestIdとLambda requestIdを対応づける。Bearer、署名付きURL、本文、画像、旧key、AWS認証をログへ含めない。
 
-初期アラームはAPIの5xx/Lambda error・throttle、処理時間p95が2秒を超える状態、日次清掃の失敗・未完了を対象とする。少数の呼び出しでのduration評価や無通信期間を誤検知しないよう、期間とmissing dataの扱いを設定する。CloudWatchアラームを作ることとメール通知が届くことは別であり、SNS等の通知先は追加要件として扱う。
+初期アラームは環境ごとに8個の標準解像度・単一メトリクスのアラームとする。対象はGateway 5xx、API Lambda error/throttle、Authorizer error/throttle、API duration p95が2秒を超える状態、日次清掃の失敗、日次清掃の未完了である。清掃の2指標だけを独自メトリクスとして日次実行で発行し、ownerId/imageId等のdimensionを付けてメトリクス数を増やさない。未完了数は処理上限下で確認できた下限値と未処理ありのフラグを区別し、全テーブルの正確な残件数と表示しない。
+
+少数の呼び出しでのduration評価や無通信期間を誤検知しないよう、期間とmissing dataの扱いを設定する。清掃指標は日次発行に合った期間で評価し、実行されなかった場合も把握できるようにする。API Gatewayのroute別詳細メトリクスは初期状態で無効とする。CloudWatchアラームを作ることとメール通知が届くことは別であり、SNS等の通知先は追加要件として扱う。
 
 LambdaのSDK clientは実行環境で再利用するが、利用者の状態・カウンターをメモリだけに保存しない。全ての必要な保存と追跡記録をawaitしてから応答し、実行環境のfreeze後もバックグラウンド処理が継続するとは期待しない。残り実行時間を確認して外部操作の期限を設ける。
 
 本番のdocker-composeは不要になる。ルートComposeを残す場合は、Lambda Runtime Interface Emulator、DynamoDB Localなどのローカル検証用途だけとし、本番の永続化・TLS手順として案内しない。.devcontainerは変更しない。ローカルテストの模擬S3だけでIAM、署名、Gatewayの動作を検証済みとは扱わず、dev環境のsmokeに実サービスでの確認を含める。
 
-課金の主な要因はLambdaの回数・duration、Authorizer、DynamoDBの読み書きとPITR、S3の画像・旧version・リクエスト・転送、CloudWatchのログ、ECRの保存と検査である。VPC/NATやProvisioned Concurrencyは初期構成に追加しない。利用量が不明なため、月額や単価を推測して保証しない。
+### この構成の費用試算
+
+Authorizer TTL 0では、正常な認証対象APIが月100万回ならAuthorizerを含むLambda呼び出しは約200万回になる。画像URL発行と、If-Match取得のための項目GETもAPI回数に含める。DynamoDBはトランザクション内の各項目が通常の2倍の容量を使うため、所有者カウンター・画像jobを含む項目数とGSIへの書き込みも見積もる。認証の強い読み取り、毎回のレートカウンター、公開状態の読み取り、PITR、旧画像version、清掃、ログ、アラーム、devを除外した金額をこの構成の月額として使用しない。
+
+リージョン未指定のため、公式料金例を確認できた**US East (N. Virginia)の参考モデル**を置く。東京リージョンの単価とは扱わない。30日/月、1 USD = 150円という説明用の換算、税別、無料枠・クレジットを差し引かない比較である。API平均課金時間300 ms/512 MiB、Authorizer100 ms/256 MiB、画像平均100 KiB、取得0.5回/API、画像変更0.05回/APIを仮定する。devのリクエスト・保存量はproductionの10%だが、アラーム等は独立して維持する。
+
+| productionの認証対象API/月 | production USD | dev USD | 共通ECR・state等 USD | 合計USD | 合計円・税別 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1万回 | $1.0554 | $0.8615 | $0.2977 | $2.2146 | 約332円 |
+| 10万回 | $2.6286 | $1.0189 | $0.2977 | $3.9452 | 約592円 |
+| 100万回 | $16.5364 | $2.4096 | $0.2977 | $19.2437 | 約2,887円 |
+
+平均保存量はproductionの有効画像1/5/20 GB、DynamoDBベース3表0.1/0.5/2 GBとし、GSI等、PITR、画像旧version60日分と清掃待ち24時間分を加える。DynamoDBの容量係数は平均6 RRU + 4 WRU/APIの予算モデルで、実際の消費容量や最悪値を保証しない。[単価・全前提・計算式・内訳](../../aws-cost-estimate-2026-10-02.md)に無料枠の条件と未算入項目も記載する。
+
+インターネット転送100 GB/月の無償枠をこのシステムに全て割り当てられる場合、転送分だけを差し引いた同条件の合計は約311/503/2,122円になる。他サービスと共有する枠をdevとproductionで二重に差し引かない。Lambda等の無料枠・クレジットは別途評価する。以前の「月約20／60／380円」はこの設計の試算として流用しない。
+
+構築先リージョンが決まったら地域別単価へ更新し、devの実測でduration・ConsumedCapacity・画像version・転送・ログ・ECRを再計算する。GHAの有料実行時間・artifact、復旧・初回移行、追加KMS/通知/検査等はこの通常月の表へ含めていない。VPC/NATやProvisioned Concurrencyは初期構成に追加しない。示した金額を実請求や費用上限の保証とは扱わない。
 
 ## 13. 品質・依存・文書・秘密情報
 
@@ -344,17 +410,22 @@ CLAUDE.mdを新規作成し、AGENTS.mdの既存symlinkを維持してリンク�
 ## 15. 検証・受け入れ条件
 
 - API: 必須値、型、未知フィールド、メディア型、日時、BASE64、MIME、サイズ、空一覧、cursor、ETag、If-Match、旧API410を検証する。
+- ETag: 同revisionの項目を繰り返しGETした本文と強いETagの一致、画像URL再発行後も本体が不変であること、本文の表現が変わればETagが変わること、弱いETagで更新できないことを検証する。
 - 所有者: 不正・失効トークン、別所有者、context欠落、直接invoke、画像URLの発行対象を検証する。
+- レート: 同じ所有者の複数トークンを使った並行120件の上限、121件目の429/code/Retry-After、UTC分境界、カウンター障害時503、容量413との区別、CORSによるRetry-After公開を検証する。
 - 競合: 同revisionの同時更新で1件だけ成功、別項目保持、二重作成、削除後の復活防止、カウンター整合を検証する。
 - 画像: 元のバイト列・checksum一致、S3成功後のDynamoDB失敗、timeout、不明なcommit結果、清掃とcommitの競合を検証する。
+- 清掃: GSIへの遅延反映、retiredから24時間の猶予、期限検索と公平な巡回、複数ページ・ページ途中の再開、候補/削除/時間の上限、lease切れの再開、commit済み画像を削除しないこと、delete markerと60日保持の整合を検証する。
 - URL: 期限切れ時の再発行、S3 CORS、発行済みURLと失効・削除の関係を確認する。クライアントのオフライン処理は要求仕様として明示し、未実装のまま検証済みと言わない。
 - 移行: 複数所有者、空一覧、特殊キー、壊れた入力、バッチ途中失敗、再開、公開gate、原本不変、画像一致を合成データで検証する。
 - 復旧: dev環境でPITR等から新テーブルへ復元し、S3 versionId、トークン、カウンター、画像jobを照合する。単に設定を有効にしただけで復元検証済みとは扱わない。
 - ビルド: npm ci、型、lint、test、esbuild、複数handler、ソースマップ、third-party notices、Lambda runtime emulatorを検証する。
 - IaC: fmt/validate、provider lock、計画の対象、state lock、IAM trust/PassRole/invoke範囲、画像・stateの非公開、削除保護、環境分離を確認する。
+- URL維持: API/stageのdelete-only・両順序のreplacement・設定ブロック削除を模擬planで拒否すること、初回作成とunknown outputの区別、moved/importによる実体の維持、通常更新・切り戻し後の公開URL一致を確認する。
 - CI/CD: ECR実digest、Lambda version/alias、dev smoke、同digest昇格、前digestへの切り戻し、applyの直列化、未信頼PRへの権限不付与を確認する。
 - 運用: CloudWatchのログ・保持・アラーム、秘密値を記録しないこと、清掃再実行、AWS上のtimeout/throttleを検証する。
 - 文書: 実行コマンドとAPI例、CLAUDE.md、AGENTS.md参照、AWSとローカルの違い、短期URL・データ復旧を照合する。
+- 費用: 認証APIの2倍のLambda回数、トランザクションの項目別容量、レートcounter・GSI・PITR・旧version・観測・devの算入、換算・合計、地域別単価と無料枠の条件を照合する。未実測の係数を実測値と表示しない。
 - 除外: git diffで.devcontainer配下の変更がないことを確認する。
 
 AWSで実行する検証は専用devリソースと合成データを使う。この段階の設計作業では実施しない。ローカルの模擬や計画レビューと、実AWSで確認済みという主張を分ける。権限・環境が未提供の検証は未実行として報告する。
@@ -370,17 +441,24 @@ AWS採用の指示に基づいてこの設計書をレビュー対象として�
 - [API Gateway: HTTP APIとREST API](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-vs-rest.html)
 - [API Gateway: Lambda Authorizer](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-lambda-authorizer.html)
 - [API Gateway: HTTP API throttling](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-throttling.html)
+- [API Gateway: HTTP APIのstageと公開URL](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-stages.html)
+- [RFC 9110: 強い検証子](https://www.rfc-editor.org/rfc/rfc9110.html#section-8.8.1)
+- [RFC 9110: If-Match](https://www.rfc-editor.org/rfc/rfc9110.html#section-13.1.1)
 - [Lambda: Node.jsコンテナ](https://docs.aws.amazon.com/lambda/latest/dg/nodejs-image.html)
 - [Lambda: 制限](https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html)
 - [Lambda: 実装の推奨事項](https://docs.aws.amazon.com/lambda/latest/dg/best-practices.html)
 - [DynamoDB: 大きな属性をS3へ分離](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-use-s3-too.html)
 - [DynamoDB: トランザクション](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/transaction-apis.html)
+- [DynamoDB: GSIと容量・整合性](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/GSI.html)
 - [DynamoDB: PITR](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Point-in-time-recovery.html)
 - [S3: 署名付きURLと有効期限](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html)
 - [S3: versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html)
 - [Terraform: S3 backendとロック](https://developer.hashicorp.com/terraform/language/backend/s3)
+- [Terraform: lifecycle/prevent_destroy](https://developer.hashicorp.com/terraform/language/meta-arguments/lifecycle)
+- [Terraform: planのJSON形式](https://developer.hashicorp.com/terraform/internals/json-format)
 - [Terraform AWS provider: Lambda](https://github.com/hashicorp/terraform-provider-aws/blob/main/website/docs/r/lambda_function.html.markdown)
 - [GitHub Actions: AWS OIDC](https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-in-aws)
 - [esbuild: Node.js向けバンドル](https://esbuild.github.io/getting-started/#bundling-for-node)
+- [この構成の費用試算・料金資料](../../aws-cost-estimate-2026-10-02.md)
 
 実装計画・実装時には対象版の公式仕様を再確認する。AWSアカウント・リージョンのquotaやGitHubの利用プランを、資料にある既定値だけで利用可能と判断しない。
