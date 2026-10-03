@@ -1,6 +1,6 @@
 # reminder-server AWS構成の費用試算
 
-確認日: 2026-10-03。対象: [AWS設計書](superpowers/specs/2026-10-02-reminder-server-aws-design.md)の**productionのみ・本人1人**の構成。Cognito、HTTP APIの標準JWT Authorizer、API/清掃Lambda、DynamoDBの3表と清掃GSI、S3、CloudWatch、ECR、Terraform state、EventBridge Schedulerを含める。常設dev環境、認証Lambda、GHAでの定期清掃は設けない。
+確認日: 2026-10-03。対象: [AWS設計書](superpowers/specs/2026-10-02-reminder-server-aws-design.md)の**productionのみ・本人1人**の構成。Cognito、HTTP APIの標準JWT Authorizer、API/清掃Lambda、DynamoDBの3表と清掃GSI、画像/配布ZIP用S3、CloudWatch、Terraform state、EventBridge Schedulerを含める。ZIPでLambdaへ配布するためECRを作らない。常設dev環境、認証Lambda、GHAでの定期清掃も設けない。
 
 これは入力条件を置いた参考モデルで、実請求・費用上限の保証ではない。リージョン未指定のため、公式資料の料金例を確認できた**US East (N. Virginia)、us-east-1**を参考にする。東京リージョンの試算ではない。地域別Price Listの直接取得は通信制限で実行できなかったため、構築先リージョン決定後にAWS Pricing CalculatorまたはPrice Listと実測で更新する。
 
@@ -54,9 +54,8 @@
 | 同保存・圧縮後 | $0.03 / GB-month | 同上 |
 | 標準アラーム・単一メトリクス | $0.10 / 月 | 同上 |
 | 独自メトリクス | $0.30 / 月、発行時間で按分 | 同上 |
-| ECR private保存 | $0.10 / GB-month | [ECR料金](https://aws.amazon.com/ecr/pricing/) |
 
-S3画像・stateはSSE-S3、DynamoDBは既定の暗号化とし、customer managed KMS keyを追加する場合の料金はこのモデルへ追加する。ECRはbasic scanningを前提とし、Inspectorによるenhanced scanningは別見積もりにする。S3 delete marker・旧versionは保存量に含め、清掃による容量の即時ゼロ化は仮定しない。
+S3画像・配布ZIP・stateはSSE-S3、DynamoDBは既定の暗号化とし、customer managed KMS keyを追加する場合の料金はこのモデルへ追加する。ZIPの依存監査・SBOMはCIで行い、ECRスキャンは使用しない。追加の有料検査サービスを使う場合は別見積もりにする。S3 delete marker・旧versionは保存量に含め、清掃による容量の即時ゼロ化は仮定しない。
 
 ## 3. 月額の結果
 
@@ -78,17 +77,23 @@ S3 requests     = (0.5 N + K) / 1,000 × 0.0004 + 0.05 N / 1,000 × 0.005
 観測            = 9 × 0.10 + 2 × 0.30 / 24 + 0.015 = 0.940/月
 ```
 
-共通費用はECR保存2 GB、state保存0.1 GB、state等のPUT/LIST 1,000回・GET 1,000回、GHA等へのECR転送1 GBの予算とする。API/清掃は同じイメージを使うため関数数でECR保存を二重計上しない。`2 × 0.10 + 0.1 × 0.023 + 0.005 + 0.0004 + 1 × 0.09 = $0.2977/月`。digestの保持数やrunner取得量が増えれば変わる。
+共通費用はstate保存0.1 GB・配布ZIP保存0.1 GB（旧版・SBOM等込み）、state等のPUT/LIST 1,000回・GET 1,000回、ZIP登録・確認/配布のPUT/LIST 100回・GET/HEAD 100回の予算とする。API/清掃は同じZIPを使い、成果物S3保存を二重計上しない。S3とLambdaは同一リージョンで、通常の配布にインターネットへのZIPダウンロードを含めない。`0.2 × 0.023 + 1,100/1,000 × 0.005 + 1,100/1,000 × 0.0004 = $0.01054/月`。ZIP保存量・操作数は実測前の予算であり、実際のZIPサイズやリリース回数、旧版保持数を保証しない。Lambda内の関数versionのコード保存quotaも別に確認する。
 
-| production API/月 | production USD | 共通ECR・state等 USD | 合計USD | 合計円・税別 | 転送無償枠も使える場合 |
+| production API/月 | production USD | 共通ZIP・state等 USD | 合計USD | 合計円・税別 | 転送無償枠も使える場合 |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 1万回 | $1.1440 | $0.2977 | $1.4417 | 約216円 | 約196円 |
-| 10万回 | $2.3643 | $0.2977 | $2.6620 | 約399円 | 約318円 |
-| 100万回 | $14.5669 | $0.2977 | $14.8646 | 約2,230円 | 約1,534円 |
+| 1万回 | $1.1440 | $0.0105 | $1.1546 | 約173円 | 約166円 |
+| 10万回 | $2.3643 | $0.0105 | $2.3748 | 約356円 | 約288円 |
+| 100万回 | $14.5669 | $0.0105 | $14.5774 | 約2,187円 | 約1,504円 |
 
 100万API/月のproduction内訳: API Lambda $2.7000、清掃Lambda $0.0150、HTTP API $1.0000、DynamoDB読み書き $3.0000、清掃DynamoDB $0.1693、DB保存/PITR $0.0500、画像保存 $0.2259、S3 requests $0.4700、転送 $4.5490、ログ $1.4477、観測 $0.9400、Cognito MAU $0.0000、Scheduler $0.0000。合計は丸め前の値から計算する。
 
-転送の共有100 GB/月無料枠をこのシステムに全て割り当てられる場合、共通ECR分を含む月間転送は順に約1.51/6.05/51.54 GBで、右端列では転送分だけを0とする。Lambda・CloudWatch・保存の無料枠や新規クレジットはさらに別途評価する。[AWSの転送無償枠と集計範囲](https://aws.amazon.com/blogs/aws/aws-free-tier-data-transfer-expansion-100-gb-from-regions-and-1-tb-from-amazon-cloudfront-per-month/)
+転送の共有100 GB/月無料枠をこのシステムに全て割り当てられる場合、画像/APIの月間転送は順に約0.51/5.05/50.54 GBで、右端列では転送分だけを0とする。Lambda・CloudWatch・保存の無料枠や新規クレジットはさらに別途評価する。[AWSの転送無償枠と集計範囲](https://aws.amazon.com/blogs/aws/aws-free-tier-data-transfer-expansion-100-gb-from-regions-and-1-tb-from-amazon-cloudfront-per-month/)
+
+### ZIP配布による差額
+
+前版と同じAPI・清掃・画像・ログの係数を維持し、共通費用だけを置き換える。前版はECR2 GB保存$0.20とECRから外部runnerへの転送1 GB$0.09を含む$0.2977/月。今回追加するZIPのS3保存0.1 GBとPUT/GET各100回は$0.00284/月で、state分は同じである。差額は`$0.2977 - $0.01054 = $0.28716/月`、1 USD = 150円なら約43円/月削減となる。外部ECR転送が元から転送無料枠で0だった比較では、差額は`$0.20 - $0.00284 = $0.19716/月`で約30円/月となる。これは旧試算の入力に対する比較で、ECRの実使用量や請求の予測ではない。
+
+ZIP化でLambdaのAPI回数・GB-sの単価が下がるとは扱わず、平均durationの係数は維持する。パッケージサイズ・起動時間が変わる効果は公開後に測定する。S3成果物保存・リリース操作や必要時の外部ダウンロードは別費用で、ECR料金を0にすることと配布の全費用を0にすることは別である。
 
 ### 失効確認方式の追加費用
 
@@ -108,8 +113,8 @@ AdminGetUserは`N × 0.5 GB × 0.1秒 × $0.0000166667`の仮定。Enabledの確
 
 清掃の平均60秒は料金用の予算入力で、空なら早く終わり、候補が多ければ増える。毎回600秒まで処理する月は清掃の実行時間部分が$0.1500/月となり、60秒モデルより約20円増える。Lambda timeout660秒の設定自体は660秒分の課金を意味しない。SchedulerとLambdaの再試行・手動実行・失敗アップロード・GSI遅延による再照合は別に増える。日次実行の待ち時間による追加24時間の画像滞留を仮定すると、保存費を`U/30 × $0.023`追加する（100万APIで約0.55円/月）。長期滞留ではさらに増える。
 
-GHAの有料実行時間・artifact、AWSサポート、独自ドメイン、SNS/SQS/DLQ等の追加サービス、WAF、VPC/NAT、Provisioned Concurrency、追加KMS key、enhanced scanning、Cognitoのメール/SMS・有料quota増加は含めない。初回JSON移行、PITR復元、一時復旧先、バックアップexport、運用調査は通常月と別見積もり。移行・復旧スクリプトの存在を常駐サービス料金として計上しない。
+GHAの有料実行時間・artifact、AWSサポート、独自ドメイン、SNS/SQS/DLQ等の追加サービス、WAF、VPC/NAT、Provisioned Concurrency、追加KMS key、有料の成果物検査、Cognitoのメール/SMS・有料quota増加は含めない。初回JSON移行、PITR復元、一時復旧先、バックアップexport、運用調査は通常月と別見積もり。移行・復旧スクリプトの存在を常駐サービス料金として計上しない。
 
 未認証の大量リクエスト、条件付き書き込みの拒否、transaction conflict、内部再試行、期限切れURLの連続取得も課金を増やし得る。スロットリング・所有者上限は費用の硬い上限ではない。平均画像100 KiBから1 MiBなら画像の転送・保存は約10.24倍で、BASE64入力のHTTP API単位も増える。
 
-production公開後にAPI/清掃のBilled Duration、Schedulerの試行回数、DynamoDB ConsumedCapacity（GSI込み）・3表/GSI保存量、画像version・滞留、転送、ログ圧縮率、メトリクス発行時間、ECR/GHA使用量を取得する。構築リージョンの単価で再計算し、以前の「月約20／60／380円」を流用しない。
+production公開後にAPI/清掃のBilled Duration、Schedulerの試行回数、DynamoDB ConsumedCapacity（GSI込み）・3表/GSI保存量、画像version・滞留、転送、ログ圧縮率、メトリクス発行時間、配布ZIP保存量・S3登録/取得回数・GHA使用量を取得する。構築リージョンの単価で再計算し、以前の「月約20／60／380円」を流用しない。
