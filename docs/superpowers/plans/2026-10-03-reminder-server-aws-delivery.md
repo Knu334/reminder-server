@@ -45,7 +45,7 @@ platform→applicationの入力はtable名/ARN・image bucket名/ARN・API/clean
 - [AWS Provider6.67.0 Cognito app client](https://github.com/hashicorp/terraform-provider-aws/blob/v6.67.0/website/docs/r/cognito_user_pool_client.html.markdown)
 - [Terraform1.16.5 release](https://releases.hashicorp.com/terraform/1.16.5/)
 
-### Task D01: esbuild・再現可能ZIP・展開後handler検証
+### Task 1: D01 — esbuild・再現可能ZIP・展開後handler検証
 
 **Files:** Create `scripts/build/bundle.ts`, `scripts/build/notices.ts`, `scripts/build/package.py`, `scripts/build/verify-zip.ts`, `tests/packaging/test_package.py`, `tests/delivery/bundle.test.ts`; Modify `package.json`, `package-lock.json`; Delete `tsup.config.ts`, `nodemon.json`, `Dockerfile`, `docker-compose.yml`。
 
@@ -68,7 +68,7 @@ platform→applicationの入力はtable名/ARN・image bucket名/ARN・API/clean
 - [ ] **Step 5: 検証する。** Run `npm run build`、`npm run package`、`npm run test:packaging`、`npm run verify:zip`、`npx tsx --test tests/delivery/bundle.test.ts` → PASS、5file+dist directory・両handler実行・hash一致を報告する。
 - [ ] **Step 6: `git add scripts/build tests/packaging tests/delivery/bundle.test.ts package.json package-lock.json tsup.config.ts nodemon.json Dockerfile docker-compose.yml` → `git commit -m "build: produce reproducible self-contained Lambda ZIP"`。**
 
-### Task D02: 条件付きS3登録と成果物識別子の照合
+### Task 2: D02 — 条件付きS3登録と成果物識別子の照合
 
 **Files:** Create `scripts/release/artifact.ts`, `tests/delivery/artifact.test.ts`; Modify `package.json`, `package-lock.json`。
 
@@ -89,7 +89,7 @@ platform→applicationの入力はtable名/ARN・image bucket名/ARN・API/clean
 - [ ] **Step 4: Run `npx tsx --test tests/delivery/artifact.test.ts`、`npm run typecheck` → PASS。** 元bytes違いと結果不明のnegative casesも確認する。
 - [ ] **Step 5: `git add scripts/release/artifact.ts tests/delivery/artifact.test.ts package.json package-lock.json` → `git commit -m "feat: register immutable checksum-verified release artifacts"`。**
 
-### Task D03: bootstrapのS3 state/成果物/OIDC基盤
+### Task 3: D03 — bootstrapのS3 state/成果物/OIDC基盤
 
 **Files:** Create `.terraform-version`, `infra/bootstrap/versions.tf`, `backend.tf`, `variables.tf`, `storage.tf`, `oidc.tf`, `outputs.tf`, `backend.hcl.example`, `terraform.tfvars.example`, `.terraform.lock.hcl`, `tests/bootstrap.tftest.hcl`（以上`infra/bootstrap/`配下）、`scripts/release/infra-check.ts`; Modify `package.json`。
 
@@ -111,7 +111,7 @@ platform→applicationの入力はtable名/ARN・image bucket名/ARN・API/clean
 - [ ] **Step 5: 検証する。** Run `terraform -chdir=infra/bootstrap validate`、同mock test、`terraform fmt -check -recursive infra/bootstrap` → PASS。AWS apply/state移行は行わない。
 - [ ] **Step 6: `git add .terraform-version infra/bootstrap scripts/release/infra-check.ts package.json` → `git commit -m "infra: define private state artifact storage and GitHub OIDC"`。**
 
-### Task D04: productionのCognito・保存・実行role・ログ
+### Task 4: D04 — productionのCognito・保存・実行role・ログ
 
 **Files:** Create `infra/platform/production/versions.tf`, `backend.tf`, `variables.tf`, `cognito.tf`, `storage.tf`, `iam.tf`, `logs.tf`, `outputs.tf`, `backend.hcl.example`, `terraform.tfvars.example`, `.terraform.lock.hcl`, `tests/platform.tftest.hcl`。
 
@@ -132,7 +132,7 @@ platform→applicationの入力はtable名/ARN・image bucket名/ARN・API/clean
 - [ ] **Step 4: Run `terraform -chdir=infra/platform/production providers lock -platform=linux_amd64 -platform=linux_arm64`、`terraform -chdir=infra/platform/production validate`、`terraform -chdir=infra/platform/production test -filter=tests/platform.tftest.hcl`、`terraform fmt -check -recursive infra/platform/production` → PASS。** issuer/client/domainだけをoutputし、username/password/tokenをstateへ持ち込まないことを確認する。運用者用の移行/復旧に必要な短期権限はdocsで区別し、API/GHA roleへ追加しない。
 - [ ] **Step 5: `git add infra/platform/production` → `git commit -m "infra: define production Cognito persistence and least-privilege runtime roles"`。**
 
-### Task D05: ZIP Lambda・JWT Gateway・Scheduler・9アラーム
+### Task 5: D05 — ZIP Lambda・JWT Gateway・Scheduler・9アラーム
 
 **Files:** Create `infra/application/production/versions.tf`, `backend.tf`, `variables.tf`, `lambda.tf`, `gateway.tf`, `scheduler.tf`, `monitoring.tf`, `outputs.tf`, `backend.hcl.example`, `terraform.tfvars.example`, `.terraform.lock.hcl`, `tests/application.tftest.hcl`。
 
@@ -154,7 +154,7 @@ platform→applicationの入力はtable名/ARN・image bucket名/ARN・API/clean
 - [ ] **Step 5: 検証する。** Run `npm run infra:check` → 3rootのfmt/validate/mock PASS。
 - [ ] **Step 6: `git add infra/application/production` → `git commit -m "infra: wire ZIP handlers JWT API and scheduled cleanup monitoring"`。**
 
-### Task D06: planのURL/認証保護・保存済みplan同一性・リリース照合
+### Task 6: D06 — planのURL/認証保護・保存済みplan同一性・リリース照合
 
 **Files:** Create `scripts/release/plan-guard.ts`, `scripts/release/verify-release.ts`, `scripts/release/smoke.ts`, `tests/delivery/plan-guard.test.ts`, `tests/delivery/release.test.ts`, `tests/fixtures/synthetic/plans/`; Modify `package.json`, `package-lock.json`。
 
@@ -180,7 +180,7 @@ platform→applicationの入力はtable名/ARN・image bucket名/ARN・API/clean
 - [ ] **Step 5: 検証する。** Run `npx tsx --test tests/delivery/plan-guard.test.ts tests/delivery/release.test.ts`、`npm run typecheck` → PASS。
 - [ ] **Step 6: `git add scripts/release tests/delivery/plan-guard.test.ts tests/delivery/release.test.ts tests/fixtures/synthetic/plans package.json package-lock.json` → `git commit -m "feat: protect production plans and verify deployed release identity"`。**
 
-### Task D07: AWS権限を持たないPR CIと保護された手動リリース
+### Task 7: D07 — AWS権限を持たないPR CIと保護された手動リリース
 
 **Files:** Create `.github/workflows/ci.yml`, `.github/workflows/deploy.yml`, `.github/dependabot.yml`, `tests/delivery/workflows.test.ts`, `docs/operations/deployment.md`; Delete `.github/workflows/docker-compose-build.yml`; Modify `package.json`, `package-lock.json`。
 
@@ -204,7 +204,7 @@ applicationのZIP build/登録jobはpreview時だけ実行する。apply=trueの
 - [ ] **Step 5: 検証する。** Run `npm run test:delivery`、`npm run lint`、`npm run infra:check` → PASS。GHAを起動しない。
 - [ ] **Step 6: `git add .github tests/delivery/workflows.test.ts docs/operations/deployment.md package.json package-lock.json` → `git commit -m "ci: validate ZIP releases and gate Terraform production delivery"`。**
 
-### Task D08: 秘密ファイル規則・README/CLAUDE/AGENTS・最終受け入れ資料
+### Task 8: D08 — 秘密ファイル規則・README/CLAUDE/AGENTS・最終受け入れ資料
 
 **Files:** Create `CLAUDE.md`, `.env.example`, `docs/operations/cleanup.md`, `docs/operations/acceptance.md`, `docs/implementation-results.md`, `tests/delivery/secret-rules.test.ts`; Modify `README.md`, `.gitignore`, `.claude/settings.json`, `.claude/hooks/check-bash-command.sh`, `.codex/config.toml`, `.codex/hooks/check-bash-command.sh`, `docs/chrome-extension-cognito-auth.md`, `docs/aws-cost-estimate-2026-10-02.md`。AGENTS.mdは既存symlinkを維持。`.env.actions`/`reminders.json`は内容を読まずローカルを保持してindexから外す。
 

@@ -39,7 +39,7 @@ mappingは公開しないJSON配列`[{ legacyKey, issuer, sub, ownerId? }]`。le
 
 `EnvironmentIdentity = { accountId: string; region: string; remindersTable: string; ownerStateTable: string; imageJobsTable: string; imagesBucket: string; issuer: string }`、`MigrationIdentity = { runId: string; sourceSha256: string; mappingSha256: string; contractSha256: string; environment: EnvironmentIdentity; contractVersion: 1 }`を`legacy.ts`で定義する。source/mappingのhashは読み取ったbytesから、contractSha256は実際の上限設定・日時/画像契約のcanonical JSONから計算し、再開時に同一を要求する。短期AWS認証のアカウントはSTSのGetCallerIdentityで明示入力と照合する。アカウントのリソースを探索して名前だけで選ばない。
 
-### Task O01: 旧JSONと所有者mappingの全件事前検査・dry-run
+### Task 1: O01 — 旧JSONと所有者mappingの全件事前検査・dry-run
 
 **Files:** Create `scripts/operations/legacy.ts`, `scripts/operations/migrate-json.ts`, `tests/operations/legacy.test.ts`, `tests/fixtures/synthetic/legacy-valid.json`, `tests/fixtures/synthetic/owner-map.json`, `tests/fixtures/synthetic/target.json`; Modify `package.json`。
 
@@ -62,7 +62,7 @@ mappingは公開しないJSON配列`[{ legacyKey, issuer, sub, ownerId? }]`。le
 - [ ] **Step 4: Run `npx tsx --test tests/operations/legacy.test.ts`、`npm run migrate:json -- --mode dry-run --source tests/fixtures/synthetic/legacy-valid.json --mapping tests/fixtures/synthetic/owner-map.json --config tests/fixtures/synthetic/target.json` → PASS/exit0。** `target.json`は同タスクで作る合成設定。不正fixtureはexit2かつAWS call0、全エラー報告となることを確認する。
 - [ ] **Step 5: `git add scripts/operations/legacy.ts scripts/operations/migrate-json.ts tests/operations/legacy.test.ts tests/fixtures/synthetic package.json` → `git commit -m "feat: validate legacy JSON and explicit owner mappings"`。**
 
-### Task O02: run IDでの移行再開・強い照合・公開gate
+### Task 2: O02 — run IDでの移行再開・強い照合・公開gate
 
 **Files:** Create `scripts/operations/migration-store.ts`, `scripts/operations/migration.ts`, `tests/operations/migration.test.ts`, `tests/support/migration-store.ts`, `docs/operations/migration.md`; Modify `scripts/operations/migrate-json.ts`, `scripts/operations/legacy.ts`。
 
@@ -87,7 +87,7 @@ mappingは公開しないJSON配列`[{ legacyKey, issuer, sub, ownerId? }]`。le
 - [ ] **Step 5: 検証する。** Run `npx tsx --test tests/operations/migration.test.ts tests/operations/legacy.test.ts`、`npm run typecheck` → PASS。実AWSや実原本でコマンドを実行しない。
 - [ ] **Step 6: `git add scripts/operations tests/operations/migration.test.ts tests/support/migration-store.ts docs/operations/migration.md` → `git commit -m "feat: add resumable verified migration with publication gate"`。**
 
-### Task O03: PITR後の照合・非現行画像の保全と所有者再対応
+### Task 3: O03 — PITR後の照合・非現行画像の保全と所有者再対応
 
 **Files:** Create `scripts/operations/recovery.ts`, `scripts/operations/verify-recovery.ts`, `tests/operations/recovery.test.ts`, `docs/operations/recovery.md`; Modify `package.json`。
 

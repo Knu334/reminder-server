@@ -97,7 +97,7 @@ interface JobsStore {
 
 Configのfieldは`region`, `remindersTable`, `ownerStateTable`, `imageJobsTable`, `imagesBucket`, `expectedApiId`, `expectedStage`, `issuer`, `clientId`, `sourceIps: string[]`, `limits: {jsonBytes: number; thumbnailBytes: number; itemCount: number; imageBytes: number; ownerRequestsPerMinute: number}`。対応する環境変数は`AWS_REGION`（マネージド値を読むだけ）, `REMINDERS_TABLE`, `OWNER_STATE_TABLE`, `IMAGE_JOBS_TABLE`, `IMAGES_BUCKET`, `EXPECTED_API_ID`, `EXPECTED_API_STAGE`, `COGNITO_ISSUER`, `COGNITO_CLIENT_ID`, `ALLOWED_SOURCE_IPS`（JSON配列、既定[]）。上限overrideは`MAX_JSON_BYTES`, `MAX_THUMBNAIL_BYTES`, `MAX_OWNER_ITEMS`, `MAX_OWNER_IMAGE_BYTES`, `OWNER_REQUESTS_PER_MINUTE`で整数文字列だけ許可する。未指定は2097152/1048576/1000/134217728/120。AWS_REGION等の予約環境変数をTerraformからLambdaへ設定しない。
 
-### Task R01: 入力・DTO・ETagの契約と実行可能な試験基盤
+### Task 1: R01 — 入力・DTO・ETagの契約と実行可能な試験基盤
 
 **Files:** Create `src/config.ts`, `src/shared/errors.ts`, `src/shared/ports.ts`, `src/reminders/types.ts`, `src/reminders/validation.ts`, `src/reminders/representation.ts`, `src/images/types.ts`, `src/images/validation.ts`, `tests/support/fixtures.ts`, `tests/runtime/contracts.test.ts`; Modify `package.json`, `package-lock.json`, `tsconfig.json`, `eslint.config.mjs`, `src/util/reminderUtils.ts`（R08までの戻り値型修正のみ）。
 
@@ -123,7 +123,7 @@ Configのfieldは`region`, `remindersTable`, `ownerStateTable`, `imageJobsTable`
 - [ ] **Step 6: 検証する。** Run `npx tsx --test tests/runtime/contracts.test.ts`、`npm run typecheck`、`npm run lint` → 全てPASS。
 - [ ] **Step 7: コミットする。** `git add src/config.ts src/shared src/reminders src/images tests/support/fixtures.ts tests/runtime/contracts.test.ts src/util/reminderUtils.ts package.json package-lock.json tsconfig.json eslint.config.mjs` → `git commit -m "feat: define validated reminder and image contracts"`。
 
-### Task R02: Gateway境界・所有者識別・期限・秘密を含まない応答
+### Task 2: R02 — Gateway境界・所有者識別・期限・秘密を含まない応答
 
 **Files:** Create `src/api/event.ts`, `src/api/identity.ts`, `src/api/responses.ts`, `src/shared/budget.ts`, `src/shared/logging.ts`, `tests/runtime/boundaries.test.ts`; Modify `tests/support/fixtures.ts`。
 
@@ -144,7 +144,7 @@ Configのfieldは`region`, `remindersTable`, `ownerStateTable`, `imageJobsTable`
 - [ ] **Step 4: Run `npx tsx --test tests/runtime/boundaries.test.ts`、`npm run typecheck`、`npm run lint` → PASS。** SDK操作のabort、期限不足で新規操作を開始しないこと、Promiseをawaitすることを確認する。
 - [ ] **Step 5: `git add src/api src/shared/budget.ts src/shared/logging.ts tests/runtime/boundaries.test.ts tests/support/fixtures.ts` → `git commit -m "feat: enforce gateway identity and safe response boundaries"`。**
 
-### Task R03: 所有者Query・cursor・公開gate・分単位レート
+### Task 3: R03 — 所有者Query・cursor・公開gate・分単位レート
 
 **Files:** Create `src/reminders/cursor.ts`, `src/reminders/dynamo-store.ts`, `src/reminders/owner-store.ts`, `src/shared/aws.ts`, `tests/support/commands.ts`, `tests/runtime/reads-rate.test.ts`。
 
@@ -166,7 +166,7 @@ Configのfieldは`region`, `remindersTable`, `ownerStateTable`, `imageJobsTable`
 - [ ] **Step 4: Run `npx tsx --test tests/runtime/reads-rate.test.ts`、`npm run typecheck` → PASS。** 120件並行のrate試験にはR04で作るstateful fakeを追加して再確認する。
 - [ ] **Step 5: `git add src/reminders/cursor.ts src/reminders/dynamo-store.ts src/reminders/owner-store.ts src/shared/aws.ts tests/support/commands.ts tests/runtime/reads-rate.test.ts` → `git commit -m "feat: add owner-scoped reads and distributed rate limits"`。**
 
-### Task R04: revision・墓標・容量の原子的なメタデータ更新
+### Task 4: R04 — revision・墓標・容量の原子的なメタデータ更新
 
 **Files:** Create `src/reminders/service.ts`, `tests/support/stateful-store.ts`, `tests/runtime/writes.test.ts`; Modify `src/reminders/dynamo-store.ts`, `tests/runtime/reads-rate.test.ts`。
 
@@ -187,7 +187,7 @@ Configのfieldは`region`, `remindersTable`, `ownerStateTable`, `imageJobsTable`
 - [ ] **Step 4: Run `npx tsx --test tests/runtime/writes.test.ts tests/runtime/reads-rate.test.ts`、`npm run typecheck`、`npm run lint` → PASS。** fake競合とAWS command shapeの両方を検証する。
 - [ ] **Step 5: `git add src/reminders/service.ts src/reminders/dynamo-store.ts tests/support/stateful-store.ts tests/runtime/writes.test.ts tests/runtime/reads-rate.test.ts` → `git commit -m "feat: enforce revision and storage quotas transactionally"`。**
 
-### Task R05: S3の元画像保存・画像commit・別の署名URL
+### Task 5: R05 — S3の元画像保存・画像commit・別の署名URL
 
 **Files:** Create `src/images/s3-store.ts`, `src/images/upload.ts`, `tests/runtime/images.test.ts`; Modify `src/reminders/service.ts`, `src/shared/aws.ts`, `tests/support/stateful-store.ts`。
 
@@ -209,7 +209,7 @@ Configのfieldは`region`, `remindersTable`, `ownerStateTable`, `imageJobsTable`
 - [ ] **Step 4: Run `npx tsx --test tests/runtime/images.test.ts tests/runtime/writes.test.ts`、`npm run typecheck` → PASS。** 128MiB境界と画像差分の同時更新、元bytes hash一致、DBにBASE64が存在しないことも確認する。
 - [ ] **Step 5: `git add src/images/s3-store.ts src/images/upload.ts src/reminders/service.ts src/shared/aws.ts tests/support/fixtures.ts tests/support/stateful-store.ts tests/runtime/images.test.ts` → `git commit -m "feat: track original S3 images and issue separate download URLs"`。**
 
-### Task R06: 清掃GSI・条件付きlease・checkpointのDB adapter
+### Task 6: R06 — 清掃GSI・条件付きlease・checkpointのDB adapter
 
 **Files:** Create `src/images/job-keys.ts`, `src/images/jobs-store.ts`, `tests/runtime/jobs.test.ts`。
 
@@ -229,7 +229,7 @@ Configのfieldは`region`, `remindersTable`, `ownerStateTable`, `imageJobsTable`
 - [ ] **Step 4: Run `npx tsx --test tests/runtime/jobs.test.ts tests/runtime/images.test.ts`、`npm run typecheck` → PASS。** jobs adapterのconditionsとstateful fakeのstate遷移を照合する。
 - [ ] **Step 5: `git add src/images/job-keys.ts src/images/jobs-store.ts tests/runtime/jobs.test.ts` → `git commit -m "feat: add indexed image jobs with reclaimable cleanup leases"`。**
 
-### Task R07: 公平・上限付き・再開可能な画像清掃handler
+### Task 7: R07 — 公平・上限付き・再開可能な画像清掃handler
 
 **Files:** Create `src/cleanup/service.ts`, `src/cleanup/metrics.ts`, `src/cleanup.ts`, `tests/runtime/cleanup.test.ts`; Modify `src/images/s3-store.ts`, `tests/support/stateful-store.ts`。
 
@@ -251,7 +251,7 @@ Configのfieldは`region`, `remindersTable`, `ownerStateTable`, `imageJobsTable`
 - [ ] **Step 4: Run `npx tsx --test tests/runtime/cleanup.test.ts tests/runtime/jobs.test.ts tests/runtime/images.test.ts`、`npm run typecheck`、`npm run lint` → PASS。** handler return後の未await処理がないことと、署名URL/画像を含むログがないことを確認する。
 - [ ] **Step 5: `git add src/cleanup src/cleanup.ts src/images/s3-store.ts tests/runtime/cleanup.test.ts tests/support/stateful-store.ts` → `git commit -m "feat: implement bounded resumable scheduled image cleanup"`。**
 
-### Task R08: v2ルート・health/readyを統合し旧常駐サーバーを撤去
+### Task 8: R08 — v2ルート・health/readyを統合し旧常駐サーバーを撤去
 
 **Files:** Create `src/api/routes.ts`, `src/api.ts`, `tests/runtime/api.test.ts`, `docs/api-v2.md`; Modify `src/shared/aws.ts`, `package.json`, `package-lock.json`; Delete `src/app.ts`, `src/router/index.ts`, `src/middleware/reminderMiddleware.ts`, `src/util/reminderUtils.ts`, `src/types/types.ts`。
 
