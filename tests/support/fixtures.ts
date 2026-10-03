@@ -12,3 +12,21 @@ export function activeReminder(overrides: Partial<ActiveReminder> = {}): ActiveR
 export function testBudget(): Budget {
   return { signal: new AbortController().signal, remainingMs: () => 10_000 };
 }
+
+/** Synthetic HTTP API v2 event; nested overrides replace their whole value. */
+export function gatewayEvent(overrides: Record<string, unknown> = {}): unknown {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    version: "2.0", routeKey: "POST /v2/reminders", rawPath: "/v2/reminders", rawQueryString: "",
+    headers: { "content-type": "application/json", authorization: "Bearer synthetic-token" },
+    requestContext: {
+      apiId: "api123", stage: "$default", requestId: "req-123", routeKey: "POST /v2/reminders",
+      http: { method: "POST", path: "/v2/reminders", sourceIp: "192.0.2.1", protocol: "HTTP/1.1" },
+      authorizer: { jwt: {
+        claims: { iss: "https://cognito-idp.ap-northeast-1.amazonaws.com/test", sub: "subject-1", client_id: "client123", token_use: "access", exp: now + 3600, iat: now - 60, scope: "reminder-api/read reminder-api/write" },
+        scopes: ["reminder-api/read", "reminder-api/write"],
+      } },
+    },
+    body: "{}", isBase64Encoded: false, ...overrides,
+  };
+}

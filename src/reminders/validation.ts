@@ -51,3 +51,10 @@ export function parsePatch(value: unknown): PatchInput {
   // Explicit undefined is rejected above; absent fields stay absent under exactOptionalPropertyTypes.
   return parsed.data as PatchInput;
 }
+
+/** Use the same ID rules for decoded Gateway path parameters and reminder inputs. */
+export function parseReminderId(value: unknown): string {
+  const parsed = id.safeParse(value);
+  if (!parsed.success) return invalidInput();
+  return parsed.data;
+}

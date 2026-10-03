@@ -28,6 +28,7 @@
   },
   "devDependencies": {
     "@eslint/js": "9.39.0",
+    "@types/aws-lambda": "8.10.164",
     "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.5",
     "@types/greenlock-express": "^4.0.3",
