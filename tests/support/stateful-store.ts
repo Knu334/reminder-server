@@ -3,7 +3,7 @@ import { loadConfig } from "../../src/config";
 import { createRemindersStore } from "../../src/reminders/dynamo-store";
 import { createOwnerStore } from "../../src/reminders/owner-store";
 import { createRemindersService } from "../../src/reminders/service";
-import type { ImageJob } from "../../src/images/types";
+import type { ImageJob, ImageRef } from "../../src/images/types";
 import type { ImagesStore, JobsStore } from "../../src/shared/ports";
 import { requireBudget } from "../../src/shared/budget";
 
@@ -14,7 +14,7 @@ const conditional = (): Error => Object.assign(new Error("synthetic conditional 
 const cancellation = (codes: string[]): Error => Object.assign(new Error("synthetic cancellation"), { name: "TransactionCanceledException", CancellationReasons: codes.map(Code => ({ Code })) });
 
 /** No awaits occur between condition evaluation and commit: this is the transport's critical section. */
-export function createHarness() {
+export function createHarness(config = harnessConfig) {
   let nowMs = Date.parse("2026-10-03T00:00:00.000Z"); let sequence = 0;
   const tables: Record<string, Map<string, Row>> = { reminders: new Map(), owners: new Map(), jobs: new Map() };
   const tokens = new Map<string, string>(); const transactions: TransactWriteCommand[] = [];
@@ -69,7 +69,7 @@ export function createHarness() {
     const result = or(); if (index !== tokens.length) throw new Error("Unconsumed synthetic condition"); return result;
   }
   const client = { async send(command: unknown): Promise<unknown> {
-    if (command instanceof GetCommand) { failure("get"); const row = table(command.input.TableName).get(rowKey(command.input.Key ?? {})); return row === undefined ? {} : { Item: structuredClone(row) }; }
+    if (command instanceof GetCommand) { failure(command.input.TableName === "jobs" ? "jobGet" : "get"); const row = table(command.input.TableName).get(rowKey(command.input.Key ?? {})); return row === undefined ? {} : { Item: structuredClone(row) }; }
     if (command instanceof QueryCommand) {
       const rows = [...table(command.input.TableName).values()].filter(row => row.ownerId === command.input.ExpressionAttributeValues?.[":owner"] && (command.input.ExclusiveStartKey === undefined || String(row.id) > String(command.input.ExclusiveStartKey.id))).sort((a, b) => String(a.id).localeCompare(String(b.id)));
       const page = rows.slice(0, command.input.Limit); const last = page.at(-1);
@@ -103,19 +103,28 @@ export function createHarness() {
     }
     throw new Error("Unsupported synthetic command");
   } } as unknown as DynamoDBDocumentClient;
-  const reminders = createRemindersStore(client, harnessConfig); const owners = createOwnerStore(client, harnessConfig);
+  const reminders = createRemindersStore(client, config); const owners = createOwnerStore(client, config);
   const jobs: JobsStore = {
-    async createPending(job, budget) { requireBudget(budget); const bucket = table("jobs"); if (bucket.has(rowKey({ jobId: job.jobId }))) throw conditional(); bucket.set(rowKey({ jobId: job.jobId }), structuredClone(job) as unknown as Row); },
-    async get(jobId, budget) { requireBudget(budget); return structuredClone(table("jobs").get(rowKey({ jobId })) ?? null) as ImageJob | null; },
-    async recordUpload(ref, budget) { requireBudget(budget); const key = rowKey({ jobId: ref.imageId }); const row = table("jobs").get(key); if (!row) throw conditional(); table("jobs").set(key, { ...row, versionId: ref.versionId, mime: ref.mime, bytes: ref.bytes, sha256: ref.sha256 }); },
+    async createPending(job, budget) { requireBudget(budget); failure("createPending"); const bucket = table("jobs"); if (bucket.has(rowKey({ jobId: job.jobId }))) throw conditional(); bucket.set(rowKey({ jobId: job.jobId }), structuredClone(job) as unknown as Row); },
+    async get(jobId, budget) { requireBudget(budget); failure("jobGet"); return structuredClone(table("jobs").get(rowKey({ jobId })) ?? null) as ImageJob | null; },
+    async recordUpload(ref, budget) { requireBudget(budget); failure("recordUpload"); const key = rowKey({ jobId: ref.imageId }); const row = table("jobs").get(key); if (!row || row.state !== "pending") throw conditional(); table("jobs").set(key, { ...row, versionId: ref.versionId, mime: ref.mime, bytes: ref.bytes, sha256: ref.sha256 }); },
     async queryDue() { throw new Error("R06 owns cleanup"); }, async claim() { throw new Error("R06 owns cleanup"); }, async complete() { throw new Error("R06 owns cleanup"); },
     async checkpoint() { return { roundRobinIndex: 0, cursors: {} }; }, async saveCheckpoint() { throw new Error("R06 owns cleanup"); },
   };
+  const objects = new Map<string, { ref: ImageRef; data: Uint8Array }>(); let uploadSequence = 0;
   const images: ImagesStore = {
-    async put() { throw new Error("R05 owns images"); }, async head() { throw new Error("R05 owns images"); }, async get() { throw new Error("R05 owns images"); },
-    async signGet() { throw new Error("R05 owns images"); }, async markDeleted() { throw new Error("R05 owns images"); }, async probe() {},
+    async put(job, image, budget) {
+      requireBudget(budget); if (faults.get("put") === "before") failure("put");
+      const ref = { imageId: job.jobId, key: job.key, versionId: `v${++uploadSequence}`, mime: image.mime, bytes: image.bytes, sha256: image.sha256 };
+      objects.set(job.key, { ref, data: Buffer.from(image.data) });
+      if (faults.get("put") === "after-commit") failure("put"); return structuredClone(ref);
+    },
+    async head(key, versionId, budget) { requireBudget(budget); const object = objects.get(key); return object && (versionId === null || versionId === object.ref.versionId) ? { versionId: object.ref.versionId, sha256: object.ref.sha256, deleteMarker: false } : null; },
+    async get(ref, budget) { requireBudget(budget); const object = objects.get(ref.key); if (!object || object.ref.versionId !== ref.versionId) throw new Error("Synthetic image missing"); return Buffer.from(object.data); },
+    async signGet(ref, seconds, budget) { requireBudget(budget); return `https://synthetic.test/${ref.key}?versionId=${ref.versionId}&expires=${seconds}`; },
+    async markDeleted(key, budget) { requireBudget(budget); objects.delete(key); }, async probe() {},
   };
-  const service = createRemindersService({ reminders, owners, jobs, images, config: harnessConfig, clock: () => nowMs, uuid: () => `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}` });
+  const service = createRemindersService({ reminders, owners, jobs, images, config, clock: () => nowMs, uuid: () => `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}` });
   return {
     service, reminders, owners, jobs, images,
     snapshot(): TestState { const states = [...table("owners").values()]; return structuredClone({ reminders: [...table("reminders").values()], storage: states.filter(row => row.sk === "STORAGE"), rates: states.filter(row => String(row.sk).startsWith("RATE#")), jobs: [...table("jobs").values()] as unknown as ImageJob[], transactions: transactions.map(command => command.input) }); },

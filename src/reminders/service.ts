@@ -1,3 +1,6 @@
+import { decodeThumbnail } from "../images/validation";
+import { stageThumbnail } from "../images/upload";
+import type { ImageRef } from "../images/types";
 import type { Config } from "../config";
 import type { Budget, ImagesStore, JobsStore, OwnerStore, RemindersStore } from "../shared/ports";
 import type { ActiveReminder, ChangeSet, CreateInput, OwnerId, PatchInput, ReminderDto, Representation } from "./types";
@@ -14,6 +17,7 @@ export interface ReminderDeps {
 export interface RemindersService {
   list(ownerId: OwnerId, limit: number, cursor: string | null, budget: Budget): Promise<{ items: ReminderDto[]; nextCursor: string | null }>;
   get(ownerId: OwnerId, id: string, budget: Budget): Promise<Representation>;
+  thumbnailUrl(ownerId: OwnerId, id: string, budget: Budget): Promise<{ url: string; expiresAt: string; imageId: string; revision: number }>;
   create(ownerId: OwnerId, input: CreateInput, budget: Budget): Promise<Representation>;
   patch(ownerId: OwnerId, id: string, etag: string | undefined, input: PatchInput, budget: Budget): Promise<Representation>;
   remove(ownerId: OwnerId, id: string, etag: string | undefined, budget: Budget): Promise<{ id: string; deleted: true; revision: number }>;
@@ -33,9 +37,8 @@ export function createRemindersService(deps: ReminderDeps): RemindersService {
   function retire(previous: ActiveReminder, atMs: number): ChangeSet["jobs"] {
     return previous.thumbnail === null ? [] : [{ jobId: previous.thumbnail.imageId, from: "committed", to: "retired", atMs, expectedVersionId: previous.thumbnail.versionId }];
   }
-  // R05 connects decoded-image upload/preparation to these mutation points.
-  function requireNoUpload(thumbnail: string | null | undefined): void {
-    if (thumbnail !== undefined && thumbnail !== null) throw new ApiError(503, "SERVICE_UNAVAILABLE", "Service temporarily unavailable");
+  function commitImage(ref: ImageRef | null, atMs: number): ChangeSet["jobs"] {
+    return ref === null ? [] : [{ jobId: ref.imageId, from: "pending", to: "committed", atMs, expectedVersionId: ref.versionId }];
   }
   return {
     async list(ownerId, limit, cursor, budget) {
@@ -44,22 +47,32 @@ export function createRemindersService(deps: ReminderDeps): RemindersService {
       return { items: page.records.flatMap(record => record.deleted ? [] : [represent(record).dto]), nextCursor: page.lastId === null ? null : encodeCursor(ownerId, page.lastId) };
     },
     async get(ownerId, id, budget) { return represent(await current(ownerId, id, budget)); },
+    async thumbnailUrl(ownerId, id, budget) {
+      const record = await current(ownerId, id, budget);
+      if (record.thumbnail === null) throw new ApiError(404, "THUMBNAIL_NOT_FOUND", "Thumbnail not found");
+      const expiresAt = new Date(deps.clock() + 900_000).toISOString();
+      const url = await deps.images.signGet(record.thumbnail, 900, budget);
+      return { url, expiresAt, imageId: record.thumbnail.imageId, revision: record.revision };
+    },
     async create(ownerId, input, budget) {
       requireBudget(budget);
-      const parsed = parseCreate(input); requireNoUpload(parsed.thumbnail);
+      const parsed = parseCreate(input); const decoded = decodeThumbnail(parsed.thumbnail, deps.config.limits.thumbnailBytes);
+      const thumbnail = decoded === null ? null : await stageThumbnail(ownerId, decoded, deps, budget);
       const at = timestamp();
-      const next: ActiveReminder = { ...parsed, ownerId, revision: 1, createdAt: at, updatedAt: at, thumbnail: null, deleted: false };
-      await deps.reminders.commit({ ownerId, previous: null, next, itemDelta: 1, byteDelta: 0, jobs: [], clientRequestToken: deps.uuid() }, budget);
+      const next: ActiveReminder = { ...parsed, ownerId, revision: 1, createdAt: at, updatedAt: at, thumbnail, deleted: false };
+      await deps.reminders.commit({ ownerId, previous: null, next, itemDelta: 1, byteDelta: thumbnail?.bytes ?? 0, jobs: commitImage(thumbnail, Date.parse(at)), clientRequestToken: deps.uuid() }, budget);
       return represent(next);
     },
     async patch(ownerId, id, etag, input, budget) {
-      const expected = parseIfMatch(etag); const parsed = parsePatch(input); requireNoUpload(parsed.thumbnail);
+      const expected = parseIfMatch(etag); const parsed = parsePatch(input);
+      const decoded = parsed.thumbnail === undefined ? undefined : decodeThumbnail(parsed.thumbnail, deps.config.limits.thumbnailBytes);
       const previous = await current(ownerId, id, budget); precondition(previous, expected);
+      const uploaded = decoded === undefined || decoded === null ? null : await stageThumbnail(ownerId, decoded, deps, budget);
       const at = timestamp(); const { thumbnail, ...fields } = parsed;
-      const next: ActiveReminder = { ...previous, ...fields, revision: previous.revision + 1, updatedAt: at, thumbnail: thumbnail === undefined ? previous.thumbnail : null };
-      const removed = thumbnail === null && previous.thumbnail !== null;
-      await deps.reminders.commit({ ownerId, previous, next, itemDelta: 0, byteDelta: removed ? -previous.thumbnail!.bytes : 0,
-        jobs: removed ? retire(previous, Date.parse(at)) : [], clientRequestToken: deps.uuid() }, budget);
+      const next: ActiveReminder = { ...previous, ...fields, revision: previous.revision + 1, updatedAt: at, thumbnail: thumbnail === undefined ? previous.thumbnail : uploaded };
+      const changedImage = thumbnail !== undefined;
+      await deps.reminders.commit({ ownerId, previous, next, itemDelta: 0, byteDelta: (next.thumbnail?.bytes ?? 0) - (previous.thumbnail?.bytes ?? 0),
+        jobs: changedImage ? [...commitImage(uploaded, Date.parse(at)), ...retire(previous, Date.parse(at))] : [], clientRequestToken: deps.uuid() }, budget);
       return represent(next);
     },
     async remove(ownerId, id, etag, budget) {

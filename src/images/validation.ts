@@ -3,7 +3,6 @@ import { ApiError } from "../shared/errors";
 import type { DecodedImage } from "./types";
 
 const MAX_IMAGE_BYTES = 1_048_576;
-const MAX_BASE64_LENGTH = 4 * Math.ceil(MAX_IMAGE_BYTES / 3);
 
 function invalidImage(): never {
   throw new ApiError(422, "INVALID_THUMBNAIL", "Invalid or unsupported thumbnail");
@@ -19,22 +18,34 @@ function identifyMime(data: Buffer): string {
 }
 
 /** Sniff supported signatures and preserve the original bytes; no image transcoding. */
-export function decodeThumbnail(value: string | null): DecodedImage | null {
+export function decodeThumbnail(value: string | null, maxBytes = MAX_IMAGE_BYTES): DecodedImage | null {
   if (value === null || value === "") return null;
-  // Bound the entire input before matching/allocating. Supported data-URL headers are short.
-  if (value.length > MAX_BASE64_LENGTH + 32) return invalidImage();
   let payload = value;
   let declaredMime: string | undefined;
   if (value.startsWith("data:")) {
-    const match = /^data:(image\/(?:png|jpeg|gif|webp));base64,(.+)$/.exec(value);
-    if (!match || match[1] === undefined || match[2] === undefined) return invalidImage();
-    declaredMime = match[1];
-    payload = match[2];
+    const comma = value.indexOf(",");
+    const header = value.slice(0, comma);
+    if (!["data:image/png;base64", "data:image/jpeg;base64", "data:image/gif;base64", "data:image/webp;base64"].includes(header)) return invalidImage();
+    declaredMime = header.slice(5, -7);
+    payload = value.slice(comma + 1);
   }
-  if (payload.length > MAX_BASE64_LENGTH || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(payload)) return invalidImage();
-  const data = Buffer.from(payload, "base64");
-  if (data.length === 0 || data.length > MAX_IMAGE_BYTES || data.toString("base64") !== payload) return invalidImage();
-  const mime = identifyMime(data);
+  // Validate alphabet and pad bits without nested regular-expression groups or decoding an unbounded input.
+  if (payload.length === 0 || payload.length % 4 !== 0) return invalidImage();
+  const padding = payload.endsWith("==") ? 2 : payload.endsWith("=") ? 1 : 0;
+  const end = payload.length - padding;
+  function digit(code: number): number {
+    if (code >= 65 && code <= 90) return code - 65;
+    if (code >= 97 && code <= 122) return code - 71;
+    if (code >= 48 && code <= 57) return code + 4;
+    return code === 43 ? 62 : code === 47 ? 63 : -1;
+  }
+  for (let index = 0; index < end; index++) if (digit(payload.charCodeAt(index)) < 0) return invalidImage();
+  const last = digit(payload.charCodeAt(end - 1));
+  if ((padding === 2 && (last & 15) !== 0) || (padding === 1 && (last & 3) !== 0)) return invalidImage();
+  const bytes = payload.length / 4 * 3 - padding;
+  const mime = identifyMime(Buffer.from(payload.slice(0, 16), "base64"));
   if (declaredMime !== undefined && declaredMime !== mime) return invalidImage();
-  return { data, mime, bytes: data.length, sha256: createHash("sha256").update(data).digest("hex") };
+  if (bytes > Math.min(MAX_IMAGE_BYTES, maxBytes)) throw new ApiError(413, "THUMBNAIL_TOO_LARGE", "Thumbnail too large");
+  const data = Buffer.from(payload, "base64");
+  return { data, mime, bytes, sha256: createHash("sha256").update(data).digest("hex") };
 }

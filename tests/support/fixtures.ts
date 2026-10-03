@@ -30,3 +30,7 @@ export function gatewayEvent(overrides: Record<string, unknown> = {}): unknown {
     body: "{}", isBase64Encoded: false, ...overrides,
   };
 }
+
+/** Public synthetic signature plus payload: never sourced from a user's image. */
+export const syntheticPngBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]);
+export const syntheticPngBase64 = syntheticPngBytes.toString("base64");

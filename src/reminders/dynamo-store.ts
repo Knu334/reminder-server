@@ -148,7 +148,17 @@ export function createRemindersStore(client: DynamoDBDocumentClient, config: Con
           uncertain = true;
           try {
             const actual = await store.get(change.ownerId, change.next.id, budget);
-            if (isDeepStrictEqual(actual, change.next)) return;
+            if (isDeepStrictEqual(actual, change.next)) {
+              let jobsMatch = true;
+              for (const transition of change.jobs) {
+                requireBudget(budget);
+                const response = await client.send(new GetCommand({ TableName: config.imageJobsTable, Key: { jobId: transition.jobId }, ConsistentRead: true }), { abortSignal: budget.signal });
+                const job = response.Item;
+                if (job === undefined || job.jobId !== transition.jobId || job.ownerId !== change.ownerId || job.state !== transition.to
+                  || (transition.expectedVersionId !== undefined && job.versionId !== transition.expectedVersionId)) jobsMatch = false;
+              }
+              if (jobsMatch) return;
+            }
           } catch { throw unavailable(); }
           // Same command and token only: never manufacture a fresh operation after an unknown outcome.
         }

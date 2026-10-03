@@ -81,7 +81,7 @@ void test("rejects_noncanonical_base64_and_mime_mismatch", () => {
 void test("enforces_original_image_byte_limit", () => {
   const png = signatures[0]; assert.ok(png); const exact = Buffer.alloc(1_048_576); png.data.copy(exact);
   assert.equal(decodeThumbnail(exact.toString("base64"))?.bytes, 1_048_576);
-  rejects422(() => decodeThumbnail(Buffer.concat([exact, Buffer.from([0])]).toString("base64")));
+  assert.throws(() => decodeThumbnail(Buffer.concat([exact, Buffer.from([0])]).toString("base64")), { status: 413, code: "THUMBNAIL_TOO_LARGE" });
   rejects422(() => decodeThumbnail("A".repeat(1_398_108)));
 });
 
