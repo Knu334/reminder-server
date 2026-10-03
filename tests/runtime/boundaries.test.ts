@@ -165,3 +165,20 @@ void test("error_response_uses_common_code_message_request_id_contract", () => {
   assert.deepEqual(JSON.parse(limited.body ?? ""), { code: "RATE_LIMITED", message: "Rate limit exceeded", requestId: "req", retryAfterSeconds: 60 });
   assert.equal(limited.headers?.["Retry-After"], "60");
 });
+
+void test("large_gateway_base64_is_stack_safe_and_preserves_error_classes", () => {
+  const oversized = "AAAA".repeat(2_500_000); // 10,000,000 encoded / 7,500,000 decoded bytes.
+  rejectsStatus(413, () => parseJsonBody(parseGatewayEvent(gatewayEvent({ body: oversized, isBase64Encoded: true }), config), config));
+  for (const body of [oversized + "!===", oversized + "\n===", oversized + "ex==", oversized + "e31=", "A=".repeat(5_000_000)]) {
+    rejectsStatus(400, () => parseJsonBody(parseGatewayEvent(gatewayEvent({ body, isBase64Encoded: true }), config), config));
+  }
+  // Both kinds of canonical padding remain valid syntax; nonzero pad bits remain invalid.
+  for (const body of ["MA==", "e30="]) {
+    const request = parseGatewayEvent(gatewayEvent({ body, isBase64Encoded: true }), config);
+    if (body === "e30=") assert.deepEqual(parseJsonBody(request, config), {});
+    else assert.equal(parseJsonBody(request, config), 0);
+  }
+  for (const body of ["ex==", "e31=", "e30=AAAA", "====", "A===", "AAAA===="]) {
+    rejectsStatus(400, () => parseJsonBody(parseGatewayEvent(gatewayEvent({ body, isBase64Encoded: true }), config), config));
+  }
+});

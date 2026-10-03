@@ -72,16 +72,33 @@ export function parseGatewayEvent(value: unknown, config: Config): GatewayReques
   };
 }
 
+/** Validate in constant stack space before allocating or parsing large Gateway bodies. */
+function base64DecodedBytes(body: string): number {
+  function invalid(): never { throw new ApiError(400, "INVALID_BODY", "Invalid request body"); }
+  if (body.length % 4 !== 0) return invalid();
+  const padding = body.endsWith("==") ? 2 : body.endsWith("=") ? 1 : 0;
+  let last = 0;
+  for (let index = 0; index < body.length - padding; index++) {
+    const code = body.charCodeAt(index);
+    if (code >= 65 && code <= 90) last = code - 65;
+    else if (code >= 97 && code <= 122) last = code - 71;
+    else if (code >= 48 && code <= 57) last = code + 4;
+    else if (code === 43) last = 62;
+    else if (code === 47) last = 63;
+    else return invalid();
+  }
+  // Canonical padding requires zero unused bits, even on oversized input.
+  if ((padding === 2 && (last & 15) !== 0) || (padding === 1 && (last & 3) !== 0)) return invalid();
+  return body.length / 4 * 3 - padding;
+}
+
 /** Call after auth/rate/publication checks. This helper also authenticates defensively. */
 export function parseJsonBody(request: GatewayRequest, config: Config): unknown {
   requireOwner(request, config, request.method === "GET" ? "read" : "write");
   const body = request.body ?? "";
   let bytes: Buffer;
   if (request.isBase64Encoded) {
-    if (body.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(body)) {
-      throw new ApiError(400, "INVALID_BODY", "Invalid request body");
-    }
-    const decodedBytes = body.length / 4 * 3 - (body.endsWith("==") ? 2 : body.endsWith("=") ? 1 : 0);
+    const decodedBytes = base64DecodedBytes(body);
     if (decodedBytes > config.limits.jsonBytes) throw new ApiError(413, "BODY_TOO_LARGE", "Request body is too large");
     bytes = Buffer.from(body, "base64");
     if (bytes.toString("base64") !== body) throw new ApiError(400, "INVALID_BODY", "Invalid request body");
