@@ -65,6 +65,6 @@ export async function checkRate(store: OwnerStore, ownerId: OwnerId, nowMs: numb
   catch { throw unavailable(); }
   if (!accepted) {
     const seconds = Math.max(1, Math.ceil((60_000 - nowMs % 60_000) / 1000));
-    throw new ApiError(429, "RATE_LIMITED", "Rate limit exceeded", seconds);
+    throw new ApiError(429, "OWNER_RATE_LIMIT_EXCEEDED", "Rate limit exceeded", seconds);
   }
 }

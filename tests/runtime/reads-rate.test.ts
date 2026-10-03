@@ -97,10 +97,10 @@ void test("rate_has_fixed_utc_window_and_fail_closed", async () => {
   for (let i = 0; i < 120; i++) await checkRate(store, owner, 59_001, testBudget());
   await assert.rejects(checkRate(store, owner, 59_001, testBudget()), (error: unknown) => {
     assert.ok(error instanceof ApiError);
-    assert.equal(error.status, 429); assert.equal(error.code, "RATE_LIMITED"); assert.equal(error.retryAfterSeconds, 1);
+    assert.equal(error.status, 429); assert.equal(error.code, "OWNER_RATE_LIMIT_EXCEEDED"); assert.equal(error.retryAfterSeconds, 1);
     const response = errorResponse(error, "request");
     assert.equal(response.headers?.["Retry-After"], "1");
-    assert.equal(JSON.parse(response.body ?? "").retryAfterSeconds, 1);
+    assert.deepEqual(JSON.parse(response.body ?? ""), { code: "OWNER_RATE_LIMIT_EXCEEDED", message: "Rate limit exceeded", requestId: "request", retryAfterSeconds: 1 });
     return true;
   });
   await checkRate(store, owner, 60_000, testBudget());
