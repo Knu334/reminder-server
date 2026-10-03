@@ -138,3 +138,6 @@ reminders*.json
 
 # macOS meta file
 .DS_Store
+
+# Isolated implementation workspaces
+.worktrees/
