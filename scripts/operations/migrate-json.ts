@@ -1,7 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { loadConfig } from "../../src/config";
-import { readMigrationInputs, validateLegacy } from "./legacy";
-import type { MigrationTarget } from "./legacy";
+import { contractSha256For, environmentIdentityFor, readMigrationInputs, validateLegacy } from "./legacy";
+import type { LegacyValidation, MigrationIdentity, MigrationTarget } from "./legacy";
+import type { MigrationDeps } from "./migration";
 
 export interface OperationIO { stdout: (line: string) => void; stderr: (line: string) => void }
 
@@ -29,18 +30,24 @@ export function parseMigrationTarget(value: unknown): MigrationTarget {
   return { ...loadConfig(env), accountId: target.accountId };
 }
 
-/** O01 admits dry-run only; intentionally imports no AWS adapters or SDK clients. */
-export async function migrationMain(argv: string[], io: OperationIO): Promise<number> {
+export interface MigrationRuntime {
+  createDeps(target: MigrationTarget, identity: MigrationIdentity, validation: LegacyValidation): Promise<MigrationDeps>;
+}
+/** Dry-run performs no AWS imports. Explicit modes load the runtime only after full O01 validation. */
+export async function migrationMain(argv: string[], io: OperationIO, runtime?: MigrationRuntime): Promise<number> {
   const options = new Map<string, string>();
   for (let index = 0; index < argv.length; index += 2) {
     const name = argv[index]; const value = argv[index + 1];
-    if (name === undefined || value === undefined || !["--mode", "--source", "--mapping", "--config"].includes(name) || options.has(name) || value.startsWith("--")) {
+    if (name === undefined || value === undefined || !["--mode", "--source", "--mapping", "--config", "--run-id"].includes(name) || options.has(name) || value.startsWith("--")) {
       io.stderr(JSON.stringify({ errors: [{ location: "arguments", field: "options", code: "INVALID_ARGUMENTS" }] }) + "\n"); return 2;
     }
     options.set(name, value);
   }
-  if (options.size !== 4 || options.get("--mode") !== "dry-run") {
-    io.stderr(JSON.stringify({ errors: [{ location: "arguments", field: "mode", code: "DRY_RUN_REQUIRED" }] }) + "\n"); return 2;
+  const mode = options.get("--mode");
+  const explicit = mode === "import" || mode === "verify" || mode === "publish";
+  if ((!explicit && mode !== "dry-run") || !["--source", "--mapping", "--config"].every(name => options.has(name))
+    || (explicit ? options.size !== 5 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(options.get("--run-id") ?? "") : options.size !== 4)) {
+    io.stderr(JSON.stringify({ errors: [{ location: "arguments", field: "mode", code: "MODE_OR_RUN_ID_REQUIRED" }] }) + "\n"); return 2;
   }
   let target: MigrationTarget;
   try { target = parseMigrationTarget(JSON.parse(await readFile(options.get("--config")!, "utf8"))); }
@@ -64,7 +71,26 @@ export async function migrationMain(argv: string[], io: OperationIO): Promise<nu
       items = entries.reduce<number>((count, entry: unknown) => count + (Array.isArray(entry) ? entry.length : 0), 0);
     }
   } catch { /* Validation already holds the safe diagnostic. */ }
-  io.stdout(JSON.stringify({ mode: "dry-run", valid: validation.errors.length === 0, owners, items,
+  if (explicit && validation.errors.length === 0) {
+    const identity: MigrationIdentity = { runId: options.get("--run-id")!, sourceSha256: inputs.sourceSha256, mappingSha256: inputs.mappingSha256,
+      contractSha256: contractSha256For(target), contractVersion: 1, environment: environmentIdentityFor(target) };
+    try {
+      const deps = runtime ? await runtime.createDeps(target, identity, validation)
+        : await (await import("./migration-store")).createMigrationDeps(target, identity, validation);
+      const migration = await import("./migration");
+      if (mode === "import") io.stdout(JSON.stringify({ mode, ...await migration.importMigration(identity, validation, deps) }) + "\n");
+      else {
+        const verification = await migration.verifyMigration(identity, validation, deps);
+        if (mode === "publish") await migration.publishMigration(identity, verification, deps);
+        io.stdout(JSON.stringify({ mode, exactMatch: verification.exactMatch, mismatches: verification.mismatches }) + "\n");
+        if (!verification.exactMatch) return 2;
+      }
+      return 0;
+    } catch {
+      io.stderr(JSON.stringify({ errors: [{ location: "migration", field: "operation", code: "MIGRATION_FAILED" }] }) + "\n"); return 2;
+    }
+  }
+  io.stdout(JSON.stringify({ mode, valid: validation.errors.length === 0, owners, items,
     sourceBytes: inputs.sourceBytes.length, mappingBytes: inputs.mappingBytes.length,
     errors: validation.errors }) + "\n");
   return validation.errors.length === 0 ? 0 : 2;

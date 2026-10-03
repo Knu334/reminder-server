@@ -24,6 +24,10 @@ export interface LegacyValidation {
   owners: Array<{ ownerId: OwnerId; items: ActiveReminder[]; images: Map<string, DecodedImage> }>;
   errors: ValidationError[];
 }
+export function environmentIdentityFor(target: MigrationTarget): EnvironmentIdentity {
+  return { accountId: target.accountId, region: target.region, remindersTable: target.remindersTable, ownerStateTable: target.ownerStateTable,
+    imageJobsTable: target.imageJobsTable, imagesBucket: target.imagesBucket, issuer: target.issuer };
+}
 const hash = (bytes: Uint8Array | string): string => createHash("sha256").update(bytes).digest("hex");
 export async function readMigrationInputs(sourcePath: string, mappingPath: string): Promise<MigrationInputs> {
   const [sourceBytes, mappingBytes] = await Promise.all([readFile(sourcePath), readFile(mappingPath)]);
@@ -44,6 +48,7 @@ export function contractSha256For(target: MigrationTarget): string {
     datetime: "runtime-explicit-offset-valid-calendar-utc-milliseconds",
     image: "runtime-strict-base64-signature-mime-original-bytes-png-jpeg-gif-webp",
     owner: "sha256-json-array-issuer-sub",
+    migration: { imageId: "sha256-json-array-reminder-migration-image-v1-run-ownerPosition-itemPosition-first128bits-uuid-v5-variant", upload: "if-none-match-star-read-back-original-bytes-mime-length-checksum-pinned-version", publication: "fresh-exact-verification-and-run-identity-condition", checkpoint: "chunks-v1-sha256-canonical-progress-and-mismatches-immutable-kind-index16-max64-entries" },
   })));
 }
 function record(value: unknown): value is Record<string, unknown> {
