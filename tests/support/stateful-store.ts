@@ -7,6 +7,7 @@ import type { ImageJob, ImageRef } from "../../src/images/types";
 import type { ImagesStore } from "../../src/shared/ports";
 import { requireBudget } from "../../src/shared/budget";
 import { createJobsStore } from "../../src/images/jobs-store";
+import type { CleanupPartition } from "../../src/images/types";
 
 export const harnessConfig = loadConfig({ AWS_REGION: "ap-northeast-1", REMINDERS_TABLE: "reminders", OWNER_STATE_TABLE: "owners", IMAGE_JOBS_TABLE: "jobs", IMAGES_BUCKET: "images", EXPECTED_API_ID: "api123", EXPECTED_API_STAGE: "$default", COGNITO_ISSUER: "https://cognito-idp.ap-northeast-1.amazonaws.com/test", COGNITO_CLIENT_ID: "client123" });
 type Row = Record<string, unknown>;
@@ -20,6 +21,9 @@ export function createHarness(config = harnessConfig) {
   const tables: Record<string, Map<string, Row>> = { reminders: new Map(), owners: new Map(), jobs: new Map() };
   const tokens = new Map<string, string>(); const transactions: TransactWriteCommand[] = [];
   const faults = new Map<string, "before" | "after-commit">();
+  let frozenIndex: Row[] | null = null; let claimHook: (() => void) | undefined; let checkpointWrites = 0;
+  const cleanupQueries: Array<{ partition: CleanupPartition; cutoffMs: number; after: Row | null }> = [];
+  const deletedKeys: string[] = []; const markers = new Map<string, string>();
   function table(name: string | undefined): Map<string, Row> { const value = name === undefined ? undefined : tables[name]; if (!value) throw new Error("Unknown synthetic table"); return value; }
   const rowKey = (row: Row): string => JSON.stringify(row.ownerId !== undefined && row.id !== undefined ? [row.ownerId, row.id] : row.pk !== undefined ? [row.pk, row.sk] : [row.jobId]);
   function failure(point: string): void {
@@ -75,12 +79,13 @@ export function createHarness(config = harnessConfig) {
       const input = command.input; const bucket = table(input.TableName); const item = input.Item!; const key = rowKey(item);
       if (input.TableName === "jobs" && item.state === "pending") failure("createPending");
       if (!passes(bucket.get(key), input.ExpressionAttributeNames ?? {}, input.ExpressionAttributeValues ?? {}, input.ConditionExpression ?? "")) throw conditional();
-      bucket.set(key, structuredClone(item)); return {};
+      bucket.set(key, structuredClone(item)); if (item.jobId === "CHECKPOINT#cleanup") { checkpointWrites++; failure("saveCheckpoint"); } return {};
     }
     if (command instanceof QueryCommand) {
       if (command.input.IndexName !== undefined) {
         const input = command.input; const cutoff = String(input.ExpressionAttributeValues?.[":cutoff"]);
-        const rows = [...table(input.TableName).values()].filter(row => row.cleanupPartition === input.ExpressionAttributeValues?.[":partition"] && String(row.cleanupSortKey) <= cutoff
+        cleanupQueries.push({ partition: input.ExpressionAttributeValues?.[":partition"] as CleanupPartition, cutoffMs: Number(cutoff.split("#")[0]), after: input.ExclusiveStartKey ?? null });
+        const rows = (frozenIndex ?? [...table(input.TableName).values()]).filter(row => row.cleanupPartition === input.ExpressionAttributeValues?.[":partition"] && String(row.cleanupSortKey) <= cutoff
           && (input.ExclusiveStartKey === undefined || String(row.cleanupSortKey) > String(input.ExclusiveStartKey.cleanupSortKey))).sort((a, b) => String(a.cleanupSortKey) < String(b.cleanupSortKey) ? -1 : 1);
         const page = rows.slice(0, input.Limit); const last = page.at(-1);
         return { Items: page.map(row => ({ jobId: row.jobId, cleanupPartition: row.cleanupPartition, cleanupSortKey: row.cleanupSortKey })), ScannedCount: page.length,
@@ -93,9 +98,13 @@ export function createHarness(config = harnessConfig) {
     if (command instanceof UpdateCommand) {
       const input = command.input; const bucket = table(input.TableName); const key = rowKey(input.Key ?? {}); const row = bucket.get(key);
       if (input.TableName === "jobs" && input.ExpressionAttributeNames?.["#mime"] === "mime") failure("recordUpload");
-      if (!passes(row, input.ExpressionAttributeNames ?? {}, input.ExpressionAttributeValues ?? {}, input.ConditionExpression ?? "")) throw conditional();
+      const point = input.ExpressionAttributeValues?.[":deleting"] === "deleting" && input.ExpressionAttributeValues?.[":run"] !== undefined ? (input.ExpressionAttributeValues?.[":done"] === "done" ? "complete" : "claim") : null;
+      if (point === "claim" && claimHook) { const hook = claimHook; claimHook = undefined; hook(); }
+      if (point && faults.get(point) === "before") failure(point);
+      const currentRow = bucket.get(key);
+      if (!passes(currentRow, input.ExpressionAttributeNames ?? {}, input.ExpressionAttributeValues ?? {}, input.ConditionExpression ?? "")) throw conditional();
       const next = applyUpdate(row ?? { ...input.Key }, input.ExpressionAttributeNames ?? {}, input.ExpressionAttributeValues ?? {}, input.UpdateExpression ?? "");
-      bucket.set(key, next); return input.ReturnValues === "ALL_NEW" ? { Attributes: structuredClone(next) } : {};
+      bucket.set(key, next); if (point) failure(point); return input.ReturnValues === "ALL_NEW" ? { Attributes: structuredClone(next) } : {};
     }
     if (command instanceof TransactWriteCommand) {
       transactions.push(command);
@@ -127,17 +136,22 @@ export function createHarness(config = harnessConfig) {
     async put(job, image, budget) {
       requireBudget(budget); if (faults.get("put") === "before") failure("put");
       const ref = { imageId: job.jobId, key: job.key, versionId: `v${++uploadSequence}`, mime: image.mime, bytes: image.bytes, sha256: image.sha256 };
-      objects.set(job.key, { ref, data: Buffer.from(image.data) });
+      objects.set(job.key, { ref, data: Buffer.from(image.data) }); markers.delete(job.key);
       if (faults.get("put") === "after-commit") failure("put"); return structuredClone(ref);
     },
-    async head(key, versionId, budget) { requireBudget(budget); const object = objects.get(key); return object && (versionId === null || versionId === object.ref.versionId) ? { versionId: object.ref.versionId, sha256: object.ref.sha256, deleteMarker: false } : null; },
+    async head(key, versionId, budget) { requireBudget(budget); const marker = markers.get(key); if (marker && versionId === null) return { versionId: marker, sha256: null, deleteMarker: true }; const object = objects.get(key); return object && (versionId === null || versionId === object.ref.versionId) ? { versionId: object.ref.versionId, sha256: object.ref.sha256, deleteMarker: false } : null; },
     async get(ref, budget) { requireBudget(budget); const object = objects.get(ref.key); if (!object || object.ref.versionId !== ref.versionId) throw new Error("Synthetic image missing"); return Buffer.from(object.data); },
     async signGet(ref, seconds, budget) { requireBudget(budget); return `https://synthetic.test/${ref.key}?versionId=${ref.versionId}&expires=${seconds}`; },
-    async markDeleted(key, budget) { requireBudget(budget); objects.delete(key); }, async probe() {},
+    async markDeleted(key, budget) { requireBudget(budget); if (faults.get("markDeleted") === "before") failure("markDeleted"); deletedKeys.push(key); markers.set(key, `marker-${deletedKeys.length}`); if (faults.get("markDeleted") === "after-commit") failure("markDeleted"); }, async probe() {},
   };
   const service = createRemindersService({ reminders, owners, jobs, images, config, clock: () => nowMs, uuid: () => `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}` });
   return {
-    service, reminders, owners, jobs, images,
+    service, reminders, owners, jobs, images, cleanupQueries, deletedKeys,
+    get checkpointWrites(): number { return checkpointWrites; },
+    seedJob(job: ImageJob): void { const row = Object.fromEntries(Object.entries(job).filter(([, value]) => value !== undefined)); table("jobs").set(rowKey(row), structuredClone(row)); },
+    setPublication(published: boolean): void { const row = { pk: "GLOBAL", sk: "PUBLICATION", published, runId: null }; table("owners").set(rowKey(row), row); },
+    freezeCleanupIndex(): void { frozenIndex = [...table("jobs").values()].filter(row => row.cleanupPartition !== undefined).map(row => ({ jobId: row.jobId, cleanupPartition: row.cleanupPartition, cleanupSortKey: row.cleanupSortKey })); },
+    beforeClaim(hook: () => void): void { claimHook = hook; },
     snapshot(): TestState { const states = [...table("owners").values()]; return structuredClone({ reminders: [...table("reminders").values()], storage: states.filter(row => row.sk === "STORAGE"), rates: states.filter(row => String(row.sk).startsWith("RATE#")), jobs: [...table("jobs").values()].filter(row => row.jobId !== "CHECKPOINT#cleanup") as unknown as ImageJob[], transactions: transactions.map(command => command.input) }); },
     injectFault(point: string, mode: "before" | "after-commit"): void { faults.set(point, mode); },
     advanceMs(ms: number): void { nowMs += ms; },
