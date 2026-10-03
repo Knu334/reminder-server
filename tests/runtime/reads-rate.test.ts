@@ -11,6 +11,7 @@ import { createAwsClients } from "../../src/shared/aws";
 import { ApiError } from "../../src/shared/errors";
 import { activeReminder, testBudget } from "../support/fixtures";
 import { captureCommands } from "../support/commands";
+import { createHarness } from "../support/stateful-store";
 
 const config = loadConfig({ AWS_REGION: "ap-northeast-1", REMINDERS_TABLE: "reminders", OWNER_STATE_TABLE: "owners", IMAGE_JOBS_TABLE: "jobs", IMAGES_BUCKET: "images", EXPECTED_API_ID: "api123", EXPECTED_API_STAGE: "$default", COGNITO_ISSUER: "https://cognito-idp.ap-northeast-1.amazonaws.com/test", COGNITO_CLIENT_ID: "client123" });
 const owner = "a".repeat(64);
@@ -175,12 +176,11 @@ void test("every_sdk_send_carries_abort_signal_and_probe_rechecks_budget", async
   for (const options of optionsSeen) assert.deepEqual(options, { abortSignal: budget.signal });
 });
 
-void test("get_preserves_tombstones_and_writes_are_explicitly_unimplemented", async () => {
+void test("get_preserves_tombstones", async () => {
   const tombstone = { ownerId: owner, id: "deleted", revision: 2, deleted: true, deletedAt: "2026-10-03T00:00:00.000Z", migrationRunId: "run-1" };
   const { client, sent } = captureCommands([{ Item: tombstone }]);
   const store = createRemindersStore(client, config);
   assert.deepEqual(await store.get(owner, "deleted", testBudget()), tombstone);
-  await assert.rejects(store.commit({ ownerId: owner, previous: null, next: activeReminder(), itemDelta: 1, byteDelta: 0, jobs: [], clientRequestToken: "token" }, testBudget()), /Reminder writes are not implemented/);
   assert.equal(sent.length, 1);
 });
 
@@ -192,4 +192,15 @@ void test("image_references_are_owner_scoped_and_reject_trailing_line_breaks", a
   for (const thumbnail of [{ ...ref, key: `images/${other}/${imageId}` }, { ...ref, sha256: "a".repeat(64) + "\n" }, { ...ref, imageId: imageId + "\n", key: `images/${owner}/${imageId}\n` }, { ...ref, bytes: 1_048_577 }]) {
     await assert.rejects(createRemindersStore(captureCommands([{ Item: activeReminder({ thumbnail }) }]).client, config).get(owner, "reminder-1", testBudget()), unavailable);
   }
+});
+
+void test("rate_120_parallel_requests_only", async () => {
+  const h = createHarness();
+  const results = await Promise.allSettled(Array.from({ length: 150 }, () => checkRate(h.owners, "owner-a", 59_001, testBudget())));
+  assert.equal(results.filter(r => r.status === "fulfilled").length, 120);
+  for (const result of results) if (result.status === "rejected") { assert.equal((result.reason as ApiError).code, "OWNER_RATE_LIMIT_EXCEEDED"); assert.equal((result.reason as ApiError).retryAfterSeconds, 1); }
+  assert.deepEqual(h.snapshot().rates, [{ pk: "OWNER#owner-a", sk: "RATE#0", count: 120, expiresAt: 172800 }]);
+  await checkRate(h.owners, "owner-a", 60_000, testBudget());
+  await checkRate(h.owners, "owner-b", 59_001, testBudget());
+  assert.equal(h.snapshot().rates.length, 3); assert.equal(h.snapshot().rates[0]?.count, 120); assert.equal(h.snapshot().rates[1]?.expiresAt, 172860);
 });
