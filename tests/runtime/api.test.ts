@@ -222,3 +222,21 @@ void test("configured_thumbnail_admission_can_exceed_the_default_one_mib", async
   const created = await s.call("POST", "/v2/reminders", { body: JSON.stringify(validCreate({ thumbnail: bytes.toString("base64") })) });
   assert.equal(created.statusCode, 201); assert.equal((json(created).thumbnail as { bytes: number }).bytes, 1_048_577); assert.equal(s.h.snapshot().storage[0]?.imageBytes, 1_048_577);
 });
+
+for (const [name, id] of [["high", "\ud800"], ["low", "\udfff"]] as const) {
+  void test(`lone_${name}_surrogate_id_is_422_without_storage_or_image_mutation`, async () => {
+    const s = setup();
+    const response = await s.call("POST", "/v2/reminders", { body: JSON.stringify(validCreate({ id, thumbnail: syntheticPngBase64 })) });
+    const state = s.h.snapshot();
+    assert.deepEqual({ status: response.statusCode, code: json(response).code, reminders: state.reminders, storage: state.storage, jobs: state.jobs, transactions: state.transactions }, { status: 422, code: "INVALID_INPUT", reminders: [], storage: [], jobs: [], transactions: [] });
+    assert.equal(state.rates[0]?.count, 1);
+  });
+}
+
+void test("well_formed_surrogate_pair_id_has_location_and_can_be_read", async () => {
+  const s = setup(); const id = "\ud83d\ude00%2F/雪";
+  const created = await s.call("POST", "/v2/reminders", { body: JSON.stringify(validCreate({ id })) });
+  assert.equal(created.statusCode, 201); assert.equal(created.headers?.Location, "/v2/reminders/%F0%9F%98%80%252F%2F%E9%9B%AA");
+  const fetched = await s.call("GET", "/v2/reminders/{id}", { pathParameters: { id } });
+  assert.equal(fetched.statusCode, 200); assert.equal(json(fetched).id, id); assert.equal(fetched.body, created.body); assert.equal(s.h.snapshot().storage[0]?.itemCount, 1);
+});

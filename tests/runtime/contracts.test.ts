@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { loadConfig } from "../../src/config";
 import { decodeThumbnail } from "../../src/images/validation";
 import { represent, parseIfMatch } from "../../src/reminders/representation";
-import { normalizeInstant, parseCreate, parsePatch } from "../../src/reminders/validation";
+import { normalizeInstant, parseCreate, parsePatch, parseReminderId } from "../../src/reminders/validation";
 import { ApiError } from "../../src/shared/errors";
 import { keys } from "../../src/shared/ports";
 import { activeReminder, validCreate } from "../support/fixtures";
@@ -151,5 +151,16 @@ void test("requires_exact_gif_and_webp_signature_bytes", () => {
   for (const data of [Buffer.from("GIF89a"), Buffer.from("RIFF\x04\x00\x00\x00WEBP", "binary")]) {
     data[0] = (data[0] ?? 0) | 128;
     rejects422(() => decodeThumbnail(data.toString("base64")));
+  }
+});
+
+void test("shared_id_validation_rejects_unpaired_surrogates_without_repair", () => {
+  for (const id of ["\ud800", "\udfff", "a\ud800b", "a\udfffb", "\ud800\ud800", "\udfff\ud800"]) {
+    rejects422(() => parseCreate(validCreate({ id })));
+    rejects422(() => parseReminderId(id));
+  }
+  for (const id of ["\ud83d\ude00", "雪\ud83d\ude00%2F/", "\ud83d\ude00".repeat(128)]) {
+    assert.equal(parseCreate(validCreate({ id })).id, id);
+    assert.equal(parseReminderId(id), id);
   }
 });

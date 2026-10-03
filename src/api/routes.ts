@@ -36,8 +36,10 @@ export async function dispatchReminderRoute(route: ApiRoute, request: GatewayReq
   const requestId = request.requestId;
   if (route === "list") return jsonResponse(200, JSON.stringify(await service.list(ownerId, parseLimit(request.query.limit), request.query.cursor ?? null, budget)), requestId);
   if (route === "create") {
-    const representation = await service.create(ownerId, parseCreate(parseJsonBody(request, config)), budget);
-    return jsonResponse(201, representation.body, requestId, { ETag: representation.etag, Location: `/v2/reminders/${encodeURIComponent(representation.dto.id)}` });
+    const input = parseCreate(parseJsonBody(request, config));
+    const location = `/v2/reminders/${encodeURIComponent(input.id)}`;
+    const representation = await service.create(ownerId, input, budget);
+    return jsonResponse(201, representation.body, requestId, { ETag: representation.etag, Location: location });
   }
   const id = request.pathParameters.id;
   if (id === undefined) throw new ApiError(400, "INVALID_GATEWAY_EVENT", "Invalid gateway event");

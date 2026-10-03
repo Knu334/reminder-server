@@ -46,7 +46,7 @@ POSTの全フィールドは以下。`thumbnail`だけ省略可能で、省略�
 
 | field | 規則 |
 | --- | --- |
-| id | 空でない文字列、制御文字なし、最大128 Unicode code point |
+| id | 空でないwell-formed Unicode文字列、制御文字・unpaired surrogateなし、最大128 Unicode code point |
 | url | http/https URL、最大4096 code point |
 | title | 文字列、最大1024 code point。空文字可 |
 | reminderTime | 実在する日時、ZまたはUTC offset必須。UTCへ正規化。過去日時も可 |

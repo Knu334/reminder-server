@@ -22,7 +22,7 @@ export function normalizeInstant(value: string): string {
 }
 
 const codePoints = (value: string): number => Array.from(value).length;
-const id = z.string().refine((value) => codePoints(value) >= 1 && codePoints(value) <= 128 && !/\p{Cc}/u.test(value));
+const id = z.string().refine((value) => codePoints(value) >= 1 && codePoints(value) <= 128 && !/[\p{Cc}\p{Cs}]/u.test(value));
 const title = z.string().refine((value) => codePoints(value) <= 1024);
 const url = z.string().refine((value) => {
   if (codePoints(value) > 4096) return false;
