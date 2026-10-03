@@ -3,30 +3,45 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "start": "nodemon"
+    "start": "nodemon",
+    "test:runtime": "tsx --test tests/runtime/*.test.ts",
+    "test:operations": "tsx --test tests/operations/*.test.ts",
+    "test:delivery": "tsx --test tests/delivery/*.test.ts",
+    "test": "npm run test:runtime && npm run test:operations && npm run test:delivery",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint ."
   },
   "dependencies": {
+    "@aws-sdk/client-cloudwatch": "3.1146.0",
+    "@aws-sdk/client-dynamodb": "3.1146.0",
+    "@aws-sdk/client-s3": "3.1146.0",
+    "@aws-sdk/lib-dynamodb": "3.1146.0",
+    "@aws-sdk/s3-request-presigner": "3.1146.0",
     "chokidar": "^4.0.3",
     "cookie-parser": "~1.4.7",
     "debug": "~4.4.3",
     "express": "^5.1.0",
     "helmet": "^8.1.0",
     "http-errors": "~2.0.0",
-    "morgan": "~1.10.1"
+    "morgan": "~1.10.1",
+    "zod": "4.6.5"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.0",
+    "@eslint/js": "9.39.0",
     "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.5",
     "@types/greenlock-express": "^4.0.3",
     "@types/morgan": "^1.9.10",
-    "eslint": "^9.39.0",
+    "@types/node": "24.19.1",
+    "esbuild": "0.28.2",
+    "eslint": "9.39.0",
     "globals": "^16.5.0",
     "nodemon": "^3.1.10",
     "ts-node": "^10.9.2",
     "tsconfig-paths": "^4.2.0",
     "tsup": "^8.5.0",
-    "typescript": "^5.9.3",
-    "typescript-eslint": "^8.46.2"
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.0"
   }
 }
