@@ -22,7 +22,7 @@ export function createRemindersService(deps: ReminderDeps): RemindersService {
   async function current(ownerId: OwnerId, id: string, budget: Budget): Promise<ActiveReminder> {
     requireBudget(budget);
     const record = await deps.reminders.get(ownerId, parseReminderId(id), budget);
-    if (record === null || record.deleted) throw new ApiError(404, "NOT_FOUND", "Reminder not found");
+    if (record === null || record.deleted) throw new ApiError(404, "REMINDER_NOT_FOUND", "Reminder not found");
     return record;
   }
   function timestamp(): string { return new Date(deps.clock()).toISOString(); }

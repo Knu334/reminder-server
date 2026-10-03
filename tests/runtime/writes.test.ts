@@ -197,3 +197,20 @@ void test("image_byte_quota_accepts_exact_128_mib_and_rejects_next_byte_atomical
   await assert.rejects(h.reminders.commit(change({ ownerId, next: activeReminder({ ownerId, id: "over" }), byteDelta: 1, clientRequestToken: "00000000-0000-4000-9000-000000000999" }), testBudget()), { status: 413, code: "OWNER_STORAGE_LIMIT_EXCEEDED" });
   assert.equal(h.snapshot().storage[0]?.itemCount, 128); assert.equal(h.snapshot().reminders.length, 128);
 });
+
+for (const recordState of ["missing", "deleted", "other-owner"] as const) {
+  for (const operation of ["get", "patch", "remove"] as const) {
+    void test(`${operation}_${recordState}_returns_exact_reminder_not_found_code`, async () => {
+      const h = createHarness(); let etag = '"unused"';
+      if (recordState !== "missing") {
+        const created = await h.service.create("owner-a", validCreate(), testBudget()); etag = created.etag;
+        if (recordState === "deleted") await h.service.remove("owner-a", created.dto.id, created.etag, testBudget());
+      }
+      const requestOwner = recordState === "other-owner" ? "owner-b" : "owner-a";
+      const result = operation === "get" ? h.service.get(requestOwner, "reminder-1", testBudget())
+        : operation === "patch" ? h.service.patch(requestOwner, "reminder-1", etag, { title: "changed" }, testBudget())
+        : h.service.remove(requestOwner, "reminder-1", etag, testBudget());
+      await assert.rejects(result, { status: 404, code: "REMINDER_NOT_FOUND" });
+    });
+  }
+}
