@@ -16,7 +16,7 @@
 | sign-out URL | `chrome.identity.getRedirectURL("logout")`が返す正確なURL |
 | scope | `openid reminder-api/read reminder-api/write` |
 
-API/認証ドメイン・issuer・Client ID等は公開設定であり、ユーザー名・パスワード・トークンを配布設定へ含めない。devとproductionは別pool/client/domainに接続し、API URLだけ変更してトークンを使い回さない。
+API/認証ドメイン・issuer・Client ID等は公開設定であり、ユーザー名・パスワード・トークンを配布設定へ含めない。常設AWS環境はproductionだけであり、1つのpool/client/domainに接続する。接続先設定の変更が必要になった場合も、API URLだけ変更して既存トークンを使い回さない。
 
 callbackは`https://<extension-id>.chromiumapp.org/cognito`、sign-outは`https://<extension-id>.chromiumapp.org/logout`となる。それぞれCognitoのAllowed callback URLs / Allowed sign-out URLsへ登録する。ChromeがこのURLへのリダイレクトを捕捉し、ウィンドウを閉じてURLを拡張へ返すため、専用Webサーバーは不要である。開発用と配布用の拡張IDを確認し、必要な実際のURLを登録する。拡張IDの変更時はCognito設定も更新する。
 
@@ -74,14 +74,14 @@ APIを使う直前に期限を確認し、残り30秒以下なら更新する。
 | client_id | 対象環境のClient ID |
 | refresh_token | 現在保持しているリフレッシュトークン |
 
-ローテーションを有効にするため、更新成功時には新しいrefresh_tokenも返る。新しいrefresh_tokenのlocalへの保存を先に完了し、access_token・expires_in等をsessionへ保存してから待機中のAPIを再開する。local/sessionを跨ぐ原子的な保存は期待せず、途中停止時は保存済みの新しいrefresh tokenから再開する。ログアウト・環境切替で進行中の更新を中断し、古い認証世代の応答を保存・利用しない。更新後のrefresh tokenの期限は元の30日間の残り期間であり、更新のたびに30日間延長されるとは扱わない。再試行猶予は10秒で、保存前の停止・通信結果不明による再試行を制限する。再開できなければ再ログインへ移る。
+ローテーションを有効にするため、更新成功時には新しいrefresh_tokenも返る。新しいrefresh_tokenのlocalへの保存を先に完了し、access_token・expires_in等をsessionへ保存してから待機中のAPIを再開する。local/sessionを跨ぐ原子的な保存は期待せず、途中停止時は保存済みの新しいrefresh tokenから再開する。ログアウト・接続先設定変更で進行中の更新を中断し、古い認証世代の応答を保存・利用しない。更新後のrefresh tokenの期限は元の30日間の残り期間であり、更新のたびに30日間延長されるとは扱わない。再試行猶予は10秒で、保存前の停止・通信結果不明による再試行を制限する。再開できなければ再ログインへ移る。
 
 トークンの保存は次のとおり。
 
 - access_tokenとその期限、認可中のstate/verifierは`chrome.storage.session`に保持する。Service Worker停止を跨いで取得でき、Chrome再起動・拡張のreload/update等では失われることを扱う。
 - Chrome再起動後のログイン継続に使用するrefresh_tokenと対象環境・Client IDは`chrome.storage.local`へ保持する。local全体を`setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" })`で拡張の信頼したcontextに限定し、content scriptに必要な設定等は限定したメッセージ処理で渡す。
 - トークンをChrome Sync、WebページのlocalStorage、DOM、URL、ログへ置かない。content scriptやWebページへトークンを返さず、必要なリマインダー結果だけを返す。
-- 再起動後にaccess_tokenがなくrefresh_tokenがある場合は、API使用前に更新する。環境切替時は使用するAPI/pool/clientと保存した認証状態を照合する。
+- 再起動後にaccess_tokenがなくrefresh_tokenがある場合は、API使用前に更新する。接続先設定変更時は使用するAPI/pool/clientと保存した認証状態を照合する。
 
 ## 4. エラー・ログアウト・失効
 
@@ -101,9 +101,9 @@ Cognitoの無効化・失効後も発行済みアクセストークンは標準J
 
 画像URLは別の`GET /v2/reminders/{id}/thumbnail-url`で発行し、現在の契約は発行から15分である。画像取得時にCognitoのBearerをS3へ送らない。画像URLとAPIトークンは別々に期限切れを処理し、画像の再表示用にバイト列を保存する。Cognitoの失効でS3 URLが即時失効するとは表示しない。
 
-## 5. devでの受け入れ確認
+## 5. productionでの受け入れ確認
 
-正確な拡張ID/callback、初回ログインと仮パスワード変更、PKCE/state、取消・不正callback、コード交換、read/write scope、5分の期限と自動更新、並行更新、worker停止・Chrome再起動、30日の期限・失効、ログアウト、画像URLの別期限、機密値をログに含めないことを確認する。検証対象の拡張版、サーバーのコミット・digest・環境を記録する。
+正確な拡張ID/callback、初回ログインと仮パスワード変更、PKCE/state、取消・不正callback、コード交換、read/write scope、5分の期限と自動更新、並行更新、worker停止・Chrome再起動、30日の期限・失効、ログアウト、画像URLの別期限、機密値をログに含めないことを確認する。検証対象の拡張版、サーバーのコミット・digest・production接続先を記録する。認証付きCRUD・画像確認は本人のアカウントと明示した合成テスト項目だけを使い、終了後にテスト項目だけをETag付きで削除する。ユーザー無効化・失効・不正callback・並行更新の失敗ケースはローカル/CIで先に模擬し、本人の利用中データ・認証状態を自動smokeで破壊しない。ログアウトや初回パスワード変更の実確認は本人の操作として扱う。
 
 本設計更新では拡張の製品コードを変更せず、CognitoやChrome上の実ログイン試験も実施しない。サーバー単体の模擬テストと、実クライアントで確認した結果を区別する。
 
