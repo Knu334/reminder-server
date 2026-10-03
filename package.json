@@ -8,7 +8,8 @@
     "test:delivery": "tsx --test tests/delivery/*.test.ts",
     "test": "npm run test:runtime && npm run test:operations && npm run test:delivery",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "migrate:json": "tsx scripts/operations/migrate-json.ts"
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "3.1146.0",

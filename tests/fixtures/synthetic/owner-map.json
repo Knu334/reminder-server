@@ -1,0 +1,17 @@
+[
+  {
+    "legacyKey": "synthetic-owner",
+    "issuer": "https://synthetic.invalid/pool",
+    "sub": "synthetic-non-uuid-sub"
+  },
+  {
+    "legacyKey": "__proto__",
+    "issuer": "https://synthetic.invalid/pool",
+    "sub": "synthetic-special-one"
+  },
+  {
+    "legacyKey": "constructor",
+    "issuer": "https://synthetic.invalid/pool",
+    "sub": "synthetic-special-two"
+  }
+]

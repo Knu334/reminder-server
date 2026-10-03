@@ -1,0 +1,17 @@
+{
+  "synthetic-owner": [
+    {
+      "id": "synthetic/%/🌱",
+      "url": "https://synthetic.invalid/reminder",
+      "title": "Synthetic reminder",
+      "reminderTime": "2026-10-03T09:00:00+09:00",
+      "autoOpen": false,
+      "webPush": true,
+      "hidden": false,
+      "thumbnail": "iVBORw0KGgo=",
+      "createdAt": "2026-10-03T09:00:00+09:00"
+    }
+  ],
+  "__proto__": [],
+  "constructor": []
+}
