@@ -1,8 +1,8 @@
-import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import type { Config } from "../config";
+import { cleanupKeys } from "../images/job-keys";
 import { requireBudget } from "../shared/budget";
 import { ApiError } from "../shared/errors";
 import { keys, type Budget, type RemindersStore } from "../shared/ports";
@@ -75,10 +75,9 @@ function transaction(change: ChangeSet, config: Config): TransactWriteCommand {
     if (transition.expectedVersionId !== undefined) { names["#version"] = "versionId"; values[":version"] = transition.expectedVersionId; condition += " AND #version = :version"; }
     let update = "SET #state = :to, #updated = :at";
     if (transition.to === "pending" || transition.to === "retired" || transition.to === "deleting") {
-      // R06 will extract this exact algorithm to images/job-keys.ts cleanupKeys.
       const dueAtMs = transition.atMs + (transition.to === "deleting" ? 1_200_000 : 86_400_000);
-      const shard = (createHash("sha256").update(transition.jobId).digest()[0]! % 4).toString().padStart(2, "0");
-      values[":due"] = dueAtMs; values[":partition"] = `${transition.to}#${shard}`; values[":sort"] = `${String(dueAtMs).padStart(13, "0")}#${transition.jobId}`;
+      const index = cleanupKeys(transition.to, transition.jobId, dueAtMs);
+      values[":due"] = dueAtMs; values[":partition"] = index.cleanupPartition; values[":sort"] = index.cleanupSortKey;
       update += ", #due = :due, #partition = :partition, #sort = :sort";
       // JobTransition has no lease owner; cleanup claim() owns deleting transitions/leases.
       update += " REMOVE #lease";
