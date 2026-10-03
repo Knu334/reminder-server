@@ -59,7 +59,8 @@ void test("normalizes_headers_and_preserves_path_parameter_identity", () => {
   assert.equal(request.headers["content-type"], "application/json");
   assert.equal(request.query.limit, "2");
   rejectsStatus(422, () => parseIfMatch(request.headers["if-match"]));
-  for (const id of ["", "a\n", "😀".repeat(129), 123]) rejectsStatus(422, () => parseGatewayEvent(gatewayEvent({ pathParameters: { id } }), config));
+  for (const id of ["", "a\n", "😀".repeat(129)]) assert.equal(parseGatewayEvent(gatewayEvent({ pathParameters: { id } }), config).pathParameters.id, id);
+  rejectsStatus(400, () => parseGatewayEvent(gatewayEvent({ pathParameters: { id: 123 } }), config));
 });
 
 void test("checks_bytes_before_json_parse", () => {
@@ -181,4 +182,13 @@ void test("large_gateway_base64_is_stack_safe_and_preserves_error_classes", () =
   for (const body of ["ex==", "e31=", "e30=AAAA", "====", "A===", "AAAA===="]) {
     rejectsStatus(400, () => parseJsonBody(parseGatewayEvent(gatewayEvent({ body, isBase64Encoded: true }), config), config));
   }
+});
+
+void test("public_payload_and_deadline_codes_match_api_contract", () => {
+  for (const isBase64Encoded of [false, true]) {
+    const rawBody = "あ".repeat(699_051);
+    assert.throws(() => parseJsonBody(parseGatewayEvent(gatewayEvent({ body: isBase64Encoded ? Buffer.from(rawBody).toString("base64") : rawBody, isBase64Encoded }), config), config), (error: unknown) => error instanceof ApiError && error.status === 413 && error.code === "PAYLOAD_TOO_LARGE");
+  }
+  const response = errorResponse(new ApiError(503, "DEADLINE_EXCEEDED", "private-details"), "req");
+  assert.equal(response.statusCode, 503); assert.equal((JSON.parse(response.body ?? "") as { code: string }).code, "SERVICE_UNAVAILABLE");
 });

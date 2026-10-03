@@ -26,11 +26,4 @@ export default tseslint.config(
       }],
     },
   },
-  {
-    // Temporary Express HTTPS listener compatibility; removed with the legacy app in R08.
-    files: ["src/app.ts"],
-    rules: {
-      "@typescript-eslint/no-misused-promises": ["error", { checksVoidReturn: { arguments: false } }],
-    },
-  },
 );

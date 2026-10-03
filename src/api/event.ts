@@ -1,11 +1,11 @@
 import type { Config } from "../config";
-import { parseReminderId } from "../reminders/validation";
 import { ApiError } from "../shared/errors";
 import { requireOwner } from "./identity";
 
 export interface GatewayRequest {
   method: string;
   routeKey: string;
+  rawPath: string;
   pathParameters: Record<string, string>;
   query: Record<string, string>;
   headers: Record<string, string>;
@@ -32,12 +32,13 @@ function strings(value: unknown): Record<string, string> {
 }
 
 /** Accept only the configured HTTP API v2 boundary; never decode pathParameters again. */
-export function parseGatewayEvent(value: unknown, config: Config): GatewayRequest {
+export function parseGatewayEvent(value: unknown, config: Pick<Config, "expectedApiId" | "expectedStage">): GatewayRequest {
   const event = record(value);
   const context = record(event.requestContext);
   const http = record(context.http);
   if (event.version !== "2.0" || context.apiId !== config.expectedApiId || context.stage !== config.expectedStage ||
       typeof event.routeKey !== "string" || context.routeKey !== event.routeKey ||
+      typeof event.rawPath !== "string" || !event.rawPath.startsWith("/") || /[\r\n]/.test(event.rawPath) ||
       typeof http.method !== "string" || !/^[A-Z]+$/.test(http.method) ||
       (event.routeKey !== "$default" && !event.routeKey.startsWith(`${http.method} /`)) ||
       typeof context.requestId !== "string" || !context.requestId || typeof http.sourceIp !== "string" ||
@@ -47,12 +48,11 @@ export function parseGatewayEvent(value: unknown, config: Config): GatewayReques
     const name = key.toLowerCase();
     headers[name] = headers[name] === undefined ? field : `${headers[name]},${field}`;
   }
-  // ID errors use the same R01 rules, including Unicode code-point limits.
+  // Structural boundary only: semantic ID rules run after auth/rate/publication.
   const pathParameters: Record<string, string> = Object.create(null) as Record<string, string>;
   if (event.pathParameters !== undefined && event.pathParameters !== null) {
     for (const [key, field] of Object.entries(record(event.pathParameters))) {
-      if (key === "id") pathParameters[key] = parseReminderId(field);
-      else if (typeof field === "string") pathParameters[key] = field;
+      if (typeof field === "string") pathParameters[key] = field;
       else return invalidGateway();
     }
   }
@@ -67,7 +67,7 @@ export function parseGatewayEvent(value: unknown, config: Config): GatewayReques
     }
   }
   return {
-    method: http.method, routeKey: event.routeKey, pathParameters, query: strings(event.queryStringParameters), headers,
+    method: http.method, routeKey: event.routeKey, rawPath: event.rawPath, pathParameters, query: strings(event.queryStringParameters), headers,
     body: event.body as string | undefined, isBase64Encoded: event.isBase64Encoded, requestId: context.requestId, sourceIp: http.sourceIp, jwt,
   };
 }
@@ -99,11 +99,11 @@ export function parseJsonBody(request: GatewayRequest, config: Config): unknown 
   let bytes: Buffer;
   if (request.isBase64Encoded) {
     const decodedBytes = base64DecodedBytes(body);
-    if (decodedBytes > config.limits.jsonBytes) throw new ApiError(413, "BODY_TOO_LARGE", "Request body is too large");
+    if (decodedBytes > config.limits.jsonBytes) throw new ApiError(413, "PAYLOAD_TOO_LARGE", "Request body is too large");
     bytes = Buffer.from(body, "base64");
     if (bytes.toString("base64") !== body) throw new ApiError(400, "INVALID_BODY", "Invalid request body");
   } else {
-    if (Buffer.byteLength(body, "utf8") > config.limits.jsonBytes) throw new ApiError(413, "BODY_TOO_LARGE", "Request body is too large");
+    if (Buffer.byteLength(body, "utf8") > config.limits.jsonBytes) throw new ApiError(413, "PAYLOAD_TOO_LARGE", "Request body is too large");
     bytes = Buffer.from(body, "utf8");
   }
   const type = request.headers["content-type"] ?? "";

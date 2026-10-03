@@ -25,7 +25,7 @@ const messages: Record<number, string> = {
 export function errorResponse(error: unknown, requestId: string): APIGatewayProxyStructuredResultV2 {
   const known = error instanceof ApiError && messages[error.status] !== undefined;
   const status = known ? error.status : 503;
-  const code = known && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) && !/[\r\n]/.test(error.code) ? error.code : "SERVICE_UNAVAILABLE";
+  const code = status !== 503 && known && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) && !/[\r\n]/.test(error.code) ? error.code : "SERVICE_UNAVAILABLE";
   const headers: Record<string, string> = {};
   if (known && error.retryAfterSeconds !== undefined && Number.isSafeInteger(error.retryAfterSeconds) && error.retryAfterSeconds > 0) headers["Retry-After"] = String(error.retryAfterSeconds);
   const body = { code, message: messages[status], requestId, ...(status === 429 && headers["Retry-After"] !== undefined ? { retryAfterSeconds: Number(headers["Retry-After"]) } : {}) };
