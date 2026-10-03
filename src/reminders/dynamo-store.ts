@@ -18,7 +18,7 @@ const base = { ownerId: z.string().min(1), id: z.string(), revision: z.number().
 const image = z.strictObject({
   imageId: z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
   key: z.string(), versionId: z.string().min(1), mime: z.enum(["image/png", "image/jpeg", "image/gif", "image/webp"]),
-  bytes: z.number().int().min(1).max(1_048_576), sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  bytes: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER), sha256: z.string().regex(/^[0-9a-f]{64}$/),
 });
 const stored = z.discriminatedUnion("deleted", [
   z.strictObject({ ...base, deleted: z.literal(true), deletedAt: instant }),

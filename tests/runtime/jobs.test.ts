@@ -153,3 +153,22 @@ void test("trailing_line_breaks_in_job_identity_and_checksum_fail_before_send", 
   await assert.rejects(f.store.createPending(intent({ jobId: id, key: `images/owner-a/${id}` }), testBudget()), unavailable);
   assert.equal(f.sent.length, 0);
 });
+
+void test("higher_limit_upload_remains_cleanup_readable_after_limit_is_lowered", async () => {
+  const config = { ...harnessConfig, limits: { ...harnessConfig.limits, thumbnailBytes: 2_097_152 } };
+  const h = createHarness(config); await h.jobs.createPending(intent(), testBudget());
+  await h.jobs.recordUpload({ ...ref, bytes: 1_048_577 }, testBudget());
+  config.limits.thumbnailBytes = 12;
+  assert.equal((await h.jobs.get(jobId, testBudget()))?.bytes, 1_048_577);
+  const page = await h.jobs.queryDue("pending#01", 86_400_000, null, testBudget()); assert.equal(page.jobs[0]?.bytes, 1_048_577);
+  const claimed = await h.jobs.claim(jobId, "run-large", 86_400_000, testBudget()); assert.equal(claimed?.bytes, 1_048_577);
+  await h.jobs.complete(jobId, "run-large", testBudget()); assert.equal((await h.jobs.get(jobId, testBudget()))?.state, "done");
+});
+
+void test("persisted_job_and_upload_bytes_must_be_positive_safe_integers", async () => {
+  for (const bytes of [0, -1, 0.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity]) {
+    const stored = intent({ ...cleanupKeys("pending", jobId, 86_400_000), bytes });
+    await assert.rejects(capture([{ Item: stored }]).store.get(jobId, testBudget()), unavailable);
+    const f = capture([]); await assert.rejects(f.store.recordUpload({ ...ref, bytes }, testBudget()), unavailable); assert.equal(f.sent.length, 0);
+  }
+});

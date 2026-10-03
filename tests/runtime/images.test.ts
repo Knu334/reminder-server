@@ -230,3 +230,39 @@ void test("uncertain_replacement_job_read_failure_never_demotes_new_committed_jo
   assert.equal(current.dto.revision, 2); assert.equal(state.jobs.find(job => job.jobId === current.dto.thumbnail?.imageId)?.state, "committed");
   assert.equal(state.jobs.find(job => job.jobId === old.dto.thumbnail?.imageId)?.state, "retired"); assert.equal(state.storage[0]?.imageBytes, 20); assert.equal(state.transactions.length, 2);
 });
+
+void test("configured_higher_image_limit_survives_create_get_url_and_lowered_limit", async () => {
+  const config = { ...harnessConfig, limits: { ...harnessConfig.limits, thumbnailBytes: 2_097_152 } };
+  const h = createHarness(config); const data = sizedPng(1_048_577);
+  const created = await h.service.create("owner-a", validCreate({ thumbnail: data.toString("base64") }), testBudget());
+  assert.equal(created.dto.thumbnail?.bytes, 1_048_577); assert.equal(h.snapshot().storage[0]?.imageBytes, 1_048_577);
+  config.limits.thumbnailBytes = 12;
+  assert.deepEqual(await h.service.get("owner-a", created.dto.id, testBudget()), created);
+  assert.equal((await h.service.list("owner-a", 20, null, testBudget())).items[0]?.thumbnail?.bytes, 1_048_577);
+  assert.equal((await h.service.thumbnailUrl("owner-a", created.dto.id, testBudget())).imageId, created.dto.thumbnail?.imageId);
+  await assert.rejects(h.service.create("owner-a", validCreate({ id: "too-large-now", thumbnail: sizedPng(13).toString("base64") }), testBudget()), { status: 413, code: "THUMBNAIL_TOO_LARGE" });
+});
+
+void test("configured_higher_decode_boundary_preserves_classification_and_size_first", (t) => {
+  const exact = sizedPng(2_097_152).toString("base64");
+  const decoded = decodeThumbnail(exact, 2_097_152); assert.equal(decoded?.bytes, 2_097_152);
+  const oversized = sizedPng(2_097_153).toString("base64");
+  const originalFrom = Buffer.from;
+  t.mock.method(Buffer, "from", (...args: Parameters<typeof Buffer.from>) => {
+    assert.notEqual(args[0], oversized, "oversized input must be rejected before full base64 decode");
+    return Reflect.apply(originalFrom, Buffer, args) as Buffer;
+  });
+  assert.throws(() => decodeThumbnail(oversized, 2_097_152), { status: 413, code: "THUMBNAIL_TOO_LARGE" });
+  assert.throws(() => decodeThumbnail(`${oversized.slice(0, -1)}!`, 2_097_152), { status: 422, code: "INVALID_THUMBNAIL" });
+});
+
+void test("persisted_reminder_image_bytes_reject_zero_fraction_and_unsafe_integer", async () => {
+  const { createRemindersStore } = await import("../../src/reminders/dynamo-store");
+  const { activeReminder } = await import("../support/fixtures");
+  const imageId = "00000000-0000-4000-8000-000000000001";
+  for (const bytes of [0, -1, 0.5, Number.MAX_SAFE_INTEGER + 1, NaN, Infinity]) {
+    const row = activeReminder({ ownerId: "owner-a", thumbnail: { imageId, key: `images/owner-a/${imageId}`, versionId: "v1", mime: "image/png", bytes, sha256: "a".repeat(64) } });
+    const client = { async send() { return { Item: row }; } } as unknown as Parameters<typeof createRemindersStore>[0];
+    await assert.rejects(createRemindersStore(client, harnessConfig).get("owner-a", row.id, testBudget()), unavailable);
+  }
+});

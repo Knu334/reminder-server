@@ -45,7 +45,7 @@ export function decodeThumbnail(value: string | null, maxBytes = MAX_IMAGE_BYTES
   const bytes = payload.length / 4 * 3 - padding;
   const mime = identifyMime(Buffer.from(payload.slice(0, 16), "base64"));
   if (declaredMime !== undefined && declaredMime !== mime) return invalidImage();
-  if (bytes > Math.min(MAX_IMAGE_BYTES, maxBytes)) throw new ApiError(413, "THUMBNAIL_TOO_LARGE", "Thumbnail too large");
+  if (bytes > maxBytes) throw new ApiError(413, "THUMBNAIL_TOO_LARGE", "Thumbnail too large");
   const data = Buffer.from(payload, "base64");
   return { data, mime, bytes, sha256: createHash("sha256").update(data).digest("hex") };
 }

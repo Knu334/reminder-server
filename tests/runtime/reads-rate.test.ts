@@ -189,7 +189,9 @@ void test("image_references_are_owner_scoped_and_reject_trailing_line_breaks", a
   const ref = { imageId, key: `images/${owner}/${imageId}`, versionId: "version-1", mime: "image/png", bytes: 8, sha256: "a".repeat(64) };
   const good = activeReminder({ thumbnail: ref });
   assert.deepEqual(await createRemindersStore(captureCommands([{ Item: good }]).client, config).get(owner, "reminder-1", testBudget()), good);
-  for (const thumbnail of [{ ...ref, key: `images/${other}/${imageId}` }, { ...ref, sha256: "a".repeat(64) + "\n" }, { ...ref, imageId: imageId + "\n", key: `images/${owner}/${imageId}\n` }, { ...ref, bytes: 1_048_577 }]) {
+  const larger = activeReminder({ thumbnail: { ...ref, bytes: 1_048_577 } });
+  assert.deepEqual(await createRemindersStore(captureCommands([{ Item: larger }]).client, config).get(owner, "reminder-1", testBudget()), larger);
+  for (const thumbnail of [{ ...ref, key: `images/${other}/${imageId}` }, { ...ref, sha256: "a".repeat(64) + "\n" }, { ...ref, imageId: imageId + "\n", key: `images/${owner}/${imageId}\n` }, { ...ref, bytes: Number.MAX_SAFE_INTEGER + 1 }]) {
     await assert.rejects(createRemindersStore(captureCommands([{ Item: activeReminder({ thumbnail }) }]).client, config).get(owner, "reminder-1", testBudget()), unavailable);
   }
 });

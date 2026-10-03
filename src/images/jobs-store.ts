@@ -15,7 +15,7 @@ const jobSchema = z.strictObject({
   jobId: uuid, ownerId: z.string().min(1), key: z.string(), state: z.enum(["pending", "committed", "retired", "deleting", "done"]),
   createdAtMs: time, updatedAtMs: time, dueAtMs: time.optional(), leaseOwner: z.string().min(1).optional(),
   versionId: z.string().min(1).refine(value => value !== "null").optional(), mime: z.enum(["image/png", "image/jpeg", "image/gif", "image/webp"]).optional(),
-  bytes: z.number().int().min(1).max(1_048_576).optional(), sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+  bytes: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional(), sha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   cleanupPartition: partition.optional(), cleanupSortKey: z.string().optional(), migrationRunId: z.string().min(1).optional(),
 });
 const cursorSchema = z.strictObject({ jobId: uuid, cleanupPartition: partition, cleanupSortKey: z.string() });
