@@ -233,7 +233,7 @@ jobs:
           include-hidden-files: false
   apply:
     needs: [authorize, plan]
-    if: needs.authorize.result == 'success' && needs.plan.result == 'success' && inputs.apply
+    if: ${{ !cancelled() && needs.authorize.result == 'success' && needs.plan.result == 'success' && inputs.apply }}
     runs-on: ubuntu-24.04
     environment: production
     timeout-minutes: 45

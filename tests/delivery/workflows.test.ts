@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {readFileSync,existsSync,readdirSync} from "node:fs";
 import {test} from "node:test";
+import {Script} from "node:vm";
 import {parseDocument} from "yaml";
 interface Step {uses?:string;run?:string;if?:string;with?:Record<string,unknown>;env?:Record<string,string>}
 interface Job {permissions?:Record<string,string>;if?:string;needs?:string[]|string;environment?:string;steps:Step[]}
@@ -29,6 +30,31 @@ void test("apply_consumes_reviewed_plan_and_never_rebuilds_zip",()=>{
   const registration=d.jobs.register!;assert.ok(registration.if?.includes("!inputs.apply"));assert.ok(registration.if?.includes("inputs.target == 'application'"));assert.ok(registration.if?.includes("inputs.reviewed_run == ''"));assert.equal((commands(registration).match(/release:register/g)??[]).length,1);
   for(const required of ["--zip","--manifest","--bucket","--region","--commit","--npm-version","--esbuild-version","--audit-id","--sbom-id","--tests-id"])assert.ok(commands(registration).includes(required));
   assert.ok(commands(d.jobs.plan!).includes("release:workflow -- plan"));assert.ok(commands(d.jobs.authorize!).includes("release:workflow -- authorize"));
+});
+// Evaluate only the parsed deploy gates, including the documented implicit success()
+// and transitive skipped-ancestor rule. This is a local contract model, not a live runner.
+function eligible(w:Workflow,name:string,results:Record<string,string>,inputs:Record<string,string|boolean>,cancelled=false):boolean {
+  const ancestors=new Set<string>();const visit=(id:string)=>{const needs=w.jobs[id]!.needs;for(const parent of typeof needs==="string"?[needs]:needs??[]){if(!ancestors.has(parent)){ancestors.add(parent);visit(parent);}}};visit(name);
+  const success=!cancelled&&Array.from(ancestors).every(id=>results[id]==="success");
+  let condition=(w.jobs[name]!.if??"true").replace(/^\s*\$\{\{([\s\S]*)\}\}\s*$/,"$1");
+  if(!/\b(?:always|cancelled|success|failure)\s*\(/.test(condition)&&!success)return false;
+  condition=condition.replace(/needs\.([a-z]+)\.result/g,(_match,id:string)=>JSON.stringify(results[id]))
+    .replace(/inputs\.([a-z_]+)/g,(_match,key:string)=>JSON.stringify(inputs[key]))
+    .replace(/always\(\)/g,"true").replace(/cancelled\(\)/g,String(cancelled))
+    .replace(/success\(\)/g,String(success)).replace(/failure\(\)/g,String(Array.from(ancestors).some(id=>results[id]==="failure")));
+  assert.match(condition,/^(?:\s|&&|\|\||!|\(|\)|==|!=|true|false|"[a-z0-9_]*"|'[a-z0-9_]*')+$/,"Only the finite documented gate syntax is evaluated");
+  return new Script(`Boolean(${condition})`).runInNewContext({},{timeout:100}) as boolean;
+}
+void test("skipped_registration_successful_plan_still_allows_only_authorized_uncancelled_apply",()=>{
+  const w=workflow("deploy"),results={authorize:"success",register:"skipped",plan:"success"};
+  for(const target of ["platform","application"]){const inputs={target,apply:true,reviewed_run:"42"};
+    assert.equal(eligible(w,"register",results,inputs),false);
+    assert.equal(eligible(w,"plan",results,inputs),true);
+    assert.equal(eligible(w,"apply",results,inputs),true,`${target} apply must survive its skipped registration ancestor`);
+    assert.equal(eligible(w,"apply",results,inputs,true),false,"Cancelled runs must not start apply");
+    for(const result of ["failure","skipped","cancelled"])for(const job of ["authorize","plan"])assert.equal(eligible(w,"apply",{...results,[job]:result},inputs),false);
+    assert.equal(eligible(w,"apply",results,{...inputs,apply:false}),false);
+  }
 });
 void test("all_actions_pinned_and_apply_not_cancelled",()=>{
   for(const name of ["ci","deploy"]){const w=workflow(name);for(const job of Object.values(w.jobs))for(const s of job.steps)if(s.uses)assert.match(s.uses,/@[0-9a-f]{40}$/);}
