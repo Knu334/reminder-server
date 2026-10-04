@@ -1,0 +1,10 @@
+# All account/origin/redirect/domain values are required operator inputs.
+account_id = "<AWS_ACCOUNT_ID>"
+region = "<AWS_REGION>"
+name_prefix = "<BOOTSTRAP_NAME_PREFIX>"
+chrome_origin = "<EXACT_CHROME_EXTENSION_OR_HTTPS_ORIGIN>"
+callback_url = "<FULL_HTTPS_CALLBACK_URL>"
+logout_url = "<FULL_HTTPS_LOGOUT_URL>"
+cognito_domain_prefix = "<UNIQUE_COGNITO_HOSTED_DOMAIN_PREFIX>"
+api_role_arn = "<BOOTSTRAP_API_ROLE_ARN_OUTPUT>"
+cleanup_role_arn = "<BOOTSTRAP_CLEANUP_ROLE_ARN_OUTPUT>"
