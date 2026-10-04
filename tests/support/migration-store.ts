@@ -3,7 +3,7 @@ import type { MigrationIdentity, LegacyValidation } from "../../scripts/operatio
 import type { MigrationDeps, MigrationRun, MigrationStore } from "../../scripts/operations/migration";
 import type { StoredReminder, ActiveReminder } from "../../src/reminders/types";
 import type { ImageJob, ImageRef } from "../../src/images/types";
-import type { ImagesStore, JobsStore, RemindersStore, OwnerStore } from "../../src/shared/ports";
+import type { Budget, ImagesStore, JobsStore, RemindersStore, OwnerStore } from "../../src/shared/ports";
 import { testBudget } from "./fixtures";
 
 /** Stateful external ports: transactions and versioned object writes survive a new deps instance. */
@@ -188,9 +188,8 @@ export async function migrationAdapterHarness(identity: MigrationIdentity, valid
     }
     throw new Error("unsupported S3 command");
   } } as unknown as import("@aws-sdk/client-s3").S3Client;
-  const budget = testBudget();
   return {
-    deps(): MigrationDeps { return { migration: createMigrationStore(dynamo, config, identity, validation, budget), reminders: createRemindersStore(dynamo, config), jobs: createJobsStore(dynamo, config),
+    deps(budget: Budget = testBudget()): MigrationDeps { return { migration: createMigrationStore(dynamo, config, identity, validation, budget), reminders: createRemindersStore(dynamo, config), jobs: createJobsStore(dynamo, config),
       owners: createOwnerStore(dynamo, config), images: createMigrationImagesStore(s3, config), validation, budget, clock: () => 1_791_072_000_000, uuid: () => "00000000-0000-4000-8000-000000000099" }; },
     fail(point: string, phase: "before" | "after") { faults.set(point, phase); },
     seed(tableName: string, row: Row) { table(tableName).set(encodedKey(row), structuredClone(row)); },

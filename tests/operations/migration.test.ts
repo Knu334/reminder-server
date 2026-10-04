@@ -123,8 +123,8 @@ void test("aws_publication_transaction_requires_persisted_exact_verification", a
   const { harnessConfig } = await import("../support/stateful-store");
   const { TransactWriteCommand } = await import("@aws-sdk/lib-dynamodb");
   const verified = { identity, exactMatch: true, mismatches: [] };
-  const capture = captureCommands([{ Item: { pk: "GLOBAL", sk: `MIGRATION#${identity.runId}`, identity, phase: "verified", progress: { format: "chunks-v1", sha256: createHash("sha256").update(JSON.stringify({ completedOwners: [], completedItems: [] })).digest("hex"), ownerCount: 0, itemCount: 0 },
-    verification: { ...verified, mismatches: { format: "chunks-v1", sha256: createHash("sha256").update("[]").digest("hex"), count: 0 } } } }, {}]);
+  const capture = captureCommands([{ Item: { pk: "GLOBAL", sk: `MIGRATION#${identity.runId}`, identity, phase: "verified", progress: { format: "chain-v2", sha256: createHash("sha256").update(JSON.stringify({ completedOwners: [], completedItems: [] })).digest("hex"), completedOwners: { head: null, count: 0 }, completedItems: { head: null, count: 0 } },
+    verification: { ...verified, mismatches: { format: "chain-v2", sha256: createHash("sha256").update("[]").digest("hex"), head: null, count: 0 } } } }, {}]);
   await createMigrationStore(capture.client, harnessConfig, identity, input(), testBudget()).publishIfVerified(identity);
   const tx = capture.sent[1] as InstanceType<typeof TransactWriteCommand>; assert.ok(tx instanceof TransactWriteCommand);
   const gate = tx.input.TransactItems!.filter(action => action.Update?.Key?.sk === "PUBLICATION"); assert.equal(gate.length, 1);
@@ -262,14 +262,17 @@ void test("missing_corrupt_and_wrong_run_chunks_fail_closed", async () => {
     const value = input(); const harness = await migrationAdapterHarness(identity, value); await importMigration(identity, value, harness.deps());
     const rows = harness.snapshot(identity.environment.ownerStateTable);
     const root = rows.find(row => row.sk === `MIGRATION#${identity.runId}`)!;
-    const snapshotSha256 = (root.progress as { sha256: string }).sha256;
-    const chunk = rows.find(row => String(row.sk).includes(`#CHUNK#completedItems#${snapshotSha256}#`)); assert.ok(chunk);
+    const head = (root.progress as { completedItems: { head: string } }).completedItems.head;
+    const chunk = rows.find(row => row.chunkSha256 === head && row.kind === "completedItems"); assert.ok(chunk);
     if (mode === "missing") harness.remove(identity.environment.ownerStateTable, chunk);
     else if (mode === "wrong-content-valid-chunk-hash") {
       const values = structuredClone(chunk.values as Array<{ ownerPosition: number; itemPosition: number; imageId: string | null }>);
       values[0]!.itemPosition = 9999;
-      const chunkSha256 = createHash("sha256").update(JSON.stringify({ kind: chunk.kind, index: chunk.index, values })).digest("hex");
-      harness.seed(identity.environment.ownerStateTable, { ...chunk, values, chunkSha256 });
+      const chunkSha256 = createHash("sha256").update(JSON.stringify({ migrationRunId: chunk.migrationRunId, kind: chunk.kind, index: chunk.index, previousSha256: chunk.previousSha256, values })).digest("hex");
+      harness.remove(identity.environment.ownerStateTable, chunk);
+      harness.seed(identity.environment.ownerStateTable, { ...chunk, sk: `MIGRATION#${identity.runId}#CHUNK#completedItems#${chunkSha256}`, values, chunkSha256 });
+      const progress = root.progress as { completedItems: { head: string } }; progress.completedItems.head = chunkSha256;
+      harness.seed(identity.environment.ownerStateTable, root);
     } else harness.seed(identity.environment.ownerStateTable, { ...chunk, ...(mode === "corrupt" ? { values: [] } : { migrationRunId: "00000000-0000-4000-8000-000000000002" }) });
     await assert.rejects(() => harness.deps().migration.loadRun(identity.runId), mode);
     await assert.rejects(() => verifyMigration(identity, value, harness.deps()), mode);
@@ -291,4 +294,94 @@ void test("canonical_chunk_hashes_accept_equivalent_mismatch_property_order", as
   const verification = { identity, exactMatch: false, mismatches: [{ reason: "MISMATCH", field: "title", location: "owners[0].items[0]" }] };
   await harness.deps().migration.recordVerification(identity.runId, verification);
   assert.deepEqual((await harness.deps().migration.loadRun(identity.runId))?.verification, verification);
+});
+
+void test("bounded_budget_resume_advances_past_the_durable_completed_prefix", async () => {
+  const { migrationAdapterHarness } = await import("../support/migration-store");
+  const value: LegacyValidation = { errors: [], owners: [{ ownerId: "a".repeat(64), items: ["first", "second", "third"].map(id => activeReminder({ id })), images: new Map() }] };
+  const harness = await migrationAdapterHarness(identity, value);
+  function freshInvocation() {
+    let remaining = 3;
+    const budget = { signal: new AbortController().signal, remainingMs: () => remaining };
+    const deps = harness.deps(budget); const get = deps.reminders.get.bind(deps.reminders);
+    deps.reminders = { ...deps.reminders, async get(...args) { const result = await get(...args); remaining--; return result; } };
+    return deps;
+  }
+  await assert.rejects(() => importMigration(identity, value, freshInvocation()));
+  assert.equal(harness.snapshot(identity.environment.remindersTable).length, 2);
+  assert.equal((await harness.deps().migration.loadRun(identity.runId))?.progress.completedItems.length, 2);
+  const summary = await importMigration(identity, value, freshInvocation());
+  assert.deepEqual(summary, { owners: 1, items: 3, imageBytes: 0, completed: true });
+  assert.equal(harness.snapshot(identity.environment.remindersTable).length, 3);
+  const verification = await verifyMigration(identity, value, harness.deps()); assert.equal(verification.exactMatch, true);
+  const changed = harness.snapshot(identity.environment.remindersTable)[0]!;
+  harness.seed(identity.environment.remindersTable, { ...changed, title: "synthetic changed after checkpoint" });
+  assert.equal((await verifyMigration(identity, value, harness.deps())).exactMatch, false); // Skipping import work never skips final verification.
+});
+void test("failed_import_inventory_revokes_prior_success_before_adapter_publication", async () => {
+  const { migrationAdapterHarness } = await import("../support/migration-store");
+  for (const fault of ["foreignStorage", "scanFailure"]) {
+    const value = input(); const harness = await migrationAdapterHarness(identity, value);
+    await importMigration(identity, value, harness.deps()); assert.equal((await verifyMigration(identity, value, harness.deps())).exactMatch, true);
+    const deps = harness.deps();
+    if (fault === "foreignStorage") harness.seed(identity.environment.ownerStateTable, { pk: `OWNER#${"d".repeat(64)}`, sk: "STORAGE", itemCount: 0, imageBytes: 0, migrationRunId: identity.runId });
+    else {
+      const inventory = deps.migration.assertEmptyOrSameRun.bind(deps.migration);
+      deps.migration = { ...deps.migration, async assertEmptyOrSameRun(...args) { harness.fail("scan", "before"); await inventory(...args); } };
+    }
+    await assert.rejects(() => importMigration(identity, value, deps));
+    const run = await harness.deps().migration.loadRun(identity.runId); assert.notEqual(run?.phase, "verified"); assert.notEqual(run?.verification?.exactMatch, true);
+    await assert.rejects(() => harness.deps().migration.publishIfVerified(identity));
+    assert.equal((await harness.deps().owners.gate(testBudget())).published, false);
+  }
+});
+void test("foreign_identity_and_published_imports_cannot_revoke_bound_run_state", async () => {
+  const { migrationAdapterHarness } = await import("../support/migration-store"); const value = input(); const harness = await migrationAdapterHarness(identity, value);
+  await importMigration(identity, value, harness.deps()); await verifyMigration(identity, value, harness.deps());
+  await assert.rejects(() => importMigration({ ...identity, sourceSha256: "d".repeat(64) }, value, harness.deps()));
+  assert.equal((await harness.deps().migration.loadRun(identity.runId))?.phase, "verified");
+  await harness.deps().migration.publishIfVerified(identity);
+  await assert.rejects(() => importMigration(identity, value, harness.deps()));
+  assert.equal((await harness.deps().migration.loadRun(identity.runId))?.phase, "published");
+  assert.equal((await harness.deps().owners.gate(testBudget())).published, true);
+});
+void test("incremental_checkpoints_reuse_sealed_prefix_with_linear_record_growth", async () => {
+  const { migrationAdapterHarness } = await import("../support/migration-store");
+  const value: LegacyValidation = { errors: [], owners: [{ ownerId: "a".repeat(64), items: Array.from({ length: 193 }, (_item, index) => activeReminder({ id: `item-${index}` })), images: new Map() }] };
+  const harness = await migrationAdapterHarness(identity, value); const deps = harness.deps(); await prepareMigration(identity, deps);
+  const progress = { completedOwners: [] as number[], completedItems: [] as Array<{ ownerPosition: number; itemPosition: number; imageId: string | null }> };
+  for (let itemPosition = 0; itemPosition < 193; itemPosition++) { progress.completedItems.push({ ownerPosition: 0, itemPosition, imageId: null }); await deps.migration.saveProgress(identity.runId, progress); }
+  const rows = harness.snapshot(identity.environment.ownerStateTable); const chunks = rows.filter(row => String(row.sk).includes("#CHUNK#completedItems#"));
+  assert.equal(chunks.length, 193); // One new partial/sealed tail per append, rather than copies of every earlier block.
+  const fullBlocks = chunks.filter(row => (row.values as unknown[]).length === 64); assert.equal(fullBlocks.length, 3);
+  const { GetCommand } = await import("@aws-sdk/lib-dynamodb");
+  const chunkReads = harness.sent.filter(command => command instanceof GetCommand && String(command.input.Key?.sk).includes("#CHUNK#"));
+  assert.equal(chunkReads.length, 193 * 2); // Check each new immutable tail before/after writing, without rereading sealed prefixes.
+  assert.deepEqual((await harness.deps().migration.loadRun(identity.runId))?.progress, progress);
+  await deps.migration.saveProgress(identity.runId, progress); assert.equal(harness.snapshot(identity.environment.ownerStateTable).length, rows.length);
+});
+void test("chain_partial_tail_and_unknown_pointer_resume_without_prefix_duplicates", async () => {
+  const { migrationAdapterHarness } = await import("../support/migration-store"); const value = input(); const harness = await migrationAdapterHarness(identity, value);
+  await prepareMigration(identity, harness.deps());
+  const entries = Array.from({ length: 65 }, (_item, itemPosition) => ({ ownerPosition: 0, itemPosition, imageId: null }));
+  await harness.deps().migration.saveProgress(identity.runId, { completedOwners: [], completedItems: entries.slice(0, 63) });
+  harness.fail("progress", "before"); await assert.rejects(() => harness.deps().migration.saveProgress(identity.runId, { completedOwners: [], completedItems: entries.slice(0, 64) }));
+  assert.equal((await harness.deps().migration.loadRun(identity.runId))?.progress.completedItems.length, 63);
+  await harness.deps().migration.saveProgress(identity.runId, { completedOwners: [], completedItems: entries.slice(0, 64) });
+  harness.fail("progress", "after"); await harness.deps().migration.saveProgress(identity.runId, { completedOwners: [], completedItems: entries });
+  assert.deepEqual((await harness.deps().migration.loadRun(identity.runId))?.progress.completedItems, entries);
+  const blocks = harness.snapshot(identity.environment.ownerStateTable).filter(row => String(row.sk).includes("#CHUNK#completedItems#")); assert.equal(blocks.length, 3);
+});
+void test("broken_chunk_chain_fails_closed_even_with_a_valid_local_content_hash", async () => {
+  const { migrationAdapterHarness } = await import("../support/migration-store"); const value = input(); const harness = await migrationAdapterHarness(identity, value);
+  await prepareMigration(identity, harness.deps());
+  await harness.deps().migration.saveProgress(identity.runId, { completedOwners: [], completedItems: Array.from({ length: 130 }, (_item, itemPosition) => ({ ownerPosition: 0, itemPosition, imageId: null })) });
+  const rows = harness.snapshot(identity.environment.ownerStateTable); const root = rows.find(row => row.sk === `MIGRATION#${identity.runId}`)!;
+  const manifest = root.progress as { completedItems: { head: string; count: number } }; assert.ok(manifest.completedItems?.head);
+  const head = rows.find(row => row.chunkSha256 === manifest.completedItems.head)!; assert.ok(head.previousSha256);
+  const previous = rows.find(row => row.chunkSha256 === head.previousSha256)!;
+  harness.remove(identity.environment.ownerStateTable, previous);
+  await assert.rejects(() => harness.deps().migration.loadRun(identity.runId));
+  await assert.rejects(() => verifyMigration(identity, value, harness.deps()));
+  assert.equal((await harness.deps().owners.gate(testBudget())).published, false);
 });

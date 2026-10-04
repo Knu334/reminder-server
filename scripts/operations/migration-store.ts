@@ -28,30 +28,42 @@ const verificationSchema = z.strictObject({ identity: identitySchema, exactMatch
 })) });
 const runSchema = z.strictObject({ identity: identitySchema, phase: z.enum(["importing", "verified", "published"]), progress: progressSchema, verification: verificationSchema.nullable() });
 const storageSchema = z.strictObject({ pk: z.string().regex(/^OWNER#[0-9a-f]{64}$/), sk: z.literal("STORAGE"), itemCount: position, imageBytes: position, migrationRunId: uuid });
-const progressManifestSchema = z.strictObject({ format: z.literal("chunks-v1"), sha256: hash, ownerCount: position, itemCount: position });
-const mismatchesManifestSchema = z.strictObject({ format: z.literal("chunks-v1"), sha256: hash, count: position });
+const chainPointerSchema = z.strictObject({ head: hash.nullable(), count: position });
+type ChainPointer = z.infer<typeof chainPointerSchema>;
+const emptyPointer = (): ChainPointer => ({ head: null, count: 0 });
+const progressManifestSchema = z.strictObject({ format: z.literal("chain-v2"), sha256: hash, completedOwners: chainPointerSchema, completedItems: chainPointerSchema });
+const mismatchesManifestSchema = z.strictObject({ format: z.literal("chain-v2"), sha256: hash, head: hash.nullable(), count: position });
 const persistedVerificationSchema = verificationSchema.omit({ mismatches: true }).extend({ mismatches: mismatchesManifestSchema });
 const persistedRunSchema = runSchema.omit({ progress: true, verification: true }).extend({ progress: progressManifestSchema, verification: persistedVerificationSchema.nullable() });
 const chunkKind = z.enum(["completedOwners", "completedItems", "mismatches"]);
 type ChunkKind = z.infer<typeof chunkKind>;
 const chunkSchema = z.strictObject({ pk: z.literal("GLOBAL"), sk: z.string(), migrationRunId: uuid, kind: chunkKind,
-  snapshotSha256: hash, chunkSha256: hash, index: position, values: z.array(z.unknown()).min(1).max(64) });
+  previousSha256: hash.nullable(), chunkSha256: hash, index: position, values: z.array(z.unknown()).min(1).max(64) });
 const contentHash = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-const chunkKey = (runId: string, kind: ChunkKind, snapshotSha256: string, index: number) => ({ pk: "GLOBAL", sk: `MIGRATION#${runId}#CHUNK#${kind}#${snapshotSha256}#${String(index).padStart(16, "0")}` });
+const chunkKey = (runId: string, kind: ChunkKind, chunkSha256: string) => ({ pk: "GLOBAL", sk: `MIGRATION#${runId}#CHUNK#${kind}#${chunkSha256}` });
 function parseChunk(value: unknown, runId: string) {
   const row = chunkSchema.parse(value);
   const values = row.kind === "completedOwners" ? progressSchema.shape.completedOwners.parse(row.values)
     : row.kind === "completedItems" ? progressSchema.shape.completedItems.parse(row.values) : verificationSchema.shape.mismatches.parse(row.values);
-  if (row.migrationRunId !== runId || row.sk !== chunkKey(runId, row.kind, row.snapshotSha256, row.index).sk
-    || row.chunkSha256 !== contentHash({ kind: row.kind, index: row.index, values })) throw failure();
+  if (row.migrationRunId !== runId || row.sk !== chunkKey(runId, row.kind, row.chunkSha256).sk || (row.index === 0) !== (row.previousSha256 === null)
+    || row.chunkSha256 !== contentHash({ migrationRunId: row.migrationRunId, kind: row.kind, index: row.index, previousSha256: row.previousSha256, values })) throw failure();
   return { ...row, values };
 }
-function progressManifest(progress: MigrationRun["progress"]) {
-  return { format: "chunks-v1" as const, sha256: contentHash(progressSchema.parse(progress)), ownerCount: progress.completedOwners.length, itemCount: progress.completedItems.length };
+type ChainState = { pointer: ChainPointer; chunks: Array<ReturnType<typeof parseChunk>>; values: unknown[] };
+function chainPointerFor(kind: ChunkKind, runId: string, values: unknown[]): ChainPointer {
+  let head: string | null = null;
+  for (let offset = 0; offset < values.length; offset += 64) head = contentHash({ migrationRunId: runId, kind, index: offset / 64, previousSha256: head, values: values.slice(offset, offset + 64) });
+  return { head, count: values.length };
 }
-function persistedVerification(result: NonNullable<MigrationRun["verification"]>) {
+function progressManifest(progress: MigrationRun["progress"], completedOwners = emptyPointer(), completedItems = emptyPointer()) {
+  if (completedOwners.count !== progress.completedOwners.length || completedItems.count !== progress.completedItems.length) throw failure();
+  return { format: "chain-v2" as const, sha256: contentHash(progressSchema.parse(progress)), completedOwners, completedItems };
+}
+function persistedVerification(result: NonNullable<MigrationRun["verification"]>, pointer?: ChainPointer) {
   const parsed = verificationSchema.parse(result);
-  return { identity: parsed.identity, exactMatch: parsed.exactMatch, mismatches: { format: "chunks-v1" as const, sha256: contentHash(parsed.mismatches), count: parsed.mismatches.length } };
+  const chain = pointer ?? chainPointerFor("mismatches", result.identity.runId, parsed.mismatches);
+  if (chain.count !== parsed.mismatches.length) throw failure();
+  return { identity: parsed.identity, exactMatch: parsed.exactMatch, mismatches: { format: "chain-v2" as const, sha256: contentHash(parsed.mismatches), ...chain } };
 }
 
 
@@ -100,43 +112,66 @@ export function createMigrationStore(client: DynamoDBDocumentClient, config: Con
   const runCheck = (): Actions[number] => ({ ConditionCheck: { TableName: config.ownerStateTable, Key: keys.migration(boundIdentity.runId),
     ConditionExpression: "#identity = :identity AND #phase = :importing", ExpressionAttributeNames: { "#identity": "identity", "#phase": "phase" }, ExpressionAttributeValues: { ":identity": boundIdentity, ":importing": "importing" } } });
   async function guarded(actions: Actions): Promise<void> { await send(new TransactWriteCommand({ TransactItems: [gateCheck(), runCheck(), ...actions] })); }
-  async function writeChunks(kind: ChunkKind, snapshotSha256: string, values: unknown[]): Promise<void> {
-    for (let offset = 0; offset < values.length; offset += 64) {
-      const index = offset / 64; const payload = { kind, index, values: values.slice(offset, offset + 64) };
-      const row = { ...chunkKey(boundIdentity.runId, kind, snapshotSha256, index), migrationRunId: boundIdentity.runId,
-        snapshotSha256, chunkSha256: contentHash(payload), ...payload };
-      parseChunk(row, boundIdentity.runId);
-      const existing = await get(config.ownerStateTable, chunkKey(boundIdentity.runId, kind, snapshotSha256, index));
-      if (existing) { if (!isDeepStrictEqual(parseChunk(existing, boundIdentity.runId), row)) throw failure(); continue; }
-      try { await guarded([{ Put: { TableName: config.ownerStateTable, Item: row, ConditionExpression: "attribute_not_exists(#pk)", ExpressionAttributeNames: { "#pk": "pk" } } }]); }
-      catch { /* A strong read below resolves an unknown chunk write without a fresh key. */ }
-      const actual = await get(config.ownerStateTable, chunkKey(boundIdentity.runId, kind, snapshotSha256, index));
-      if (!actual || !isDeepStrictEqual(parseChunk(actual, boundIdentity.runId), row)) throw failure();
-    }
+  // Cache only a pointer already read strongly or committed by this adapter. loadRun itself always rehydrates strongly.
+  let progressCache: { manifest: z.infer<typeof progressManifestSchema>; progress: MigrationRun["progress"]; owners: ChainState; items: ChainState } | null = null;
+  async function writeChunk(row: ReturnType<typeof parseChunk>): Promise<void> {
+    const key = chunkKey(boundIdentity.runId, row.kind, row.chunkSha256);
+    const existing = await get(config.ownerStateTable, key);
+    if (existing) { if (!isDeepStrictEqual(parseChunk(existing, boundIdentity.runId), row)) throw failure(); return; }
+    try { await guarded([{ Put: { TableName: config.ownerStateTable, Item: row, ConditionExpression: "attribute_not_exists(#pk)", ExpressionAttributeNames: { "#pk": "pk" } } }]); }
+    catch { /* Read the exact immutable key to resolve an uncertain write. */ }
+    const actual = await get(config.ownerStateTable, key);
+    if (!actual || !isDeepStrictEqual(parseChunk(actual, boundIdentity.runId), row)) throw failure();
   }
-  async function readChunks(kind: ChunkKind, snapshotSha256: string, count: number): Promise<unknown[]> {
-    const values: unknown[] = [];
-    for (let index = 0; index < Math.ceil(count / 64); index++) {
-      const raw = await get(config.ownerStateTable, chunkKey(boundIdentity.runId, kind, snapshotSha256, index));
-      if (!raw) throw failure(); const row = parseChunk(raw, boundIdentity.runId);
-      if (row.kind !== kind || row.snapshotSha256 !== snapshotSha256 || row.index !== index || row.values.length !== Math.min(64, count - index * 64)) throw failure();
-      values.push(...row.values);
+  async function writeChain(kind: ChunkKind, values: unknown[], base?: ChainState): Promise<ChainState> {
+    if (base && (values.length < base.values.length || !isDeepStrictEqual(values.slice(0, base.values.length), base.values))) throw failure();
+    if (base && values.length === base.values.length) return base;
+    const sealedCount = base ? Math.floor(base.values.length / 64) : 0;
+    const chunks = base?.chunks.slice(0, sealedCount) ?? [];
+    let previousSha256 = chunks.at(-1)?.chunkSha256 ?? null;
+    for (let index = sealedCount; index < Math.ceil(values.length / 64); index++) {
+      const payload = { migrationRunId: boundIdentity.runId, kind, index, previousSha256, values: values.slice(index * 64, (index + 1) * 64) };
+      const chunkSha256 = contentHash(payload);
+      const row = parseChunk({ ...chunkKey(boundIdentity.runId, kind, chunkSha256), chunkSha256, ...payload }, boundIdentity.runId);
+      await writeChunk(row); chunks.push(row); previousSha256 = chunkSha256;
     }
-    return values;
+    return { pointer: { head: previousSha256, count: values.length }, chunks, values: [...values] };
+  }
+  async function readChain(kind: ChunkKind, pointer: ChainPointer): Promise<ChainState> {
+    if ((pointer.count === 0) !== (pointer.head === null)) throw failure();
+    const reverse: Array<ReturnType<typeof parseChunk>> = []; const seen = new Set<string>(); let head = pointer.head;
+    for (let index = Math.ceil(pointer.count / 64) - 1; index >= 0; index--) {
+      if (head === null || seen.has(head)) throw failure(); seen.add(head);
+      const raw = await get(config.ownerStateTable, chunkKey(boundIdentity.runId, kind, head));
+      if (!raw) throw failure(); const row = parseChunk(raw, boundIdentity.runId);
+      if (row.kind !== kind || row.chunkSha256 !== head || row.index !== index || row.values.length !== Math.min(64, pointer.count - index * 64)) throw failure();
+      reverse.push(row); head = row.previousSha256;
+    }
+    if (head !== null) throw failure(); const chunks = reverse.reverse(); const values: unknown[] = [];
+    for (const chunk of chunks) values.push(...chunk.values);
+    return { pointer, chunks, values };
+  }
+  async function readProgress(manifest: z.infer<typeof progressManifestSchema>) {
+    const owners = await readChain("completedOwners", manifest.completedOwners);
+    const items = await readChain("completedItems", manifest.completedItems);
+    const progress = progressSchema.parse({ completedOwners: owners.values, completedItems: items.values });
+    if (contentHash(progress) !== manifest.sha256) throw failure();
+    // The logical parser also rejects duplicate completion entries.
+    parseMigrationRun({ identity: boundIdentity, phase: "importing", progress, verification: null });
+    return { manifest, progress, owners, items };
   }
   async function hydrateRun(value: unknown): Promise<MigrationRun> {
     const record = persistedRunSchema.parse(value);
     if (!isDeepStrictEqual(record.identity, boundIdentity)) throw failure();
-    const progress = progressSchema.parse({ completedOwners: await readChunks("completedOwners", record.progress.sha256, record.progress.ownerCount),
-      completedItems: await readChunks("completedItems", record.progress.sha256, record.progress.itemCount) });
-    if (contentHash(progress) !== record.progress.sha256) throw failure();
+    const hydrated = await readProgress(record.progress);
     let verification: MigrationRun["verification"] = null;
     if (record.verification) {
-      const mismatches = verificationSchema.shape.mismatches.parse(await readChunks("mismatches", record.verification.mismatches.sha256, record.verification.mismatches.count));
+      const chain = await readChain("mismatches", record.verification.mismatches);
+      const mismatches = verificationSchema.shape.mismatches.parse(chain.values);
       if (contentHash(mismatches) !== record.verification.mismatches.sha256) throw failure();
       verification = { identity: record.verification.identity, exactMatch: record.verification.exactMatch, mismatches };
     }
-    return parseMigrationRun({ ...record, progress, verification });
+    const run = parseMigrationRun({ ...record, progress: hydrated.progress, verification }); progressCache = hydrated; return run;
   }
   async function invalidateVerification(): Promise<void> {
     const update: Actions[number] = { Update: { TableName: config.ownerStateTable, Key: keys.migration(boundIdentity.runId), UpdateExpression: "SET #verification = :null, #phase = :importing",
@@ -148,6 +183,7 @@ export function createMigrationStore(client: DynamoDBDocumentClient, config: Con
   const store: MigrationStore = {
     async assertEmptyOrSameRun(identity) {
       bound(identity); let foundRun: MigrationRun | null = null; let gate: Record<string, unknown> | null = null; let hasData = false;
+      const inventoryChunks = new Map<string, ReturnType<typeof parseChunk>>();
       // Scan all pages without filters, including unknown administrative rows.
       for await (const item of scan(config.remindersTable)) {
         hasData = true;
@@ -165,10 +201,16 @@ export function createMigrationStore(client: DynamoDBDocumentClient, config: Con
         } else if (row.pk === "GLOBAL" && row.sk === `MIGRATION#${identity.runId}`) {
           const { pk: _pk, sk: _sk, ...value } = row; foundRun = await hydrateRun(value); if (!isDeepStrictEqual(foundRun.identity, identity) || foundRun.phase === "published") throw failure();
         } else if (row.pk === "GLOBAL" && typeof row.sk === "string" && row.sk.startsWith(`MIGRATION#${identity.runId}#CHUNK#`)) {
-          hasData = true; parseChunk(row, identity.runId);
+          hasData = true; const chunk = parseChunk(row, identity.runId); inventoryChunks.set(chunk.sk, chunk);
         } else {
           hasData = true; const parsed = storageSchema.parse(row);
           if (parsed.migrationRunId !== identity.runId || !ownerIds.has(parsed.pk.slice(6))) throw failure();
+        }
+      }
+      for (const chunk of inventoryChunks.values()) {
+        if (chunk.previousSha256 !== null) {
+          const previous = inventoryChunks.get(chunkKey(identity.runId, chunk.kind, chunk.previousSha256).sk);
+          if (!previous || previous.kind !== chunk.kind || previous.index !== chunk.index - 1 || previous.values.length !== 64) throw failure();
         }
       }
       if (foundRun) { if (!gate || gate.runId !== identity.runId) throw failure(); return; }
@@ -185,15 +227,21 @@ export function createMigrationStore(client: DynamoDBDocumentClient, config: Con
     },
     async saveProgress(runId, progress) {
       if (runId !== boundIdentity.runId) throw failure(); progress = progressSchema.parse(progress);
-      const manifest = progressManifest(progress);
-      await writeChunks("completedOwners", manifest.sha256, progress.completedOwners);
-      await writeChunks("completedItems", manifest.sha256, progress.completedItems);
+      parseMigrationRun({ identity: boundIdentity, phase: "importing", progress, verification: null });
+      const row = await get(config.ownerStateTable, keys.migration(runId)); if (!row) throw failure();
+      const { pk: _pk, sk: _sk, ...value } = row; const record = persistedRunSchema.parse(value);
+      if (!isDeepStrictEqual(record.identity, boundIdentity) || record.phase !== "importing") throw failure();
+      const base = progressCache && isDeepStrictEqual(progressCache.manifest, record.progress) ? progressCache : await readProgress(record.progress);
+      const owners = await writeChain("completedOwners", progress.completedOwners, base.owners);
+      const items = await writeChain("completedItems", progress.completedItems, base.items);
+      const manifest = progressManifest(progress, owners.pointer, items.pointer);
       const update: Actions[number] = { Update: { TableName: config.ownerStateTable, Key: keys.migration(runId),
         UpdateExpression: "SET #progress = :progress, #verification = :null, #phase = :importing",
-        ConditionExpression: "#identity = :identity AND #phase = :importing", ExpressionAttributeNames: { "#progress": "progress", "#verification": "verification", "#phase": "phase", "#identity": "identity" },
-        ExpressionAttributeValues: { ":progress": manifest, ":null": null, ":importing": "importing", ":identity": boundIdentity } } };
+        ConditionExpression: "#identity = :identity AND #phase = :importing AND #progress = :previous", ExpressionAttributeNames: { "#progress": "progress", "#verification": "verification", "#phase": "phase", "#identity": "identity" },
+        ExpressionAttributeValues: { ":progress": manifest, ":previous": record.progress, ":null": null, ":importing": "importing", ":identity": boundIdentity } } };
       try { await send(new TransactWriteCommand({ TransactItems: [gateCheck(), update] })); }
       catch { const run = await store.loadRun(runId); if (!run || run.phase !== "importing" || !isDeepStrictEqual(run.progress, progress)) throw failure(); }
+      progressCache = { manifest, progress, owners, items };
     },
     async ensureOwner(owner, identity) {
       bound(identity); if (!ownerIds.has(owner)) throw failure(); const existing = await store.getStorage(owner);
@@ -234,8 +282,8 @@ export function createMigrationStore(client: DynamoDBDocumentClient, config: Con
     async recordVerification(runId, result) {
       if (runId !== boundIdentity.runId || !isDeepStrictEqual(result.identity, boundIdentity) || result.exactMatch !== (result.mismatches.length === 0)) throw failure(); result = verificationSchema.parse(result);
       await invalidateVerification();
-      const persisted = persistedVerification(result);
-      await writeChunks("mismatches", persisted.mismatches.sha256, result.mismatches);
+      const chain = await writeChain("mismatches", result.mismatches);
+      const persisted = persistedVerification(result, chain.pointer);
       const phase = result.exactMatch ? "verified" : "importing";
       const update: Actions[number] = { Update: { TableName: config.ownerStateTable, Key: keys.migration(runId), UpdateExpression: "SET #verification = :result, #phase = :phase",
         ConditionExpression: "#identity = :identity AND (#phase = :importing OR #phase = :verified)", ExpressionAttributeNames: { "#verification": "verification", "#phase": "phase", "#identity": "identity" },

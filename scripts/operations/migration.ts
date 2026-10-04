@@ -82,16 +82,46 @@ async function recoverImage(job: ImageJob, image: DecodedImage, deps: MigrationD
   const ref = { imageId: job.jobId, key: job.key, versionId: head.versionId, mime: image.mime, bytes: image.bytes, sha256: image.sha256 };
   if (!sameImage(await deps.images.get(ref, deps.budget), image)) throw failure(); return ref;
 }
-export async function importMigration(identity: MigrationIdentity, input: LegacyValidation, deps: MigrationDeps): Promise<MigrationSummary> {
-  valid(input, deps); await prepareMigration(identity, deps);
-  await runFor(identity, deps);
-  // Completion lists are checkpoints, never evidence of actual writes. Read every item even on resume.
-  const progress: MigrationProgress = { completedOwners: [], completedItems: [] };
-  await deps.migration.recordVerification(identity.runId, { identity, exactMatch: false, mismatches: [{ location: "run", field: "phase", reason: "IMPORTING" }] });
-  let count = 0; let imageBytes = 0;
+/** Durable completion is an ordered source prefix written only after atomic import/read-back. */
+function validateDurableProgress(identity: MigrationIdentity, input: LegacyValidation, progress: MigrationProgress): void {
+  if (progress.completedOwners.some((ownerPosition, index) => ownerPosition !== index || ownerPosition >= input.owners.length)) throw failure();
+  let ordinal = 0;
   for (const [ownerPosition, owner] of input.owners.entries()) {
+    for (const [itemPosition, item] of owner.items.entries()) {
+      const completed = progress.completedItems[ordinal++];
+      if (completed) {
+        const imageId = owner.images.has(item.id) ? migrationImageId(identity.runId, ownerPosition, itemPosition) : null;
+        if (completed.ownerPosition !== ownerPosition || completed.itemPosition !== itemPosition || completed.imageId !== imageId || ownerPosition > progress.completedOwners.length) throw failure();
+      } else if (ownerPosition < progress.completedOwners.length) throw failure();
+    }
+  }
+  if (progress.completedItems.length > ordinal) throw failure();
+}
+export async function importMigration(identity: MigrationIdentity, input: LegacyValidation, deps: MigrationDeps): Promise<MigrationSummary> {
+  valid(input, deps); assertMigrationIdentity(identity);
+  const prior = await deps.migration.loadRun(identity.runId);
+  const importing: MigrationVerification = { identity, exactMatch: false, mismatches: [{ location: "run", field: "phase", reason: "IMPORTING" }] };
+  if (prior !== null) {
+    // Bind the existing unpublished run first, then revoke success before any fallible inventory.
+    await runFor(identity, deps);
+    await deps.migration.recordVerification(identity.runId, importing);
+  }
+  await prepareMigration(identity, deps);
+  const run = await runFor(identity, deps);
+  if (prior === null) await deps.migration.recordVerification(identity.runId, importing);
+  const progress = structuredClone(run.progress); validateDurableProgress(identity, input, progress);
+  const completedOwners = new Set(progress.completedOwners);
+  const completedItems = new Set(progress.completedItems.map(item => `${item.ownerPosition}:${item.itemPosition}`));
+  let count = progress.completedItems.length;
+  let imageBytes = progress.completedItems.reduce((total, entry) => {
+    const owner = input.owners[entry.ownerPosition]!; return total + (owner.images.get(owner.items[entry.itemPosition]!.id)?.bytes ?? 0);
+  }, 0);
+  for (const [ownerPosition, owner] of input.owners.entries()) {
+    if (completedOwners.has(ownerPosition)) continue;
     requireBudget(deps.budget); await deps.migration.ensureOwner(owner.ownerId, identity);
     for (const [itemPosition, staged] of owner.items.entries()) {
+      // Only the first item without a durable checkpoint can have an uncertain prior write.
+      if (completedItems.has(`${ownerPosition}:${itemPosition}`)) continue;
       requireBudget(deps.budget); const image = owner.images.get(staged.id); let ref: ImageRef | null = null; let committedJob: ImageJob | null = null;
       if (image) {
         const jobId = migrationImageId(identity.runId, ownerPosition, itemPosition);
