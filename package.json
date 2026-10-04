@@ -9,7 +9,8 @@
     "test": "npm run test:runtime && npm run test:operations && npm run test:delivery",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
-    "migrate:json": "tsx scripts/operations/migrate-json.ts"
+    "migrate:json": "tsx scripts/operations/migrate-json.ts",
+    "recovery:verify": "tsx scripts/operations/verify-recovery.ts"
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "3.1146.0",
