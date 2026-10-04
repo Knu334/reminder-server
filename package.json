@@ -19,7 +19,11 @@
     "infra:check": "tsx scripts/release/infra-check.ts",
     "release:inspect-plan": "tsx scripts/release/plan-guard.ts",
     "release:verify": "tsx scripts/release/verify-release.ts",
-    "release:smoke": "tsx scripts/release/smoke.ts"
+    "release:smoke": "tsx scripts/release/smoke.ts",
+    "audit:runtime": "npm audit --omit=dev --audit-level=high",
+    "audit:all": "npm audit --audit-level=high",
+    "sbom": "npm sbom --sbom-format cyclonedx",
+    "release:workflow": "tsx scripts/release/workflow.ts"
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "3.1146.0",
@@ -41,7 +45,8 @@
     "globals": "^16.5.0",
     "tsx": "4.23.15",
     "typescript": "5.9.3",
-    "typescript-eslint": "8.71.0"
+    "typescript-eslint": "8.71.0",
+    "yaml": "2.9.1"
   },
   "engines": {
     "node": ">=24 <25",

@@ -1,0 +1,289 @@
+name: Protected production ZIP delivery
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Terraform production root
+        type: choice
+        options: [platform, application]
+        required: true
+      commit:
+        description: Full immutable commit already on main
+        type: string
+        required: true
+      apply:
+        description: Apply only after reviewing a successful private preview
+        type: boolean
+        default: false
+      reviewed_run:
+        description: Successful preview run ID; required for apply or ZIP reuse
+        type: string
+        default: ''
+      expected_review_sha256:
+        description: Reviewed preview digest; required for every apply including first create
+        type: string
+        default: ''
+      published:
+        description: Expected publication state for application smoke; does not change data
+        type: boolean
+        default: false
+      scheduler_enabled:
+        description: Reviewed application Scheduler setting
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: reminder-production
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: 'false'
+  RELEASE_ROOT: ${{ inputs.target }}
+  RELEASE_COMMIT: ${{ inputs.commit }}
+  RELEASE_APPLY: ${{ inputs.apply }}
+  RELEASE_PUBLISHED: ${{ inputs.published }}
+  RELEASE_SCHEDULER_ENABLED: ${{ inputs.scheduler_enabled }}
+  EXPECTED_REVIEW_SHA256: ${{ inputs.expected_review_sha256 }}
+  REVIEWED_RUN: ${{ inputs.reviewed_run }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+jobs:
+  authorize:
+    if: github.event.repository.private == true && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Confirm immutable main ancestry before running selected code
+        run: |
+          [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - run: |
+          npm install --global npm@11.11.1
+          npm ci
+      - name: Authorize private manual release and reviewed run provenance
+        run: npm run release:workflow -- authorize
+        env:
+          DRIVER_GITHUB_TOKEN: ${{ github.token }}
+  register:
+    needs: [authorize]
+    if: needs.authorize.result == 'success' && inputs.target == 'application' && !inputs.apply && inputs.reviewed_run == ''
+    runs-on: ubuntu-24.04
+    environment: production-artifact
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.13.16'
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: '1.16.5'
+          terraform_wrapper: false
+      - name: Install locked dependencies
+        run: |
+          npm install --global npm@11.11.1
+          npm ci
+      - name: Build once and retain current validation evidence privately
+        run: |
+          umask 077
+          mkdir -m 700 "$RUNNER_TEMP/registered"
+          {
+            git diff --exit-code 253e5e2 -- .devcontainer
+            npm run typecheck
+            npm run lint
+            npm run test:runtime
+            npm run test:operations
+            npm run build
+            npm run package
+            npm run verify:zip
+            npm run test:packaging
+            npm run test:delivery
+            npm run infra:check
+          } > "$RUNNER_TEMP/registered/tests.txt" 2>&1
+          npm run --silent audit:runtime -- --json > "$RUNNER_TEMP/registered/audit-runtime.json"
+          npm run --silent audit:all -- --json > "$RUNNER_TEMP/registered/audit.json"
+          npm run --silent sbom > "$RUNNER_TEMP/registered/sbom.json"
+      - name: Assume isolated artifact role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ vars.ARTIFACT_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: reminder-${{ github.run_id }}-artifact
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+          mask-aws-account-id: true
+          retry-max-attempts: 1
+      - name: Register exact ZIP once with explicit verified provenance
+        run: |
+          npm run release:register -- \
+            --zip artifacts/reminder-server.zip \
+            --manifest "$RUNNER_TEMP/registered/registered.json" \
+            --bucket "$ARTIFACT_BUCKET" --region "$AWS_REGION" --commit "$RELEASE_COMMIT" \
+            --npm-version "$(npm --version)" --esbuild-version "$(node -p 'require("esbuild/package.json").version')" \
+            --audit-id "sha256:$(sha256sum "$RUNNER_TEMP/registered/audit.json" | cut -d ' ' -f 1)" \
+            --sbom-id "sha256:$(sha256sum "$RUNNER_TEMP/registered/sbom.json" | cut -d ' ' -f 1)" \
+            --tests-id "sha256:$(sha256sum "$RUNNER_TEMP/registered/tests.txt" | cut -d ' ' -f 1)" > /dev/null
+        env:
+          ARTIFACT_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: registered-release
+          path: ${{ runner.temp }}/registered/
+          if-no-files-found: error
+          retention-days: 1
+          include-hidden-files: false
+  plan:
+    needs: [authorize, register]
+    if: always() && needs.authorize.result == 'success' && (needs.register.result == 'success' || needs.register.result == 'skipped')
+    runs-on: ubuntu-24.04
+    environment: production-plan
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    outputs:
+      review_sha256: ${{ steps.plan.outputs.review_sha256 }}
+      custody_sha256: ${{ steps.plan.outputs.custody_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: '1.16.5'
+          terraform_wrapper: false
+      - name: Install locked dependencies
+        run: |
+          npm install --global npm@11.11.1
+          npm ci
+      - name: Download registration produced by this preview
+        if: inputs.target == 'application' && inputs.reviewed_run == ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: registered-release
+          path: ${{ runner.temp }}/selected/
+      - name: Download original private preview including unchanged ZIP evidence
+        if: inputs.reviewed_run != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-review
+          path: ${{ runner.temp }}/selected/
+          run-id: ${{ inputs.reviewed_run }}
+          github-token: ${{ github.token }}
+      - name: Assume isolated plan role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: reminder-${{ github.run_id }}-plan
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+          mask-aws-account-id: true
+          retry-max-attempts: 1
+      - name: Derive guarded review from saved binary and exact private inputs
+        id: plan
+        run: npm run release:workflow -- plan
+        env:
+          RELEASE_SOURCE: ${{ inputs.target == 'application' || inputs.reviewed_run != '' }}
+          RELEASE_INPUTS_JSON: ${{ inputs.target == 'platform' && secrets.PLATFORM_INPUTS_JSON || secrets.APPLICATION_INPUTS_JSON }}
+          RELEASE_BASELINE_JSON: ${{ inputs.target == 'platform' && secrets.PLATFORM_BASELINE_JSON || secrets.APPLICATION_BASELINE_JSON }}
+          STATE_BUCKET: ${{ vars.STATE_BUCKET }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-review
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 1
+          include-hidden-files: false
+  apply:
+    needs: [authorize, plan]
+    if: needs.authorize.result == 'success' && needs.plan.result == 'success' && inputs.apply
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: '1.16.5'
+          terraform_wrapper: false
+      - name: Install locked dependencies
+        run: |
+          npm install --global npm@11.11.1
+          npm ci
+      - name: Download this run's exact saved binary and private context
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-review
+          path: ${{ runner.temp }}/release/
+      - name: Restore private permissions after artifact download
+        run: npm run release:workflow -- secure
+      - name: Assume isolated apply role
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ vars.APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: reminder-${{ github.run_id }}-apply
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+          mask-aws-account-id: true
+          retry-max-attempts: 1
+      - name: Recheck saved binary, apply once, prove both aliases and smoke
+        run: npm run release:workflow -- apply
+        env:
+          EXPECTED_CUSTODY_SHA256: ${{ needs.plan.outputs.custody_sha256 }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-result
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 1
+          include-hidden-files: false

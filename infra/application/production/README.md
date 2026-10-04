@@ -35,8 +35,24 @@ backend/state. GHA has no `/apis` root-collection creation grant and cannot seed
 
 1. Supply **all** required variables from `variables.tf`, even for the target
    operation; targeting does not remove the root's required input contract.
-   Use allowlisted platform/bootstrap values and the verified D02 artifact.
-   Configure the distinct application state bucket with `backend.hcl.example`.
+   Use allowlisted platform/bootstrap values. Before the first registered ZIP,
+   supply the explicitly **UNUSED seed-only** artifact descriptor below solely
+   to satisfy Terraform's required variable validation. Set its bucket to the
+   known bootstrap artifact bucket; it identifies no verified/uploaded object:
+
+   ```hcl
+   artifact = {
+     bucket        = "<BOOTSTRAP_ARTIFACT_BUCKET>"
+     key           = "releases/0000000000000000000000000000000000000000000000000000000000000000/reminder-server.zip"
+     version_id    = "operator-api-seed-unused"
+     sha256_base64 = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+   }
+   ```
+
+   This is neither a RegisteredArtifact nor evidence of a ZIP. The targeted
+   API has no Lambda/S3 artifact dependency. Never register, verify, upload,
+   HEAD or reuse this descriptor as a normal release artifact.
+   Configure the application state key/backend with `backend.hcl.example`.
    Verify the application state has no API and bootstrap's API ID is null. If
    an API already exists, stop and reconcile ownership/state; never seed again,
    replace it, change name/ID, create a second root, or delete state to bypass
@@ -51,7 +67,8 @@ backend/state. GHA has no `/apis` root-collection creation grant and cannot seed
 
    Review it privately. Its resource changes must be **only** a create of
    `aws_apigatewayv2_api.production` (no stage, function, role, policy, schedule
-   or alarm). This resource depends only on explicit inputs/provider config;
+   or alarm), with no Lambda or S3 artifact operation. This resource depends only
+   on explicit inputs/provider config;
    Lambda's API-ID environment reference points in the opposite direction.
    Targeting is exceptional and must never be used in the normal release path.
 3. Only after the separate operator authorization, apply that exact saved plan
@@ -69,6 +86,8 @@ backend/state. GHA has no `/apis` root-collection creation grant and cannot seed
    both API and default stage.
 4. Remove the private seed flag/plan. The normal release inputs must explicitly
    set `operator_api_seed=false` and use bootstrap's now-nonnull matching ID.
+   Discard the UNUSED seed-only descriptor. Application preview now builds and
+   registers the actual ZIP; normal plans require its verified RegisteredArtifact.
    Lambda preconditions reject a full-root seed. API postconditions reject a
    normal mismatch; variable validation rejects absent/malformed IDs. D06/D07
    must also check a known existing API baseline before planning/applying:

@@ -1,0 +1,56 @@
+name: Validate ZIP release
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.13.16'
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: '1.16.5'
+          terraform_wrapper: false
+      - name: Install locked dependencies
+        run: |
+          npm install --global npm@11.11.1
+          npm ci
+      - name: Preserve development container
+        run: git diff --exit-code 253e5e2 -- .devcontainer
+      - name: Check types, lint and independent tests
+        run: |
+          npm run typecheck
+          npm run lint
+          npm run test:runtime
+          npm run test:operations
+      - name: Build and package once before artifact-dependent tests
+        run: |
+          npm run build
+          npm run package
+          npm run verify:zip
+          npm run test:packaging
+          npm run test:delivery
+      - name: Validate infrastructure locally without AWS credentials
+        run: npm run infra:check
+      - name: Report all severities and fail for unresolved High or Critical
+        run: |
+          npm run audit:runtime
+          npm run audit:all
+          npm run --silent sbom > "$RUNNER_TEMP/sbom.json"
