@@ -46,10 +46,13 @@ resource "aws_cognito_user_pool_client" "chrome" {
   allowed_oauth_scopes                 = ["openid", "reminder-api/read", "reminder-api/write"]
   callback_urls                        = [var.callback_url]
   logout_urls                          = [var.logout_url]
-  # Supplying a nonempty flow set prevents service defaults from enabling
-  # ALLOW_REFRESH_TOKEN_AUTH, which is incompatible with token rotation.
-  # Hosted UI uses authorization code + caller-supplied PKCE S256.
-  explicit_auth_flows           = ["ALLOW_USER_SRP_AUTH"]
+  # Keep only an IAM-authorized residual API flow, without any corresponding
+  # runtime/GHA permission or caller. Public API sign-in would issue the
+  # self-administration scope independently of the OAuth scope allowlist.
+  # A nonempty set also avoids default public flows and legacy refresh auth.
+  # Classic Hosted UI uses authorization code + caller-supplied PKCE S256.
+  # https://docs.aws.amazon.com/cognito-user-identity-pools/latest/APIReference/API_InitiateAuth.html
+  explicit_auth_flows           = ["ALLOW_ADMIN_USER_PASSWORD_AUTH"]
   read_attributes               = ["email"]
   write_attributes              = ["email"]
   prevent_user_existence_errors = "ENABLED"

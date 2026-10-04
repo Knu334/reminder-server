@@ -25,6 +25,10 @@ run "cognito_is_console_managed_public_code_client" {
     error_message = "Chrome requires a public code client with Cognito only and no legacy refresh flow."
   }
   assert {
+    condition     = aws_cognito_user_pool_client.chrome.explicit_auth_flows == toset(["ALLOW_ADMIN_USER_PASSWORD_AUTH"])
+    error_message = "Only IAM-authorized administrative authentication may remain configured; public SRP/password/user/custom/refresh paths can issue self-administration tokens outside Hosted UI code/PKCE."
+  }
+  assert {
     condition     = aws_cognito_user_pool_client.chrome.callback_urls == toset(["https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/callback"]) && aws_cognito_user_pool_client.chrome.logout_urls == toset(["https://abcdefghijklmnopabcdefghijklmnop.chromiumapp.org/logout"]) && aws_cognito_user_pool_domain.production.domain == "synthetic-reminder-login"
     error_message = "Full callback/logout URLs and the explicit domain must be preserved."
   }
