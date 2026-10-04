@@ -14,7 +14,8 @@
     "build": "tsx scripts/build/bundle.ts",
     "package": "python3 scripts/build/package.py",
     "verify:zip": "tsx scripts/build/verify-zip.ts artifacts/reminder-server.zip",
-    "test:packaging": "python3 -m unittest discover -s tests/packaging -v"
+    "test:packaging": "python3 -m unittest discover -s tests/packaging -v",
+    "release:register": "tsx scripts/release/artifact.ts"
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "3.1146.0",
@@ -23,7 +24,8 @@
     "@aws-sdk/client-sts": "3.1146.0",
     "@aws-sdk/lib-dynamodb": "3.1146.0",
     "@aws-sdk/s3-request-presigner": "3.1146.0",
-    "zod": "4.6.5"
+    "zod": "4.6.5",
+    "@smithy/core": "3.35.1"
   },
   "devDependencies": {
     "@eslint/js": "9.39.0",
