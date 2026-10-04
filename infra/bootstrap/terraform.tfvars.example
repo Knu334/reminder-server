@@ -10,3 +10,8 @@ oidc_subjects = {
   plan = "repo:synthetic/reminder-server:environment:production"
   apply = "repo:synthetic/reminder-server:environment:production"
 }
+
+# Initial bootstrap: null grants no GHA HTTP API configuration permissions.
+# A separately authorized operator seeds the first API from application/production;
+# pass that root's API ID back here before normal GitHub plan/apply releases.
+production_api_id = null

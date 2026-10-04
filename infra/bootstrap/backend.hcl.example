@@ -9,3 +9,8 @@ region = "REPLACE_WITH_EXPLICIT_REGION"
 # 3. Run init -migrate-state -backend-config=backend.hcl; verify migration before
 #    securely retaining/removing the private local backup. Never force-copy blindly.
 # GHA plan/apply cannot change bootstrap state or these delivery IAM roles.
+# Bootstrap also owns runtime role trusts and immutable per-role ceilings.
+# After platform preparation, a separately authorized operator seeds the first
+# HTTP API from infra/application/production (API/stage ownership stays there).
+# Supply its exact API ID as production_api_id to an operator bootstrap update;
+# normal GHA releases require that known matching ID. No GHA API creation grant.

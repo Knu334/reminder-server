@@ -12,7 +12,8 @@ variables {
     plan     = "repo:synthetic/reminder-server:environment:production"
     apply    = "repo:synthetic/reminder-server:environment:production"
   }
-  name_prefix = "synthetic-reminder"
+  name_prefix       = "synthetic-reminder"
+  production_api_id = "a1b2c3d4e5"
 }
 
 run "private_versioned_buckets" {
@@ -154,8 +155,8 @@ run "required_gateway_logging_and_iam_size" {
     error_message = "HTTP API logging needs documented delivery/policy configuration permissions."
   }
   assert {
-    condition     = anytrue([for statement in jsondecode(aws_iam_role_policy.github["apply"].policy).Statement : contains(statement.Action, "iam:CreateServiceLinkedRole") && statement.Resource == ["arn:aws:iam::123456789012:role/aws-service-role/ops.apigateway.amazonaws.com/AWSServiceRoleForAPIGateway"] && statement.Condition.StringEquals["iam:AWSServiceName"] == "ops.apigateway.amazonaws.com"])
-    error_message = "API creation may create only its exact service-linked role."
+    condition     = alltrue([for statement in jsondecode(aws_iam_role_policy.github["apply"].policy).Statement : !contains(statement.Action, "iam:CreateServiceLinkedRole")])
+    error_message = "First API/service-linked role creation belongs to the separate operator seed, never GHA."
   }
   assert {
     condition     = anytrue([for statement in jsondecode(aws_iam_role_policy.github["apply"].policy).Statement : contains(statement.Action, "logs:PutRetentionPolicy") && contains(statement.Resource, "arn:aws:logs:us-east-1:123456789012:log-group:/aws/apigateway/synthetic-reminder-production-api")])
@@ -175,7 +176,7 @@ run "maximum_bucket_name_keeps_policies_in_aws_limits" {
     region      = "ap-southeast-1"
   }
   assert {
-    condition     = length(aws_s3_bucket.artifacts.bucket) == 63 && alltrue([for p in aws_iam_role_policy.github : length(p.policy) <= 10240]) && length(aws_iam_policy.production_read.policy) <= 6144
+    condition     = length(aws_s3_bucket.artifacts.bucket) == 63 && alltrue([for p in aws_iam_role_policy.github : length(p.policy) <= 10240]) && length(aws_iam_policy.production_read.policy) <= 6144 && alltrue([for p in aws_iam_policy.runtime_ceiling : length(p.policy) <= 6144])
     error_message = "Longest permitted bucket names must retain precise policy scopes within AWS quotas."
   }
 }
@@ -230,5 +231,149 @@ run "all_three_tables_have_only_configuration_rights" {
       ], action)])
     ])])
     error_message = "All DynamoDB grants must use exactly three table ARNs and configuration actions only, never data or wildcard permissions."
+  }
+}
+
+run "delivery_cannot_mutate_runtime_role_ownership" {
+  command = plan
+  assert {
+    condition = alltrue([for policy in concat([for p in aws_iam_role_policy.github : p.policy], [aws_iam_policy.production_read.policy]) : alltrue([
+      for statement in jsondecode(policy).Statement : statement.Effect != "Allow" || alltrue([for action in statement.Action : !contains([
+        "iam:CreateRole", "iam:DeleteRole", "iam:UpdateRole", "iam:UpdateAssumeRolePolicy", "iam:PutRolePermissionsBoundary", "iam:DeleteRolePermissionsBoundary", "iam:CreatePolicy", "iam:CreatePolicyVersion", "iam:SetDefaultPolicyVersion", "iam:DeletePolicy", "iam:DeletePolicyVersion", "iam:AttachRolePolicy", "iam:DetachRolePolicy"
+      ], action)])
+    ])])
+    error_message = "GHA must not create/delete runtime roles, rewrite trust or remove/replace/edit ceilings."
+  }
+  assert {
+    condition     = alltrue([for p in aws_iam_role_policy.github : anytrue([for statement in jsondecode(p.policy).Statement : statement.Effect == "Deny" && contains(statement.Action, "iam:UpdateAssumeRolePolicy") && contains(statement.Action, "iam:DeleteRolePermissionsBoundary") && length(statement.Resource) == 3]) && anytrue([for statement in jsondecode(p.policy).Statement : statement.Effect == "Deny" && contains(statement.Action, "iam:CreatePolicyVersion") && contains(statement.Action, "iam:SetDefaultPolicyVersion") && length(statement.Resource) == 3])])
+    error_message = "All delivery principals need explicit runtime trust/boundary and ceiling policy mutation denials."
+  }
+}
+
+run "bootstrap_owns_separate_runtime_trust_and_ceilings" {
+  command = plan
+  assert {
+    condition     = toset(keys(aws_iam_role.runtime)) == toset(["api", "cleanup", "scheduler"]) && alltrue([for key, role in aws_iam_role.runtime : role.name == "synthetic-reminder-production-${key}" && role.permissions_boundary == "arn:aws:iam::123456789012:policy/synthetic-reminder-production-${key}-ceiling" && length(jsondecode(role.assume_role_policy).Statement) == 1 && one(jsondecode(role.assume_role_policy).Statement).Action == "sts:AssumeRole" && one(jsondecode(role.assume_role_policy).Statement).Principal.Service == (key == "scheduler" ? "scheduler.amazonaws.com" : "lambda.amazonaws.com") && !can(one(jsondecode(role.assume_role_policy).Statement).Principal.Federated)])
+    error_message = "Each bootstrap-owned runtime identity needs its own mandatory ceiling and service-only immutable trust."
+  }
+  assert {
+    condition = one(jsondecode(aws_iam_role.runtime["scheduler"].assume_role_policy).Statement).Condition.StringEquals == {
+      "aws:SourceAccount" = "123456789012"
+      "aws:SourceArn"     = "arn:aws:scheduler:us-east-1:123456789012:schedule-group/synthetic-reminder-production-cleanup"
+    }
+    error_message = "Scheduler trust is constrained to the exact account and dedicated group."
+  }
+  assert {
+    condition     = alltrue([for p in aws_iam_policy.runtime_ceiling : length(p.policy) <= 6144 && anytrue([for statement in jsondecode(p.policy).Statement : statement.Effect == "Deny" && can(statement.NotAction) && statement.Resource == ["*"] && alltrue([for action in statement.NotAction : !startswith(action, "iam:") && !startswith(action, "sts:") && !startswith(action, "cognito-idp:") && !strcontains(action, "*")])])])
+    error_message = "Even adversarial Allow-star inline policies cannot escape the finite explicit action ceilings."
+  }
+  assert {
+    condition     = alltrue([for key in ["api", "cleanup"] : anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : statement.Effect == "Deny" && try(statement.Condition.ArnNotEquals["lambda:SourceFunctionArn"], "") == "arn:aws:lambda:us-east-1:123456789012:function:synthetic-reminder-production-${key}"])])
+    error_message = "Swapping API/cleanup execution roles must not bypass their function-specific ceilings."
+  }
+  assert {
+    condition     = alltrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["scheduler"].policy).Statement : statement.Effect != "Allow" || statement.Action == ["lambda:InvokeFunction"] && statement.Resource == ["arn:aws:lambda:us-east-1:123456789012:function:synthetic-reminder-production-cleanup:production"]]) && alltrue([for key in ["api", "cleanup"] : alltrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : statement.Effect != "Allow" || !contains(statement.Action, "lambda:InvokeFunction") && !contains(statement.Action, "s3:DeleteObjectVersion")])])
+    error_message = "Scheduler can invoke only cleanup's production alias; Lambda identities cannot invoke functions or purge image versions."
+  }
+  assert {
+    condition     = alltrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : statement.Effect != "Allow" || !contains(statement.Action, "s3:DeleteObject")]) && anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["cleanup"].policy).Statement : statement.Effect == "Allow" && contains(statement.Action, "s3:ListBucket") && statement.Resource == ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images"] && !can(statement.Condition["StringEquals"]["s3:prefix"])])
+    error_message = "API cannot delete image objects; cleanup needs exact-bucket listing for missing-key HEAD to return 404."
+  }
+}
+
+run "absent_api_id_has_no_http_api_control" {
+  command = plan
+  variables { production_api_id = null }
+  assert {
+    condition     = alltrue([for policy in concat([for p in aws_iam_role_policy.github : p.policy], [aws_iam_policy.production_read.policy]) : alltrue([for statement in jsondecode(policy).Statement : statement.Effect != "Allow" || alltrue([for action in statement.Action : !startswith(action, "apigateway:")])])])
+    error_message = "An absent known API ID must grant no GHA HTTP API management, including root creation."
+  }
+}
+
+run "known_api_id_is_scoped_without_parent_tag_assumptions" {
+  command = plan
+  variables { production_api_id = "a1b2c3d4e5" }
+  assert {
+    condition     = alltrue([for policy in concat([for p in aws_iam_role_policy.github : p.policy], [aws_iam_policy.production_read.policy]) : alltrue([for statement in jsondecode(policy).Statement : !anytrue([for action in statement.Action : startswith(action, "apigateway:")]) || toset(statement.Resource) == toset(["arn:aws:apigateway:us-east-1::/apis/a1b2c3d4e5", "arn:aws:apigateway:us-east-1::/apis/a1b2c3d4e5/*"]) && !can(statement.Condition)])]) && anytrue([for statement in jsondecode(aws_iam_role_policy.github["apply"].policy).Statement : contains(statement.Action, "apigateway:POST") && contains(statement.Action, "apigateway:PATCH") && contains(statement.Action, "apigateway:DELETE")])
+    error_message = "Only the explicit API and its child ARNs may be managed, without tags/IfExists or foreign API wildcards."
+  }
+}
+run "different_api_id_does_not_retain_old_or_foreign_scope" {
+  command = plan
+  variables { production_api_id = "z9y8x7w6v5" }
+  assert {
+    condition     = alltrue([for policy in concat([for p in aws_iam_role_policy.github : p.policy], [aws_iam_policy.production_read.policy]) : alltrue([for statement in jsondecode(policy).Statement : !anytrue([for action in statement.Action : startswith(action, "apigateway:")]) || toset(statement.Resource) == toset(["arn:aws:apigateway:us-east-1::/apis/z9y8x7w6v5", "arn:aws:apigateway:us-east-1::/apis/z9y8x7w6v5/*"])])])
+    error_message = "Configured API IDs must not authorize any different API."
+  }
+}
+run "reject_api_scope_injection" {
+  command = plan
+  variables { production_api_id = "a1b2c3d4e5/*" }
+  expect_failures = [var.production_api_id]
+}
+
+# The literal adapter inventory below is independent of implementation locals.
+# Every permitted action has an explicit out-of-scope resource denial, including
+# adversarial Allow-star inline policies or a direct session resource policy.
+run "runtime_ceilings_enforce_exact_operation_scopes" {
+  command = plan
+  assert {
+    condition = toset(flatten([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : try(statement.Effect, "") == "Allow" ? statement.Action : []])) == toset(keys(jsondecode("{\"dynamodb:GetItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-reminders\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-owner-state\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:PutItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-reminders\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:UpdateItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-owner-state\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:Query\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-reminders\"],\"s3:ListBucket\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images\"],\"s3:GetObject\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"s3:GetObjectVersion\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"s3:PutObject\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"logs:CreateLogStream\":[\"arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/synthetic-reminder-production-api:*\"],\"logs:PutLogEvents\":[\"arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/synthetic-reminder-production-api:*\"]}"))) && alltrue([for action, resources in jsondecode("{\"dynamodb:GetItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-reminders\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-owner-state\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:PutItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-reminders\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:UpdateItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-owner-state\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:Query\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-reminders\"],\"s3:ListBucket\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images\"],\"s3:GetObject\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"s3:GetObjectVersion\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"s3:PutObject\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"logs:CreateLogStream\":[\"arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/synthetic-reminder-production-api:*\"],\"logs:PutLogEvents\":[\"arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/synthetic-reminder-production-api:*\"]}") :
+      anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : statement.Effect == "Allow" && contains(try(statement.Action, []), action) && toset(try(statement.Resource, [])) == toset(resources)]) &&
+      (resources == ["*"] || anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : statement.Effect == "Deny" && contains(try(statement.Action, []), action) && toset(try(statement.NotResource, [])) == toset(resources)]))
+    ])
+    error_message = "api ceiling must exactly match the adapter inventory and explicitly deny foreign resources, state and artifacts."
+  }
+  assert {
+    condition = toset(flatten([for statement in jsondecode(aws_iam_policy.runtime_ceiling["cleanup"].policy).Statement : try(statement.Effect, "") == "Allow" ? statement.Action : []])) == toset(keys(jsondecode("{\"dynamodb:GetItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-owner-state\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:PutItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:UpdateItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:Query\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs/index/cleanup_by_due\"],\"s3:ListBucket\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images\"],\"s3:GetObject\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"s3:DeleteObject\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"logs:CreateLogStream\":[\"arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/synthetic-reminder-production-cleanup:*\"],\"logs:PutLogEvents\":[\"arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/synthetic-reminder-production-cleanup:*\"],\"cloudwatch:PutMetricData\":[\"*\"]}"))) && alltrue([for action, resources in jsondecode("{\"dynamodb:GetItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-owner-state\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:PutItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:UpdateItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:Query\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs/index/cleanup_by_due\"],\"s3:ListBucket\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images\"],\"s3:GetObject\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"s3:DeleteObject\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"logs:CreateLogStream\":[\"arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/synthetic-reminder-production-cleanup:*\"],\"logs:PutLogEvents\":[\"arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/synthetic-reminder-production-cleanup:*\"],\"cloudwatch:PutMetricData\":[\"*\"]}") :
+      anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["cleanup"].policy).Statement : statement.Effect == "Allow" && contains(try(statement.Action, []), action) && toset(try(statement.Resource, [])) == toset(resources)]) &&
+      (resources == ["*"] || anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["cleanup"].policy).Statement : statement.Effect == "Deny" && contains(try(statement.Action, []), action) && toset(try(statement.NotResource, [])) == toset(resources)]))
+    ])
+    error_message = "cleanup ceiling must exactly match the adapter inventory and explicitly deny foreign resources, state and artifacts."
+  }
+  assert {
+    condition = toset(flatten([for statement in jsondecode(aws_iam_policy.runtime_ceiling["scheduler"].policy).Statement : try(statement.Effect, "") == "Allow" ? statement.Action : []])) == toset(keys(jsondecode("{\"lambda:InvokeFunction\":[\"arn:aws:lambda:us-east-1:123456789012:function:synthetic-reminder-production-cleanup:production\"]}"))) && alltrue([for action, resources in jsondecode("{\"lambda:InvokeFunction\":[\"arn:aws:lambda:us-east-1:123456789012:function:synthetic-reminder-production-cleanup:production\"]}") :
+      anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["scheduler"].policy).Statement : statement.Effect == "Allow" && contains(try(statement.Action, []), action) && toset(try(statement.Resource, [])) == toset(resources)]) &&
+      (resources == ["*"] || anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["scheduler"].policy).Statement : statement.Effect == "Deny" && contains(try(statement.Action, []), action) && toset(try(statement.NotResource, [])) == toset(resources)]))
+    ])
+    error_message = "scheduler ceiling must exactly match the adapter inventory and explicitly deny foreign resources, state and artifacts."
+  }
+  assert {
+    condition     = alltrue([for key in ["api", "cleanup", "scheduler"] : anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : statement.Effect == "Deny" && toset(try(statement.NotAction, [])) == toset(flatten([for allow in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : allow.Effect == "Allow" ? allow.Action : []])) && statement.Resource == ["*"]])])
+    error_message = "An arbitrary IAM/STS/Cognito grant must encounter an explicit Deny outside the exact runtime action inventory."
+  }
+  assert {
+    condition     = alltrue([for key in ["api", "cleanup"] : alltrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : statement.Effect != "Allow" || (key == "api" && try(statement.Action, []) == ["s3:GetObjectVersion"] && try(statement.Condition.StringEquals["s3:authType"], "") == "REST-QUERY-STRING") || try(statement.Condition.ArnEquals["lambda:SourceFunctionArn"], "") == "arn:aws:lambda:us-east-1:123456789012:function:synthetic-reminder-production-${key}"]) && anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : statement.Effect == "Deny" && try(statement.Condition.ArnNotEquals["lambda:SourceFunctionArn"], "") == "arn:aws:lambda:us-east-1:123456789012:function:synthetic-reminder-production-${key}" && toset(try(statement.Action, [])) == toset([for action in flatten([for allow in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : allow.Effect == "Allow" ? allow.Action : []]) : action if key != "api" || action != "s3:GetObjectVersion"])])])
+    error_message = "Absent/mismatched source-function context must explicitly deny all ordinary runtime operations, including automatic logs; the bounded version-GET alternative is checked separately."
+  }
+  assert {
+    condition     = anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["cleanup"].policy).Statement : statement.Effect == "Allow" && contains(try(statement.Action, []), "cloudwatch:PutMetricData") && try(statement.Condition.StringEquals["cloudwatch:namespace"], "") == "ReminderServer" && try(statement.Condition.StringEquals["aws:RequestedRegion"], "") == "us-east-1"]) && alltrue([for condition_key, value in { "cloudwatch:namespace" = "ReminderServer", "aws:RequestedRegion" = "us-east-1" } : anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["cleanup"].policy).Statement : statement.Effect == "Deny" && contains(try(statement.Action, []), "cloudwatch:PutMetricData") && try(statement.Condition.StringNotEquals[condition_key], "") == value])])
+    error_message = "Metric publishing must explicitly deny either a wrong region or wrong namespace independently."
+  }
+}
+
+run "reject_empty_api_id" {
+  command = plan
+  variables { production_api_id = "" }
+  expect_failures = [var.production_api_id]
+}
+
+run "presigned_version_read_is_api_only_and_bounded" {
+  command = plan
+  assert {
+    condition     = length([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : statement if statement.Effect == "Allow" && !can(statement.Condition.ArnEquals)]) == 1
+    error_message = "Exactly one Allow may omit the API source-function guard; additional exceptions are forbidden."
+  }
+  assert {
+    condition     = anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : statement.Effect == "Allow" && try(statement.Action, []) == ["s3:GetObjectVersion"] && try(statement.Resource, []) == ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*"] && !can(statement.Condition.ArnEquals) && try(statement.Condition.StringEquals["s3:authType"], "") == "REST-QUERY-STRING" && try(statement.Condition.StringEquals["s3:signatureversion"], "") == "AWS4-HMAC-SHA256" && try(tonumber(statement.Condition.NumericLessThanEquals["s3:signatureAge"]), 0) == 900000 && try(statement.Condition.Null["s3:signatureAge"], "") == "false"])
+    error_message = "Browser-consumed version GET needs only an API ceiling exception for SigV4 query authentication and <=900-second signature age."
+  }
+  assert {
+    condition     = alltrue([for key in ["cleanup", "scheduler"] : alltrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : statement.Effect != "Allow" || !contains(try(statement.Action, []), "s3:GetObjectVersion")])]) && anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : statement.Effect == "Deny" && try(statement.Action, []) == ["s3:GetObjectVersion"] && try(statement.Condition.ArnNotEquals["lambda:SourceFunctionArn"], "") == "arn:aws:lambda:us-east-1:123456789012:function:synthetic-reminder-production-api" && try(statement.Condition.StringNotEquals["s3:authType"], "") == "REST-QUERY-STRING"])
+    error_message = "Cleanup must not gain version reads; ordinary API SDK version reads stay function-bound, including missing authentication context."
+  }
+  assert {
+    condition     = anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : statement.Effect == "Deny" && try(statement.Action, []) == ["s3:GetObjectVersion"] && try(statement.Condition.StringEquals["s3:authType"], "") == "REST-QUERY-STRING" && try(tonumber(statement.Condition.NumericGreaterThan["s3:signatureAge"]), 0) == 900000]) && anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : statement.Effect == "Deny" && try(statement.Action, []) == ["s3:GetObjectVersion"] && try(statement.Condition.StringEquals["s3:authType"], "") == "REST-QUERY-STRING" && try(statement.Condition.Null["s3:signatureAge"], "") == "true"]) && anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : statement.Effect == "Deny" && try(statement.Action, []) == ["s3:GetObjectVersion"] && try(statement.Condition.StringEquals["s3:authType"], "") == "REST-QUERY-STRING" && try(statement.Condition.StringNotEquals["s3:signatureversion"], "") == "AWS4-HMAC-SHA256"])
+    error_message = "Even Allow-star/session resource grants must not bypass expired/missing-age or non-SigV4 query conditions."
   }
 }

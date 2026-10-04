@@ -44,3 +44,14 @@ variable "name_prefix" {
     error_message = "name_prefix must be 3-26 lowercase letters/digits/hyphens, beginning with a letter, ending alphanumeric, without double hyphens, and produce a bucket name of at most 63 characters."
   }
 }
+
+variable "production_api_id" {
+  type        = string
+  nullable    = true
+  default     = null
+  description = "Known production HTTP API ID from the separately authorized application-root first seed. Null grants no HTTP API management to GitHub."
+  validation {
+    condition     = var.production_api_id == null || can(regex("^[a-z0-9]{1,32}$", var.production_api_id))
+    error_message = "production_api_id must be null or an explicit lowercase alphanumeric API ID; no paths, wildcards or whitespace."
+  }
+}

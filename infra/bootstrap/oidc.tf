@@ -3,16 +3,29 @@ locals {
   state_keys    = ["production/platform/terraform.tfstate", "production/application/terraform.tfstate"]
   state_objects = [for key in local.state_keys : "${local.bucket_arns.state}/${key}"]
   lock_objects  = [for object in local.state_objects : "${object}.tflock"]
-  # Generated pool/API IDs are unknown at bootstrap. Restrict creation/management
-  # with project + production tags and regional/account ARNs, not user APIs.
-  # DescribeLogGroups has no resource-level support, hence Resource="*".
-  # CreateUserPool has no existing resource ARN, hence Resource="*" + request tags.
-  # DescribeUserPoolDomain has no resource-level IAM support; region-only read.
-  # HTTP API logging requires the documented log delivery/resource policy APIs
-  # with Resource="*"; restrict them to this region. No Get/FilterLogEvents grant.
+  # Cognito generated IDs use supported pool request/resource tags. HTTP API
+  # IDs are separately seeded by an operator and always scoped explicitly:
+  # API Gateway does not establish parent-tag inheritance for child controls.
+  # DescribeLogGroups/DescribeUserPoolDomain require region-only Resource="*".
+  # HTTP API log delivery/resource-policy APIs also require Resource="*";
+  # these configuration grants exist only after an explicit API-ID handoff.
   # https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-logging.html
-  # API Gateway auto-creates its one AWS-managed service-linked role on first API.
-  production_read = [
+  production_api_resources = flatten([for id in [var.production_api_id] : [
+    "arn:aws:apigateway:${var.region}::/apis/${id}",
+    "arn:aws:apigateway:${var.region}::/apis/${id}/*"
+  ] if id != null])
+  production_read = concat([for statement in local.production_read_base : statement], [for id in [var.production_api_id] : {
+    Effect = "Allow", Action = ["apigateway:GET"], Resource = local.production_api_resources
+  } if id != null])
+  production_write = concat(local.production_write_base, [for id in [var.production_api_id] : {
+    Effect = "Allow", Action = ["apigateway:POST", "apigateway:PATCH", "apigateway:PUT", "apigateway:DELETE"], Resource = local.production_api_resources
+    } if id != null], [for id in [var.production_api_id] : {
+    Effect    = "Allow"
+    Action    = ["logs:CreateLogDelivery", "logs:PutResourcePolicy", "logs:UpdateLogDelivery", "logs:DeleteLogDelivery", "logs:GetLogDelivery", "logs:ListLogDeliveries", "logs:DescribeResourcePolicies"]
+    Resource  = ["*"]
+    Condition = { StringEquals = { "aws:RequestedRegion" = var.region } }
+  } if id != null])
+  production_read_base = [
     {
       Sid       = "UserPoolDomainConfiguration"
       Effect    = "Allow"
@@ -122,17 +135,6 @@ locals {
       ]
     },
     {
-      "Sid" : "GatewayConfiguration",
-      "Effect" : "Allow",
-      "Condition" : { "StringEquals" : { "aws:ResourceTag/Project" : var.name_prefix, "aws:ResourceTag/Environment" : "production" } },
-      "Action" : [
-        "apigateway:GET"
-      ],
-      "Resource" : [
-        "arn:aws:apigateway:${var.region}::/apis/*"
-      ]
-    },
-    {
       "Sid" : "LogsConfiguration",
       "Effect" : "Allow",
       "Condition" : { "StringEquals" : { "aws:RequestedRegion" : var.region } },
@@ -171,21 +173,7 @@ locals {
       ]
     }
   ]
-  production_write = [
-    {
-      Sid       = "GatewayLogDeliveryConfiguration"
-      Effect    = "Allow"
-      Action    = ["logs:CreateLogDelivery", "logs:PutResourcePolicy", "logs:UpdateLogDelivery", "logs:DeleteLogDelivery", "logs:GetLogDelivery", "logs:ListLogDeliveries", "logs:DescribeResourcePolicies"]
-      Resource  = ["*"]
-      Condition = { StringEquals = { "aws:RequestedRegion" = var.region } }
-    },
-    {
-      Sid       = "GatewayServiceLinkedRoleCreation"
-      Effect    = "Allow"
-      Action    = ["iam:CreateServiceLinkedRole"]
-      Resource  = ["arn:aws:iam::${var.account_id}:role/aws-service-role/ops.apigateway.amazonaws.com/AWSServiceRoleForAPIGateway"]
-      Condition = { StringEquals = { "iam:AWSServiceName" = "ops.apigateway.amazonaws.com" } }
-    },
+  production_write_base = [
     {
       "Sid" : "TableManagement",
       "Effect" : "Allow",
@@ -256,14 +244,8 @@ locals {
       "Sid" : "RuntimeRoleManagement",
       "Effect" : "Allow",
       "Action" : [
-        "iam:CreateRole",
-        "iam:DeleteRole",
-        "iam:UpdateAssumeRolePolicy",
-        "iam:UpdateRole",
         "iam:PutRolePolicy",
-        "iam:DeleteRolePolicy",
-        "iam:TagRole",
-        "iam:UntagRole"
+        "iam:DeleteRolePolicy"
       ],
       "Resource" : [
         "arn:aws:iam::${var.account_id}:role/${local.production}-api",
@@ -366,42 +348,6 @@ locals {
       ]
     },
     {
-      "Sid" : "GatewayCreation",
-      "Effect" : "Allow",
-      "Action" : [
-        "apigateway:POST"
-      ],
-      "Resource" : [
-        "arn:aws:apigateway:${var.region}::/apis"
-      ],
-      "Condition" : {
-        "StringEquals" : {
-          "aws:RequestTag/Project" : "${var.name_prefix}",
-          "aws:RequestTag/Environment" : "production",
-          "aws:RequestedRegion" : var.region
-        }
-      }
-    },
-    {
-      "Sid" : "GatewayManagement",
-      "Effect" : "Allow",
-      "Action" : [
-        "apigateway:POST",
-        "apigateway:PATCH",
-        "apigateway:PUT",
-        "apigateway:DELETE"
-      ],
-      "Resource" : [
-        "arn:aws:apigateway:${var.region}::/apis/*"
-      ],
-      "Condition" : {
-        "StringEquals" : {
-          "aws:ResourceTag/Project" : "${var.name_prefix}",
-          "aws:ResourceTag/Environment" : "production"
-        }
-      }
-    },
-    {
       "Sid" : "LogManagement",
       "Effect" : "Allow",
       "Action" : [
@@ -441,9 +387,9 @@ locals {
   state_lock    = { Sid = "ProductionStateLocks", Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource = local.lock_objects }
   artifact_read = { Sid = "ReadReleaseZip", Effect = "Allow", Action = ["s3:GetObject", "s3:GetObjectVersion"], Resource = [local.artifact_objects] }
   policies = {
-    artifact = [{ Sid = "RegisterReleaseZip", Effect = "Allow", Action = ["s3:PutObject", "s3:GetObject", "s3:GetObjectVersion"], Resource = [local.artifact_objects] }]
-    plan     = concat([local.state_list, local.state_lock, local.artifact_read, { Sid = "ReadProductionState", Effect = "Allow", Action = ["s3:GetObject"], Resource = local.state_objects }])
-    apply    = concat([local.state_list, local.state_lock, local.artifact_read, { Sid = "WriteProductionState", Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject"], Resource = local.state_objects }], local.production_write)
+    artifact = concat(local.runtime_ownership_denials, [{ Sid = "RegisterReleaseZip", Effect = "Allow", Action = ["s3:PutObject", "s3:GetObject", "s3:GetObjectVersion"], Resource = [local.artifact_objects] }])
+    plan     = concat(local.runtime_ownership_denials, [local.state_list, local.state_lock, local.artifact_read, { Sid = "ReadProductionState", Effect = "Allow", Action = ["s3:GetObject"], Resource = local.state_objects }])
+    apply    = concat(local.runtime_ownership_denials, [local.state_list, local.state_lock, local.artifact_read, { Sid = "WriteProductionState", Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject"], Resource = local.state_objects }], local.production_write)
   }
 }
 resource "aws_iam_openid_connect_provider" "github" {
