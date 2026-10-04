@@ -195,3 +195,40 @@ run "cognito_pool_configuration_reads_cover_pinned_provider" {
     error_message = "Pinned provider must be able to read pool MFA configuration and OAuth resource server configuration."
   }
 }
+
+# Catches omitted owner-state/image-jobs metadata or provisioning permissions,
+# replacement of exact table ARNs by wildcards, and accidental data permissions.
+run "all_three_tables_have_only_configuration_rights" {
+  command = plan
+  assert {
+    condition = alltrue([for table in ["reminders", "owner-state", "image-jobs"] : anytrue([
+      for statement in jsondecode(aws_iam_policy.production_read.policy).Statement :
+      contains(statement.Resource, "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-${table}") && alltrue([
+        for action in ["dynamodb:DescribeTable", "dynamodb:DescribeContinuousBackups", "dynamodb:DescribeTimeToLive", "dynamodb:ListTagsOfResource"] : contains(statement.Action, action)
+      ])
+    ])])
+    error_message = "Plan/apply must read metadata, PITR, TTL and tags for reminders, owner-state and image-jobs."
+  }
+  assert {
+    condition = alltrue([for table in ["reminders", "owner-state", "image-jobs"] : anytrue([
+      for statement in jsondecode(aws_iam_role_policy.github["apply"].policy).Statement :
+      contains(statement.Resource, "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-${table}") && alltrue([
+        for action in ["dynamodb:CreateTable", "dynamodb:UpdateTable", "dynamodb:DeleteTable", "dynamodb:UpdateContinuousBackups", "dynamodb:UpdateTimeToLive", "dynamodb:TagResource", "dynamodb:UntagResource"] : contains(statement.Action, action)
+      ])
+    ])])
+    error_message = "Apply must provision and manage configuration for all three exact runtime tables."
+  }
+  assert {
+    condition = alltrue([for policy in concat([for p in aws_iam_role_policy.github : p.policy], [aws_iam_policy.production_read.policy]) : alltrue([
+      for statement in jsondecode(policy).Statement : !anytrue([for action in statement.Action : startswith(action, "dynamodb:")]) || toset(statement.Resource) == toset([
+        "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-reminders",
+        "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-owner-state",
+        "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs"
+        ]) && alltrue([for action in statement.Action : contains([
+          "dynamodb:DescribeTable", "dynamodb:DescribeContinuousBackups", "dynamodb:DescribeTimeToLive", "dynamodb:ListTagsOfResource",
+          "dynamodb:CreateTable", "dynamodb:UpdateTable", "dynamodb:DeleteTable", "dynamodb:UpdateContinuousBackups", "dynamodb:UpdateTimeToLive", "dynamodb:TagResource", "dynamodb:UntagResource"
+      ], action)])
+    ])])
+    error_message = "All DynamoDB grants must use exactly three table ARNs and configuration actions only, never data or wildcard permissions."
+  }
+}

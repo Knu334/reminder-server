@@ -30,7 +30,9 @@ locals {
         "dynamodb:ListTagsOfResource"
       ],
       "Resource" : [
-        "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${local.production}-reminders"
+        "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${local.production}-reminders",
+        "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${local.production}-owner-state",
+        "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${local.production}-image-jobs"
       ]
     },
     {
@@ -197,7 +199,9 @@ locals {
         "dynamodb:UntagResource"
       ],
       "Resource" : [
-        "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${local.production}-reminders"
+        "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${local.production}-reminders",
+        "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${local.production}-owner-state",
+        "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${local.production}-image-jobs"
       ]
     },
     {
