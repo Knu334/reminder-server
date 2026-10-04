@@ -10,7 +10,11 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "migrate:json": "tsx scripts/operations/migrate-json.ts",
-    "recovery:verify": "tsx scripts/operations/verify-recovery.ts"
+    "recovery:verify": "tsx scripts/operations/verify-recovery.ts",
+    "build": "tsx scripts/build/bundle.ts",
+    "package": "python3 scripts/build/package.py",
+    "verify:zip": "tsx scripts/build/verify-zip.ts artifacts/reminder-server.zip",
+    "test:packaging": "python3 -m unittest discover -s tests/packaging -v"
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "3.1146.0",
@@ -28,9 +32,13 @@
     "esbuild": "0.28.2",
     "eslint": "9.39.0",
     "globals": "^16.5.0",
-    "tsup": "^8.5.0",
     "tsx": "4.23.15",
     "typescript": "5.9.3",
     "typescript-eslint": "8.71.0"
-  }
+  },
+  "engines": {
+    "node": ">=24 <25",
+    "npm": "11.11.1"
+  },
+  "packageManager": "npm@11.11.1"
 }
