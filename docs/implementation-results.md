@@ -1,0 +1,118 @@
+# AWS implementation results
+
+Updated 2026-10-05. The approved 19-task scope is implemented locally on
+feature/aws-sdd-implementation. Eighteen controller task gates are complete;
+D08's docs/security-rule task gate and the subsequent wholebranch independent
+review remain pending. This document is local evidence, not production acceptance.
+The [historical audit](repository-audit-2026-10-02.md), design and original approval
+handoff have not been rewritten. The [resume handoff](superpowers/handoffs/2026-10-03-reminder-server-aws-sdd-resume.md)
+now points here instead of directing a future session to restart R02.
+
+R01–R08 deliver validated contracts/config, authentication and rate/ownership,
+item transactions and ETags, image jobs, bounded cleanup and lazy Lambda handlers.
+O01–O03 deliver explicit dry-run/import/verify/publish and restored-only verification,
+image preservation/owner remap. D01–D08 deliver reproducible standalone ZIP,
+immutable S3 registration proof, three Terraform roots, root-specific saved-plan
+custody, two-alias proof/status-only smoke, OIDC workflows and these instructions.
+Source/types and reviewed task reports are the actual interfaces; plans/audit
+capture earlier intent or historical defects.
+
+## Local verification and evidence limits
+
+The final commands/results and measured ZIP are recorded in [acceptance](operations/acceptance.md).
+D08 focused secret tests:8/8; fresh full303/303 Node tests comprise runtime157,
+operations72 and delivery74 (previously66 plus8 new cases), Python3/3 and56
+Terraform mocks. Typecheck/lint/build/package/verify and .devcontainer baseline
+check passed. Fresh runtime/full audits both report zero at every severity. Package
+checks consume a newly built ZIP, and three Terraform roots run backend-free
+schema/validate/mock checks. D07 resolved all six development dependency findings;
+current runtime/full audits are reported separately from historical audit16/R08audit7.
+Local audit zero is point-in-time evidence, not certification of perpetual safety.
+
+The local ZIP digest `b50f7fed609c49b4bcefc86cf6379478dbcd798ddede7c80713c1d533c1ae15a`
+is not registered/deployed: no real S3 versionId, Lambda CodeSha256/version/alias,
+AWS/GHA execution, Chrome login/extension version, migration, Cognito operation,
+PITR, rollback or production smoke was verified. In particular, IAM-only direct-auth
+configuration plus classic Hosted UI/code/PKCE requires joint live acceptance.
+Private-repository workflow custody depends on restricted repository readers,
+configured Environments/OIDC/protection availability and one-day retention.
+
+The real reminders.json/.env.actions were removed only from the index using
+`git rm --cached`, then filesystem existence checks confirmed both remained local.
+No contents or hashes were read; byte preservation was tested only using empty
+canaries in a temporary Git repository. Past Git history remains unchanged.
+AGENTS.md remains the existing symlink to newly created CLAUDE.md. Claude Read
+rules use documented glob semantics; supported Claude/Codex PreToolUse scripts
+return structured deny JSON/exit0. Script tests do not prove actual harness
+activation, trust or comprehensive shell/file-tool coverage. Environment permissions
+and instructions remain authoritative. All provider/dependency/generated caches,
+private inputs/state/plan/images/backups and artifacts are ignored; public samples
+and root lockfiles remain reviewable. The quarantined dependency remnant is
+ignored under artifacts; it was not opened, staged or claimed physically removed.
+
+## Audit findings (all F01–F32)
+
+“Local implemented” means code/config plus synthetic evidence in the linked files;
+AWS-dependent behavior still requires the acceptance procedure. “Architecture
+replaced” means the obsolete long-running Docker/Express/TLS path was removed,
+not that a production deployment was performed. Explicit exclusions remain open.
+
+| ID | Result/status | Evidence and remaining boundary |
+| --- | --- | --- |
+| F01 | Local implemented: validate before item save | [contracts](../tests/runtime/contracts.test.ts), [API](../tests/runtime/api.test.ts); strict DTO/unknown fields |
+| F02 | Local implemented: item updates and conditional revision | [writes](../tests/runtime/writes.test.ts); no whole-list replacement |
+| F03 | Local implemented: own-property/schema handling | [legacy](../tests/operations/legacy.test.ts), [contracts](../tests/runtime/contracts.test.ts); prototype/special synthetic keys |
+| F04 | Local implemented: explicit empty-target migration/publication gate | [migration](../tests/operations/migration.test.ts), [reads/rate](../tests/runtime/reads-rate.test.ts); actual first publication unperformed |
+| F05 | Local implemented: Cognito issuer/sub ownership/scopes | [boundaries](../tests/runtime/boundaries.test.ts), [API](../tests/runtime/api.test.ts), platform cognito.tf; joint live auth gap retained |
+| F06 | Local implemented: auth/rate/gate before bounded body parsing | [API](../tests/runtime/api.test.ts); no real load measurement |
+| F07 | Local implemented: no per-request DNS lookup, literal IP allowlist | [boundaries](../tests/runtime/boundaries.test.ts), [config](../src/config.ts) |
+| F08 | Local implemented: explicit Chrome origin/Gateway CORS | application gateway.tf/mock, [API](../tests/runtime/api.test.ts); live extension CORS untested |
+| F09 | Local implemented: v2 media/DTO/header contract | [API spec](api-v2.md), [contracts](../tests/runtime/contracts.test.ts), [API](../tests/runtime/api.test.ts) |
+| F10 | Local implemented: safe structured errors/logs/request IDs | [boundaries](../tests/runtime/boundaries.test.ts), [API](../tests/runtime/api.test.ts), monitoring.tf; private TF failure detail remains Minor |
+| F11 | Architecture replaced: DynamoDB conditional transactions | [writes](../tests/runtime/writes.test.ts), [images](../tests/runtime/images.test.ts); real failure/load acceptance unperformed |
+| F12 | Architecture replaced: partitioned item query, bounded pagination | [reads/rate](../tests/runtime/reads-rate.test.ts); no synchronous whole-user file IO or invented performance measurement |
+| F13 | Architecture replaced: AWS managed HTTPS endpoint | application gateway.tf; certificate watcher removed; actual TLS endpoint uncreated |
+| F14 | Architecture replaced: AWS TLS termination | application gateway.tf; no Certbot intermediate-chain configuration; actual TLS acceptance pending |
+| F15 | Architecture replaced: Lambda ZIP/explicit Terraform inputs | [bundle](../tests/delivery/bundle.test.ts), [ZIP checker](../scripts/build/verify-zip.ts); Compose/Caddy production removed |
+| F16 | Architecture replaced: finite invocation budgets/cancellation | [cleanup](../tests/runtime/cleanup.test.ts), [boundaries](../tests/runtime/boundaries.test.ts); no persistent HTTP listener shutdown contract |
+| F17 | Local implemented: side-effect-free health and dependency/publication readiness | [API](../tests/runtime/api.test.ts), [release smoke](../tests/delivery/release.test.ts) |
+| F18 | Architecture replaced: bounded Lambda memory/time/concurrency, scoped IAM | application lambda.tf and [infra tests](../tests/delivery/infra-check.test.ts); live execution/IAM proof pending |
+| F19 | Local lock/npm ci and strict ZIP inventory implemented; .devcontainer portion excluded | package-lock.json, [packaging](../tests/packaging/test_package.py); no .devcontainer edits |
+| F20 | Local dependency remediation and audits implemented | D07 dependency fixes, audit scripts/current acceptance; historical findings preserved |
+| F21 | Local/prod Node24 path implemented; .devcontainer portion excluded | package engines, ci.yml/deploy.yml, lambda.tf; devcontainer Node configuration untouched |
+| F22 | Local implemented: esbuild replaces tsup | [bundle](../scripts/build/bundle.ts), [bundle tests](../tests/delivery/bundle.test.ts), esbuild0.28.2 fixed |
+| F23 | Local implemented: static/test/package/infra CI gates | [workflow tests](../tests/delivery/workflows.test.ts), ci.yml; no actual GHA run |
+| F24 | Local implemented: least default permission/full SHA/OIDC/Dependabot | [workflow tests](../tests/delivery/workflows.test.ts), deploy.yml/.github/dependabot.yml; external protection/account setup pending |
+| F25 | Local implemented: typed lint excludes generated outputs/cache | eslint.config.mjs and fresh npm run lint; ESLint9.39 unsupported/deprecated warning retained |
+| F26 | Local implemented: strict boundary validation/noUncheckedIndexedAccess | tsconfig.json, [contracts](../tests/runtime/contracts.test.ts), typed lint |
+| F27 | Local credential-free build/ZIP/infra mock path implemented; .devcontainer portion excluded | README verification commands, [packaging](../tests/packaging/test_package.py); no auth bootstrap/container architecture change |
+| F28 | Excluded/unresolved: development firewall | .devcontainer unchanged against253e5e2; user-managed network work outside scope |
+| F29 | Excluded/unresolved: development third-party proxy default | .devcontainer unchanged; no AI-routing/privacy configuration changes or actual-send claim |
+| F30 | Local private-file rules/untrack/contributor guidance implemented; .devcontainer portion excluded | [secret-rule tests](../tests/delivery/secret-rules.test.ts), CLAUDE/settings/hooks/.gitignore; auxiliary scope/trust limits, no content read/history rewrite |
+| F31 | Local implemented: executable commands/v2/operations/shared instructions | README/CLAUDE/AGENTS link, operation docs, acceptance/resume update; client product adaptation still separate |
+| F32 | Local implemented: lazy handlers, minimal bundle/deps, safe diagnosis | [API](../tests/runtime/api.test.ts), [bundle](../tests/delivery/bundle.test.ts), src/api.ts/src/cleanup.ts; known final-review Minors retained |
+
+## Improvements (all B01–B06)
+
+| ID | Result/status | Evidence and remaining boundary |
+| --- | --- | --- |
+| B01 | Local implemented: authenticated individual update API | [API v2](api-v2.md), runtime API/boundary/write tests; real Chrome/client update and ownership migration pending |
+| B02 | Local implemented: revision/opaque ETag/412/428/tombstone contract | [writes](../tests/runtime/writes.test.ts), [API](../tests/runtime/api.test.ts); client conflict UI outside this repository |
+| B03 | Local implemented: transaction persistence + explicit importer/recovery | [migration](../tests/operations/migration.test.ts), [recovery](../tests/operations/recovery.test.ts), 3table PITR config; actual data/AWS rehearsal pending |
+| B04 | Local implemented: timezone normalization/tombstones and authorized PITR path | [contracts](../tests/runtime/contracts.test.ts), [recovery procedure](operations/recovery.md); no new user-facing undelete endpoint; real PITR unperformed |
+| B05 | Architecture replaced: delegate TLS to AWS HTTP API | application gateway.tf and preserved baseline guard; no Caddy/reverse-proxy/real TLS acceptance |
+| B06 | Local implemented: maintained explicit esbuild bundle/reproducible ZIP | [bundle](../scripts/build/bundle.ts), [package](../scripts/build/package.py), bundle/Python tests; live artifact registration still pending |
+
+## Pending controller review and production acceptance
+
+The three ignored SDD ledgers retain exact task RED/GREEN commands/reports,
+producer/ruling history and independent task reviews. Controller final review
+will collect all Rulings and triage known Minors (private Terraform diagnostics,
+dense conditions, synthetic test logs, ESLint warning, Terraform target warning).
+D08 does not silently expand into production fixes or claim those issues resolved.
+All19 task gates are complete only after the D08 controller gate. Wholebranch
+review and final acceptance require their own evidence after that; this current
+record does not preempt them. Follow [acceptance](operations/acceptance.md) for the
+separately authorized live steps and record actual results/version IDs without
+private data. Cost coefficients remain the existing budget inputs, with no
+invented durations, billing or platform measurements.

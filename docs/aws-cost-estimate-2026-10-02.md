@@ -118,3 +118,11 @@ GHAの有料実行時間・artifact、AWSサポート、独自ドメイン、SNS
 未認証の大量リクエスト、条件付き書き込みの拒否、transaction conflict、内部再試行、期限切れURLの連続取得も課金を増やし得る。スロットリング・所有者上限は費用の硬い上限ではない。平均画像100 KiBから1 MiBなら画像の転送・保存は約10.24倍で、BASE64入力のHTTP API単位も増える。
 
 production公開後にAPI/清掃のBilled Duration、Schedulerの試行回数、DynamoDB ConsumedCapacity（GSI込み）・3表/GSI保存量、画像version・滞留、転送、ログ圧縮率、メトリクス発行時間、配布ZIP保存量・S3登録/取得回数・GHA使用量を取得する。構築リージョンの単価で再計算し、以前の「月約20／60／380円」を流用しない。
+
+## ローカル実装後の証拠境界（2026-10-05）
+
+上のduration、request、保存・転送・metric係数は予算入力のままです。実AWS/GHA/
+Chrome/PITRを実行していないため実測duration・転送・請求値への更新はありません。
+[実装結果](implementation-results.md)のZIPサイズ/hashはローカル成果物の測定で、
+実S3保存量・monthly release回数・Lambda起動時間を証明しません。9 alarm/2 custom
+metricにSNS通知先はなく、alarmを作ることと通知deliveryを確認することは別です。

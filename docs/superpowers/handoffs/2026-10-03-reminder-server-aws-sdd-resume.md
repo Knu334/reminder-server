@@ -1,43 +1,28 @@
-# AWS SDD実装の一時停止・再開記録
+# AWS SDD再開状態（2026-10-05更新）
 
-ユーザーがFW許可のために開発コンテナのリビルドを必要としており、2026-10-03にR01の独立レビュー完了を区切りに一時停止した。全19タスク中R01のみ完了、残り18タスクは未着手。設計・計画・SDDの承認は維持する。
+この文書は2026-10-03 R01直後の停止地点から更新した現行案内です。R01–R08、
+O01–O03、D01–D07の18task gateはcontroller独立レビュー済み。D08の文書・secret
+rules・最終ローカル検証を実装し、D08 task gateとwholebranch reviewはcontroller
+確認待ちです。R02から再開しないでください。
 
-- 起点: feature/aws-modernization / c6b4d99（承認済み計画・引き継ぎ文書を保持）。
-- セットアップ:34b9ec6（.worktrees/をignore。起点ブランチにも同じセットアップコミット）。
-- 実装ブランチ:feature/aws-sdd-implementation。
-- 隔離worktree:/workspace/.worktrees/aws-sdd。
-- R01完了コミット:d035343（feat: define validated reminder and image contracts）。
-- R01独立レビュー:/root/r01_review、仕様適合✅・コード品質Approved、Critical/Important/Minor指摘なし。
-- 次のタスク:runtime計画Task2 R02。R02をまだdispatchしていない。ユーザーの再開指示後にR02から進める。
+現行の[実装結果](../../implementation-results.md)と[受け入れ記録](../../operations/acceptance.md)、
+feature/aws-sdd-implementation（/workspace/.worktrees/aws-sdd）の実ソースを参照します。
+元の[承認handoff](2026-10-03-reminder-server-aws-sdd.md)、設計、auditは履歴として維持します。
+3つのignored .superpowers/sdd/2026-10-03-reminder-server-aws-{runtime,operations,delivery}/
+配下のprogress/brief/report/review/Rulingsはcontrollerのfinal収集まで保持します。
 
-## 保持したSDD状態
+現在はNode24.21.0/npm11.11.1、Python3.13.16、Terraform1.16.5、AWS provider6.67.0
+で検証できます。準備済みPATHは/tmp/aws-sdd-tools/node_modules/.bin:
+/tmp/aws-sdd-tools/binを先頭に置きます。runtime157/operations72、deliveryはD08追加前66。
+以前のoperations/delivery 0は未作成であり検証済みではありません。D07 auditは両方0件。
+D08のfresh counts/audit/ZIPは現行受け入れ記録へ反映します。
 
-各サブ計画の台帳・brief・report・差分はworktree内の次のGit-ignoredディレクトリに保持した。全タスクのbriefに共通制約とInterfacesを添付済み。削除しない。
+承認済みの全19タスクのローカル実装・test・doc/config/security/deps/tools・feature commit
+は継続して許可されています。実AWS/GHA/ZIP登録/seed/deploy/data/user/PITR/push/PR/merge
+は未実施かつ別承認が必要です。秘密/real reminders/.env.actions/credentialsは読まず、
+合成fixtureだけ使用し、.devcontainerを変更しません。保護ファイルを含むdiff/statは
+生成前にpath除外し、保護pathの確認はname/statusとfilesystem存在だけに制限します。
 
-- .superpowers/sdd/2026-10-03-reminder-server-aws-runtime/progress.md
-- .superpowers/sdd/2026-10-03-reminder-server-aws-operations/progress.md
-- .superpowers/sdd/2026-10-03-reminder-server-aws-delivery/progress.md
-- runtimeディレクトリ内controller-state.md、task-1-report.md、task-1-review.md、review-34b9ec6..d035343.diff、r01-audit.json、r01-audit-summary.json。
-
-再開時は元の[引き継ぎ文書](2026-10-03-reminder-server-aws-sdd.md)、台帳とgit logを確認し、完了R01を再実装しない。台帳が失われた場合は本記録とコミット履歴で完了状態を復元する。R01の共有型/キー/設定はコミット済みソースを参照する。
-
-## 検証と残件
-
-Node24.21.0でruntime15/15、typecheck、typed lint成功。controllerによる再確認も同じ結果。git diff --check成功、git diff --exit-code 253e5e2 -- .devcontainerは差分なし。operations/deliveryは未作成で0テスト、npm testのexit0をそれらの検証済みとは扱わない。build/ZIP/Terraform/移行/復旧/全体レビューは未実施。
-
-依存導入後のnpm auditは16件（Low2、Moderate4、High10、Critical0）。未解消であり、R08/D01の不要依存撤去とD07の更新・経路評価・監査が必要。現時点でクリーン監査や本番配布可能とは報告しない。
-
-## FWとツール
-
-追加許可が必要なのはHTTPS TCP443のreleases.hashicorp.com（Terraform1.16.5・AWS Provider6.67.0とchecksum）とregistry.terraform.io（Provider解決・lock/init/validate/mock）。両方に接続失敗。GitHub/npm/uv配布元/context7.comのCLI通信は成功した。今回のAWSアカウントへの接続は不要。
-
-ローカルツールはNode24.21.0を/tmp/aws-sdd-tools/node_modules/.bin、Python3.13.16を/tmp/aws-sdd-tools/bin/python3へ配置。リビルドで/tmpが失われる場合は承認済みの範囲で再準備する（npm install --prefix /tmp/aws-sdd-tools --no-audit --no-fund --save-exact node@24、uv python install 3.13等）。PATHでNode24を優先しNode25をGREEN証拠にしない。Terraformは未導入。sandbox execはbwrap proc mountで失敗するため必要なローカルコマンドはrequire_escalatedで実施していた。
-
-## Rulings I made
-
-- Ruling: R08 Step 3のOPTIONS設定参照「D03」はD05へ訂正する — Gateway定義はD05で設計§7/§9に一致する — 誤りならGatewayタスクの再配置が必要。
-- Task 1: Ruling: src/app.tsだけno-misused-promisesのchecksVoidReturn.arguments=falseを暫定設定する — Node24型と旧Express5 listenerの2箇所を検出、R01は旧app変更対象外でR08に撤去予定。新src/tests/scriptsのPromise検査は維持 — 誤りなら旧サーバーのPromise引数誤用を見逃すため例外撤去・再検証が必要。
-
-## 実行境界
-
-実AWS構築・ZIP登録・GHA起動・デプロイ・実データ移行・Cognito操作・push・PR・main mergeは未実行かつ対象外。秘密/実データを読まず合成データのみ。.devcontainerは変更なし。FW変更・コンテナのリビルドはユーザーが実施する。再開後も元の境界を維持する。
+既知Minor（TF failure diagnostics、dense conditions、synthetic log noise、ESLint warning、
+Terraform target warning）はfinal controller reviewでtriageし、D08でproduction修正へ
+拡張しません。D04 admin-only authとclassic Hosted UIのjoint live受け入れも未検証です。

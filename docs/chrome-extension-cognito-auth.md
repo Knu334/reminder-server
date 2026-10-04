@@ -1,6 +1,6 @@
 # Chrome拡張のCognito認証契約
 
-更新日: 2026-10-03。対象: [AWS設計書](superpowers/specs/2026-10-02-reminder-server-aws-design.md)のChrome拡張向け認証。クライアント実装は別リポジトリにあり、この文書は要求仕様である。
+更新日: 2026-10-05。対象: [AWS設計書](superpowers/specs/2026-10-02-reminder-server-aws-design.md)のChrome拡張向け認証。クライアント実装は別リポジトリにあり、この文書は要求仕様である。
 
 利用者はユーザー本人1人を想定する。CognitoのユーザーはAWSコンソールで管理し、リマインダーの取得・保存・更新は拡張から行う。認証方式は公開クライアントのAuthorization Code + PKCE/S256とし、アクセストークンは5分、IDトークンは5分、リフレッシュトークンは初期値30日とする。通常の操作ではトークンを自動更新し、5分ごとのパスワード入力を要求しない。
 
@@ -101,11 +101,21 @@ Cognitoの無効化・失効後も発行済みアクセストークンは標準J
 
 画像URLは別の`GET /v2/reminders/{id}/thumbnail-url`で発行し、現在の契約は発行から15分である。画像取得時にCognitoのBearerをS3へ送らない。画像URLとAPIトークンは別々に期限切れを処理し、画像の再表示用にバイト列を保存する。Cognitoの失効でS3 URLが即時失効するとは表示しない。
 
+Cognito無効化時点のAPI tokenが残り約5分なら、その間に新たな15分URLを発行して
+無効化後最大約20分画像を取得できる場合がある。即時遮断とは表示しない。S3 credential
+期限等による早期失効もあり、オフライン保存済みbytesはサーバー失効では消去されない。
+
 ## 5. productionでの受け入れ確認
 
 正確な拡張ID/callback、初回ログインと仮パスワード変更、PKCE/state、取消・不正callback、コード交換、read/write scope、5分の期限と自動更新、並行更新、worker停止・Chrome再起動、30日の期限・失効、ログアウト、画像URLの別期限、機密値をログに含めないことを確認する。検証対象の拡張版、サーバーのコミット・ZIPのSHA-256・公開version・production接続先を記録する。認証付きCRUD・画像確認は本人のアカウントと明示した合成テスト項目だけを使い、終了後にテスト項目だけをETag付きで削除する。ユーザー無効化・失効・不正callback・並行更新の失敗ケースはローカル/CIで先に模擬し、本人の利用中データ・認証状態を自動smokeで破壊しない。ログアウトや初回パスワード変更の実確認は本人の操作として扱う。
 
-本設計更新では拡張の製品コードを変更せず、CognitoやChrome上の実ログイン試験も実施しない。サーバー単体の模擬テストと、実クライアントで確認した結果を区別する。
+platformのexplicit_auth_flowsはIAMが必要なALLOW_ADMIN_USER_PASSWORD_AUTHだけとし、
+公開InitiateAuthのSRP/password/user/custom経路を閉じる。runtime/GHA/運用toolに
+AdminInitiateAuth/AdminRespondToAuthChallengeの権限や呼出しを追加していない。classic
+Hosted UI v1・code/scope/PKCE・rotationとの組合せは実AWS未検証であり、本人のloginと
+公開direct-auth拒否を一緒に受け入れ確認する。[受け入れ記録](operations/acceptance.md)。
+
+本実装では拡張の製品コードを変更せず、CognitoやChrome上の実ログイン試験も実施しない。サーバー単体の模擬テストと、実クライアントで確認した結果を区別する。
 
 ## 6. 一次資料
 

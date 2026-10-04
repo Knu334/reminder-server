@@ -1,6 +1,10 @@
+# Supported by Codex 0.160.0 / current official Hooks documentation.
+# Requires hooks feature enabled and explicit trust of non-managed hook sources.
+# Other harnesses may not load project config. This is an auxiliary guard only.
 [[hooks.PreToolUse]]
-matcher = "Bash"
+matcher = "^Bash$"
 
 [[hooks.PreToolUse.hooks]]
 type = "command"
-command = "bash /workspace/.codex/hooks/check-bash-command.sh"
+command = 'bash "$(git rev-parse --show-toplevel)/.codex/hooks/check-bash-command.sh"'
+timeout = 10
