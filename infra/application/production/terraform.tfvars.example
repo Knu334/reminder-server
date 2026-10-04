@@ -1,0 +1,35 @@
+# Replace explicitly; private generated input files must not be committed.
+account_id    = "<AWS_ACCOUNT_ID>"
+region        = "<AWS_REGION>"
+name_prefix   = "<BOOTSTRAP_NAME_PREFIX>"
+chrome_origin = "<EXACT_CHROME_EXTENSION_OR_HTTPS_ORIGIN>"
+# Normal release: nonnull bootstrap output, matching existing application API.
+production_api_id = "<BOOTSTRAP_PRODUCTION_API_ID>"
+operator_api_seed = false
+scheduler_enabled = false
+# Existing bootstrap roles passed through platform (Scheduler from bootstrap).
+api_role_arn       = "<PLATFORM_API_ROLE_ARN>"
+cleanup_role_arn   = "<PLATFORM_CLEANUP_ROLE_ARN>"
+scheduler_role_arn = "<BOOTSTRAP_SCHEDULER_ROLE_ARN>"
+# Allowlisted platform outputs; no terraform_remote_state access.
+reminders_table       = "<PLATFORM_REMINDERS_TABLE>"
+owner_state_table     = "<PLATFORM_OWNER_STATE_TABLE>"
+image_jobs_table      = "<PLATFORM_IMAGE_JOBS_TABLE>"
+images_bucket         = "<PLATFORM_IMAGES_BUCKET>"
+api_log_group         = "<PLATFORM_API_LOG_GROUP>"
+cleanup_log_group     = "<PLATFORM_CLEANUP_LOG_GROUP>"
+gateway_log_group     = "<PLATFORM_GATEWAY_LOG_GROUP>"
+cognito_issuer        = "<PLATFORM_COGNITO_ISSUER>"
+cognito_client_id     = "<PLATFORM_COGNITO_CLIENT_ID>"
+cognito_auth_base_url = "<PLATFORM_COGNITO_AUTH_BASE_URL>"
+# RegisteredArtifact: versionId -> version_id; sha256Base64 -> sha256_base64.
+# Keep the D02 manifest and release evidence private; never choose latest/null.
+artifact = {
+  bucket        = "<REGISTERED_ARTIFACT_BUCKET>"
+  key           = "releases/<SHA256_HEX>/reminder-server.zip"
+  version_id    = "<REGISTERED_ARTIFACT_VERSION_ID>"
+  sha256_base64 = "<REGISTERED_ARTIFACT_SHA256_BASE64>"
+}
+# Optional runtime overrides: omit IPs/limits to preserve loadConfig defaults.
+# allowed_source_ips = ["192.0.2.1", "2001:db8::1"]
+# runtime_limits = { MAX_JSON_BYTES = 2097152 }
