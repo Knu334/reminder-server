@@ -15,7 +15,8 @@
     "package": "python3 scripts/build/package.py",
     "verify:zip": "tsx scripts/build/verify-zip.ts artifacts/reminder-server.zip",
     "test:packaging": "python3 -m unittest discover -s tests/packaging -v",
-    "release:register": "tsx scripts/release/artifact.ts"
+    "release:register": "tsx scripts/release/artifact.ts",
+    "infra:check": "tsx scripts/release/infra-check.ts"
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "3.1146.0",

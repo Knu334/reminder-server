@@ -1,0 +1,11 @@
+# Public placeholders only. Fill a private backend.hcl; never commit state or plans.
+bucket = "REPLACE_WITH_state_bucket_OUTPUT"
+region = "REPLACE_WITH_EXPLICIT_REGION"
+# key/use_lockfile/encrypt are fixed in backend.tf.
+# Bootstrap preparation for a separately authorized operator (NOT run by infra:check):
+# 1. Temporarily move backend.tf outside this root; init and apply with LOCAL state
+#    using authorized operator credentials and explicit private terraform.tfvars.
+# 2. Back up local state privately, restore backend.tf, fill this private backend.hcl.
+# 3. Run init -migrate-state -backend-config=backend.hcl; verify migration before
+#    securely retaining/removing the private local backup. Never force-copy blindly.
+# GHA plan/apply cannot change bootstrap state or these delivery IAM roles.

@@ -1,0 +1,12 @@
+# Synthetic values; replace every value with explicit reviewed deployment inputs.
+account_id = "123456789012"
+region = "us-east-1"
+repository = "synthetic/reminder-server"
+github_environment = "production"
+name_prefix = "synthetic-reminder"
+# Use actual sub values from the job's OIDC configuration, never guess or use '*'.
+oidc_subjects = {
+  artifact = "repo:synthetic/reminder-server:environment:production"
+  plan = "repo:synthetic/reminder-server:environment:production"
+  apply = "repo:synthetic/reminder-server:environment:production"
+}
