@@ -2,12 +2,14 @@
 
 Updated 2026-10-06. This separates completed local synthetic verification from
 future production acceptance. All19 task gates are complete. The whole-branch
-review found five issues; the combined fix wave is underway. Full final local
-verification and one scoped independent re-review remain pending.
+review found five issues; the combined fix wave is committed as
+`63c1512f75d8cdf687083d71412be522b504efe1`. Controller full final local verification
+passed; one scoped independent re-review remains pending.
 
-The table below is **historical pre-fix D08 evidence**. The changed runtime has
-not yet received the controller's final build/test/audit pass, so neither the303
-count nor the old ZIP digest is current evidence. No inferred315 count is used.
+The table below records the controller's actual results on that code commit.
+Its raw container timestamp is `2026-10-05T19:42:04.110074+00:00`; the document
+update date above follows the October6 session date. Historical D08 303-test,
+56-mock and ZIP measurements are superseded, not inferred for the changed code.
 
 ## Local reproducible commands and artifact
 
@@ -24,30 +26,35 @@ No real private data, credential or environment dump was inspected.
 
 | Evidence | Local result |
 | --- | --- |
-| typecheck / lint | Passed, including repeat after source-read guard correction |
-| Node tests | 303/303: runtime157 / operations72 / delivery74 (including8 secret-rule cases), zero failures |
+| controller command record | All17 commands exited0 on code `63c1512f75d8cdf687083d71412be522b504efe1` |
+| typecheck / lint / build / package / verify:zip | Passed |
+| Node tests | 331/331: runtime160 / operations74 / delivery97, zero failures |
 | Python packaging | 3/3 passed |
-| Terraform roots/mocks | All3 passed: bootstrap21 / platform10 / application25 =56 mocks, schema/validate/fmt passed |
-| runtime/full dependency audit | Fresh D08 both0 at every severity |
-| package SHA-256 hex | `b50f7fed609c49b4bcefc86cf6379478dbcd798ddede7c80713c1d533c1ae15a` (fresh D08 local recheck) |
-| package SHA-256 Base64 | `tQ9/7WCcSbS878hs9jeUeNvNeY3e3nyAcTwdUzwa4Vo=` |
-| compressed / unpacked bytes | 1,386,996 / 8,900,297 (fresh D08 local recheck) |
+| Terraform roots/mocks | Controller all3 roots/schema/validate/fmt passed; fix-wave covering evidence: bootstrap31 / platform17 / application30 =78 mocks |
+| runtime/full dependency audit | Both0 at every severity, including info/low/moderate/high/critical |
+| package SHA-256 hex | `e4f5a215942fe8aa4c58f755698564a491cd5a88b13b4810f8c20fdb0d52594c` |
+| package SHA-256 Base64 | `5PWiFZQv6KpMWPdVaYVkpJHNWoixO0gQ+MIP2w1SWUw=` |
+| compressed / unpacked bytes | 1,387,083 / 8,900,746 |
 | S3 key/versionId | Not registered; no actual versionId |
 | Lambda CodeSha256 / versions / aliases | Not deployed/live verified |
 | .devcontainer baseline253e5e2 | git diff --exit-code passed; unchanged |
+| protected-excluded working/staged diff checks | Passed |
 | AGENTS link / auxiliary rules | 8/8 focused D08 synthetic tests, AGENTS→CLAUDE resolves |
 
 ZIP contains only dist/*.js, dist/*.js.map and THIRD_PARTY_NOTICES, loads both
 handlers on Node24 without repository dependencies, and is not an AWS release
 until immutable S3 version/checksum and both Lambda versions/CodeSha are proven.
 The same locally measured digest must not be labeled a registered artifact.
-Historical D08 CycloneDX1.5 SBOM:157 components,209,092 bytes, SHA-256
-`cab45f38cba89ced69c2aee6296cce3ab2d209fde91de509b8f19f9827a0e065`.
+Current CycloneDX1.5 SBOM:157 components,209,092 bytes, SHA-256
+`c9f10560b1928f6161ec2cd6472060d288be03338d4c9185344b3cd95aa1f5eb`.
 Historical D08 npm ci succeeded (157 packages /158 audited), with the existing ESLint9.39
 unsupported/deprecated warning. Safe synthetic runtime log noise and the Terraform
 target warning remain known; output is not claimed warning-free.
-SBOM/audit details and fresh command logs are retained in ignored D08 task report;
-no private plan/state/content is a public artifact.
+SBOM/audit details and fresh command logs are retained in the ignored delivery
+ledger's controller-final-metadata.json, controller-final-verification.json and
+controller-final-00.log through controller-final-16.log. The final-fix report holds
+the 78-mock covering evidence; earlier D08 reports remain historical.
+No private plan/state/content is a public artifact.
 
 ## Production record to complete only after separate authorization
 

@@ -2,8 +2,9 @@
 
 Updated 2026-10-06. The approved 19-task scope is implemented locally on
 feature/aws-sdd-implementation. All19 controller task gates are complete. The
-whole-branch review identified I1/I2/I3 and M1/M2; their combined fix wave is in
-progress, with full final verification and one scoped independent re-review pending.
+whole-branch review identified I1/I2/I3 and M1/M2; their combined fix wave is committed
+as `63c1512f75d8cdf687083d71412be522b504efe1` and full final local verification passed.
+One scoped independent re-review remains pending.
 This document is local evidence, not production acceptance.
 The [historical audit](repository-audit-2026-10-02.md), design and original approval
 handoff have not been rewritten. The [resume handoff](superpowers/handoffs/2026-10-03-reminder-server-aws-sdd-resume.md)
@@ -21,16 +22,20 @@ capture earlier intent or historical defects.
 ## Local verification and evidence limits
 
 The final commands/results and measured ZIP are recorded in [acceptance](operations/acceptance.md).
-Historical pre-fix D08 evidence: focused secret tests8/8 and full303/303 Node tests comprise runtime157,
-operations72 and delivery74 (previously66 plus8 new cases), Python3/3 and56
-Terraform mocks. Typecheck/lint/build/package/verify and .devcontainer baseline
-check passed. Fresh runtime/full audits both report zero at every severity. Package
+Controller evidence records `verifiedAt=2026-10-05T19:42:04.110074+00:00` for code
+`63c1512f75d8cdf687083d71412be522b504efe1`; this raw container timestamp is preserved
+separately from this document's October6 update date. All17 verification commands
+passed:331/331 Node tests (runtime160 / operations74 / delivery97), Python3/3,
+typecheck/lint/build/package/verify and the .devcontainer baseline check.
+All three Terraform roots passed; the fix wave's covering evidence records78 mocks
+(bootstrap31 / platform17 / application30). Fresh runtime/full audits both report
+zero at every severity. Package
 checks consume a newly built ZIP, and three Terraform roots run backend-free
 schema/validate/mock checks. D07 resolved all six development dependency findings;
 current runtime/full audits are reported separately from historical audit16/R08audit7.
 Local audit zero is point-in-time evidence, not certification of perpetual safety.
 
-The historical pre-fix local ZIP digest `b50f7fed609c49b4bcefc86cf6379478dbcd798ddede7c80713c1d533c1ae15a`
+The verified local ZIP digest `e4f5a215942fe8aa4c58f755698564a491cd5a88b13b4810f8c20fdb0d52594c`
 is not registered/deployed: no real S3 versionId, Lambda CodeSha256/version/alias,
 AWS/GHA execution, Chrome login/extension version, migration, Cognito operation,
 PITR, rollback or production smoke was verified. In particular, IAM-only direct-auth
@@ -108,10 +113,10 @@ not that a production deployment was performed. Explicit exclusions remain open.
 
 The three ignored SDD ledgers retain exact task RED/GREEN commands/reports,
 producer/ruling history and independent task reviews. All19 task gates completed
-before the whole-branch review. The five findings are being corrected in one wave;
-controller full verification and the subsequent scoped independent re-review are
-pending. The historical303-test/ZIP evidence above does not describe the changed
-runtime. Current measurements will be recorded only after actual verification.
+before the whole-branch review. The five findings were corrected in one wave;
+controller full verification passed on the committed code. The subsequent scoped
+independent re-review remains pending. Current measurements above supersede the
+historical D08 303-test/56-mock/ZIP evidence retained in earlier reports.
 Deferred maintenance remains dense conditions, synthetic test logs, ESLint9.39
 maintenance and the expected API-only seed target warning. No live acceptance is
 claimed. Follow [acceptance](operations/acceptance.md) for the

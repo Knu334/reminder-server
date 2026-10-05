@@ -7,6 +7,12 @@ S3画像バケットで構成します。常設環境はproductionのみ。旧�
 はまだ実施していません。[実装結果と個別F/B対応](docs/implementation-results.md)、
 [受け入れ記録](docs/operations/acceptance.md)を参照してください。
 
+全19 task gateと単一の最終修正waveを完了し、code `63c1512f`に対するcontrollerの
+最終ローカル検証はNode331/331、Python3/3、3root infra、type/lint/build/package、
+両audit全severity0で成功しました。修正waveのTerraform covering証拠は78mockです。
+記録timestampは`2026-10-05T19:42:04.110074+00:00`（文書更新2026-10-06）。
+scoped独立re-reviewは未完了です。ZIP/SBOMの実測値は上記受け入れ記録にあります。
+
 ## ローカル検証
 
 Node **24.21.0**、npm **11.11.1**、Python **3.13.16**、Terraform **1.16.5**、
