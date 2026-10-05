@@ -32,7 +32,7 @@ npm run test:packaging
 npm run infra:check
 npm run audit:runtime
 npm run audit:all
-npm run sbom > artifacts/sbom.json
+npm sbom --sbom-format cyclonedx > artifacts/sbom.json
 # .devcontainerの承認済み起点からの差分がないこと
 git diff --exit-code 253e5e2 -- .devcontainer
 ```

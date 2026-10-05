@@ -88,3 +88,38 @@ void test("claude_read_rules_cover_private_paths_and_leave_examples_public", () 
     }
   });
 });
+
+// These regressions supply strings only; neither wrapper may execute them.
+for (const provider of ["claude", "codex"]) {
+  void test(`guards_keep_multiline_denials_${provider}`, () => {
+    for (const command of ["cat .env\ntrue", "true\ncat .env", "cat .env.actions\nprintf harmless", "printf harmless\ncat .env.actions"]) {
+      const result = spawnSync("bash", [join(root, `.${provider}/hooks/check-bash-command.sh`)], { input: JSON.stringify({ tool_input: { command } }), encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout || "{}") as { hookSpecificOutput?: { permissionDecision?: string } };
+      assert.equal(output.hookSpecificOutput?.permissionDecision, "deny", command);
+    }
+  });
+  void test(`guards_preserve_sensitive_path_tokens_${provider}`, () => {
+    for (const command of ["cat tests/fixtures/synthetic/../../../.env.actions", "cat 'tests/fixtures/synthetic/../../../.aws/credentials'", "cat tests/fixtures/synthetic/../../../infra/bootstrap/backend.hcl", "cat .env>/tmp/synthetic-output", "cat <.env", "cat .env>/tmp/synthetic-output;true", "cat tests/fixtures/synthetic/owner-map.json;cat .env>/tmp/synthetic-output", "bash -c 'cat .env'", "echo `cat .env`", "cat .env{,example}"]) {
+      const result = spawnSync("bash", [join(root, `.${provider}/hooks/check-bash-command.sh`)], { input: JSON.stringify({ tool_input: { command } }), encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout || "{}") as { hookSpecificOutput?: { permissionDecision?: string } };
+      assert.equal(output.hookSpecificOutput?.permissionDecision, "deny", command);
+    }
+  });
+  void test(`guards_reject_env_assignment_only_displays_${provider}`, () => {
+    for (const command of ["env FOO=synthetic", "env FOO=synthetic BAR=value", "env FOO='synthetic value'", "env FOO=synthetic>/tmp/synthetic-output", "true; env FOO=synthetic", "env FOO=synthetic\ntrue"]) {
+      const result = spawnSync("bash", [join(root, `.${provider}/hooks/check-bash-command.sh`)], { input: JSON.stringify({ tool_input: { command } }), encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout || "{}") as { hookSpecificOutput?: { permissionDecision?: string } };
+      assert.equal(output.hookSpecificOutput?.permissionDecision, "deny", command);
+    }
+  });
+  void test(`guards_allow_complete_public_tokens_and_env_children_${provider}`, () => {
+    for (const command of ["cat './.env.example'", "cat .env.example>/tmp/synthetic-output", "cat tests/fixtures/synthetic/owner-map.json;true", "cat tests/fixtures/synthetic/plans/fixtures.ts", "cat src/images/s3-store.ts>/tmp/synthetic-output", "env FOO=synthetic BAR=value npm test", "env FOO='synthetic value' npm test", "true\nenv FOO=synthetic npm test", "env FOO=synthetic cat .env.example", "bash -c 'cat .env.example'"]) {
+      const result = spawnSync("bash", [join(root, `.${provider}/hooks/check-bash-command.sh`)], { input: JSON.stringify({ tool_input: { command } }), encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stdout, "", command);
+    }
+  });
+}

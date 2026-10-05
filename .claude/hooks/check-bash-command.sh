@@ -7,12 +7,36 @@ deny() {
   exit 0
 }
 command=$(jq -er '.tool_input.command | select(type == "string")') || deny
-# Public template filenames and checked-in synthetic fixture paths are readable.
-# This is a limited string heuristic, not a shell parser, alias/symlink resolver or sandbox.
-if printf '%s' "$command" | jq -Re '
-  gsub("[^\\s\\\"\u0027;|]+\\.example(?=[\\s\\\"\u0027;|]|$)"; "PUBLIC_SAMPLE") |
-  gsub("tests/fixtures/synthetic/[^\\s\\\"\u0027;|]+"; "SYNTHETIC_FIXTURE") |
-  gsub("src/images/[A-Za-z0-9_-]+\\.ts(?=[\\s\\\"\u0027;|]|$)"; "RUNTIME_SOURCE") |
-  test("(^|[/\\s\\\"\u0027])\\.env($|[.\\s\\\"\u0027;|])|reminders[^/\\s\\\"\u0027]*\\.json|(^|[/\\s\\\"\u0027])credentials($|[/\\s\\\"\u0027;|])|\\.aws/|\\.terraform/|\\.tfstate|\\.tfplan|\\.tfvars|backend\\.hcl|(^|[/\\s\\\"\u0027])(private|images|backups)/|/proc/[^\\s]*/environ|printenv|(^|[;&|]\\s*)\\s*(env\\s*($|[|;])|set\\s*($|[|;])|export\\s+-p)|process\\.env|os\\.environ"; "i")
+# Slurp the complete command: a later harmless line cannot cancel an earlier match.
+# Recognize plain/quoted words and ordinary shell separators, but do not evaluate
+# substitutions, resolve aliases/symlinks or claim to implement a shell parser.
+if printf '%s' "$command" | jq -Rse '
+  def words:
+    [scan("(?:[^\\s\\\"\u0027;&|<>()]+|\\\"[^\\\"]*\\\"|\u0027[^\u0027]*\u0027)+") |
+      gsub("[\\\"\u0027]"; "")];
+  def path_words:
+    # Also inspect literal path words inside quoted child-command strings.
+    words[] | splits("[\\s\u0060{}]+") | select(length > 0);
+  def public_path:
+    sub("^\\./"; "") as $path |
+    ($path | test("^[A-Za-z0-9_./-]+$")) and
+    ($path | test("(^|/)\\.\\.?(/|$)") | not) and
+    ($path | test("^(?:\\.env\\.example|infra/(?:bootstrap|platform/production|application/production)/(?:backend\\.hcl|terraform\\.tfvars)\\.example|tests/fixtures/synthetic/[A-Za-z0-9_./-]+|src/images/[A-Za-z0-9_-]+\\.ts)$"));
+  def assignments_removed:
+    if length > 0 and (.[0] | test("^[A-Za-z_][A-Za-z0-9_]*="))
+    then .[1:] | assignments_removed else . end;
+  def environment_display:
+    # Redirection destinations are not child executables. This deliberately
+    # rejects unsupported env options rather than guessing their argument syntax.
+    sub("[<>].*$"; "") | words | assignments_removed |
+    if .[0] == "env" then
+      .[1:] | assignments_removed | length == 0 or (.[0] | startswith("-"))
+    else . == ["set"] or (.[0] == "export" and .[1] == "-p") end;
+  . as $command |
+  any(path_words;
+    (public_path | not) and
+    test("(^|/)\\.env($|\\.)|reminders[^/]*\\.json|(^|/)credentials($|/)|\\.aws/|\\.terraform/|\\.tfstate|\\.tfplan|\\.tfvars|backend\\.hcl|(^|/)(private|images|backups)/"; "i")) or
+  ($command | test("/proc/[^\\s]*/environ|printenv|process\\.env|os\\.environ"; "i")) or
+  any($command | splits("[;&|\\n]"); environment_display)
 ' >/dev/null; then deny; fi
 exit 0
