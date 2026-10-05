@@ -123,3 +123,25 @@ for (const provider of ["claude", "codex"]) {
     }
   });
 }
+
+for (const provider of ["claude", "codex"]) {
+  void test(`guards_deny_quoted_angle_assignment_displays_${provider}`, () => {
+    for (const assignment of ["FOO='synthetic>value'", "FOO='synthetic<value'", 'FOO="synthetic>value"', 'FOO="synthetic<value"']) {
+      for (const command of [`env ${assignment}`, `env ${assignment}>/tmp/synthetic-output`, `env ${assignment} 2>/tmp/synthetic-output`, `env ${assignment}</tmp/synthetic-input`]) {
+        const result = spawnSync("bash", [join(root, `.${provider}/hooks/check-bash-command.sh`)], { input: JSON.stringify({ tool_input: { command } }), encoding: "utf8" });
+        assert.equal(result.status, 0, result.stderr);
+        const output = JSON.parse(result.stdout || "{}") as { hookSpecificOutput?: { permissionDecision?: string } };
+        assert.equal(output.hookSpecificOutput?.permissionDecision, "deny", command);
+      }
+    }
+  });
+  void test(`guards_allow_quoted_angle_assignments_with_real_children_${provider}`, () => {
+    for (const assignment of ["FOO='synthetic>value'", "FOO='synthetic<value'", 'FOO="synthetic>value"', 'FOO="synthetic<value"']) {
+      for (const command of [`env ${assignment} npm test`, `env ${assignment}>/tmp/synthetic-output npm test`, `env ${assignment} 2>/tmp/synthetic-output npm test`, `env ${assignment}</tmp/synthetic-input npm test`, `env ${assignment} npm test>/tmp/synthetic-output`, `env ${assignment} cat .env.example`]) {
+        const result = spawnSync("bash", [join(root, `.${provider}/hooks/check-bash-command.sh`)], { input: JSON.stringify({ tool_input: { command } }), encoding: "utf8" });
+        assert.equal(result.status, 0, result.stderr);
+        assert.equal(result.stdout, "", command);
+      }
+    }
+  });
+}

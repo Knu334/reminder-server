@@ -25,10 +25,19 @@ if printf '%s' "$command" | jq -Rse '
   def assignments_removed:
     if length > 0 and (.[0] | test("^[A-Za-z_][A-Za-z0-9_]*="))
     then .[1:] | assignments_removed else . end;
+  def env_words:
+    # Preserve quotes while identifying actual redirection operators. Literal
+    # angle brackets inside quoted assignments belong to the assignment word.
+    [scan("[0-9]*[<>]+|(?:[^\\s\\\"\u0027;&|<>()]+|\\\"[^\\\"]*\\\"|\u0027[^\u0027]*\u0027)+")];
+  def redirections_removed:
+    if length == 0 then []
+    elif (.[0] | test("^[0-9]*[<>]+$")) then .[2:] | redirections_removed
+    else [.[0]] + (.[1:] | redirections_removed) end;
   def environment_display:
-    # Redirection destinations are not child executables. This deliberately
-    # rejects unsupported env options rather than guessing their argument syntax.
-    sub("[<>].*$"; "") | words | assignments_removed |
+    # Redirection destinations are not child executables. Only remove quotes
+    # after discarding operator/target pairs, then distinguish assignments/child.
+    # Unsupported env options stay rejected instead of guessing their syntax.
+    env_words | redirections_removed | map(gsub("[\\\"\u0027]"; "")) | assignments_removed |
     if .[0] == "env" then
       .[1:] | assignments_removed | length == 0 or (.[0] | startswith("-"))
     else . == ["set"] or (.[0] == "export" and .[1] == "-p") end;
