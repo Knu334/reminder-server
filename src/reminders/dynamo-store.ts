@@ -51,8 +51,8 @@ function storageLimit(): ApiError { return new ApiError(413, "OWNER_STORAGE_LIMI
 function transaction(change: ChangeSet, config: Config): TransactWriteCommand {
   if (change.next.ownerId !== change.ownerId || (change.previous !== null && (change.previous.ownerId !== change.ownerId || change.previous.id !== change.next.id))
     || !Number.isSafeInteger(change.itemDelta) || !Number.isSafeInteger(change.byteDelta) || new Set(change.jobs.map(job => job.jobId)).size !== change.jobs.length) throw unavailable();
-  const maxItems = config.limits.itemCount - change.itemDelta; const minItems = Math.max(0, -change.itemDelta);
-  const maxBytes = config.limits.imageBytes - change.byteDelta; const minBytes = Math.max(0, -change.byteDelta);
+  const maxItems = change.itemDelta > 0 ? config.limits.itemCount - change.itemDelta : Number.MAX_SAFE_INTEGER; const minItems = Math.max(0, -change.itemDelta);
+  const maxBytes = change.byteDelta > 0 ? config.limits.imageBytes - change.byteDelta : Number.MAX_SAFE_INTEGER; const minBytes = Math.max(0, -change.byteDelta);
   if (maxItems < minItems || maxBytes < minBytes) throw storageLimit();
   const bounded = (alias: string, min: string, max: string, minimum: number): string => minimum === 0
     ? `(attribute_not_exists(${alias}) OR ${alias} BETWEEN ${min} AND ${max})` : `${alias} BETWEEN ${min} AND ${max}`;

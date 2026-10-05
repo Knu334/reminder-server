@@ -8,3 +8,8 @@ logout_url = "<FULL_HTTPS_LOGOUT_URL>"
 cognito_domain_prefix = "<UNIQUE_COGNITO_HOSTED_DOMAIN_PREFIX>"
 api_role_arn = "<BOOTSTRAP_API_ROLE_ARN_OUTPUT>"
 cleanup_role_arn = "<BOOTSTRAP_CLEANUP_ROLE_ARN_OUTPUT>"
+
+# Normal selection is original tables. Exceptional reviewed PITR selection must
+# match across bootstrap/platform/application; see docs/operations/recovery.md.
+restored_tables = {}
+# restored_tables = { reminders = "reviewed-restored-reminders", owner_state = "reviewed-restored-owners", image_jobs = "reviewed-restored-jobs" }

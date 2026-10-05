@@ -21,7 +21,8 @@ const routes: Record<string, Partial<Record<string, ApiRoute>>> = {
 
 /** rawPath classifies only default routes; Gateway pathParameters retain ID identity. */
 export function resolveRoute(request: GatewayRequest): { route: ApiRoute } | { status: 404 | 405; allow?: string } {
-  let path = request.routeKey === "$default" ? request.rawPath : request.routeKey.slice(request.method.length + 1);
+  const fallback = request.routeKey === "$default" || request.routeKey.startsWith("ANY ");
+  let path = request.routeKey === "$default" ? request.rawPath : request.routeKey.slice(request.routeKey.indexOf(" ") + 1);
   if (request.routeKey === "$default") {
     if (/^\/v2\/reminders\/[^/]+\/thumbnail-url$/.test(path)) path = "/v2/reminders/{id}/thumbnail-url";
     else if (/^\/v2\/reminders\/[^/]+$/.test(path)) path = "/v2/reminders/{id}";
@@ -29,7 +30,7 @@ export function resolveRoute(request: GatewayRequest): { route: ApiRoute } | { s
   const methods = Object.hasOwn(routes, path) ? routes[path] : undefined;
   if (methods === undefined) return { status: 404 };
   const route = Object.hasOwn(methods, request.method) ? methods[request.method] : undefined;
-  return route === undefined ? { status: 405, allow: Object.keys(methods).join(", ") } : { route };
+  return route === undefined ? { status: 405, allow: Object.keys(methods).join(", ") } : fallback ? { status: 404 } : { route };
 }
 
 export async function dispatchReminderRoute(route: ApiRoute, request: GatewayRequest, ownerId: OwnerId, service: RemindersService, config: Config, budget: Budget): Promise<APIGatewayProxyStructuredResultV2> {

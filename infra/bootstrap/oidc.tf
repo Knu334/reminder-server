@@ -42,11 +42,11 @@ locals {
         "dynamodb:DescribeTimeToLive",
         "dynamodb:ListTagsOfResource"
       ],
-      "Resource" : [
+      "Resource" : distinct(concat(values(local.runtime_table_arns), [
         "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${local.production}-reminders",
         "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${local.production}-owner-state",
         "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${local.production}-image-jobs"
-      ]
+      ]))
     },
     {
       "Sid" : "ImageBucketConfiguration",

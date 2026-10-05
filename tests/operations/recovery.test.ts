@@ -26,6 +26,7 @@ function fixture(image = true) {
     async hasIncompleteRemap() { return false; },
     async *listJobs() { yield* structuredClone([...jobs.values()]); },
     async stageImageReplacement(previous, target) { const token = previous.thumbnail!.imageId + target; let job = intents.get(token); if (!job) { const jobId = `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}`; job = { jobId, ownerId: target, key: keys.image(target, jobId), state: "pending", createdAtMs: 1000, updatedAtMs: 1000 }; intents.set(token, job); jobs.set(jobId, job); } return job; },
+    async publishVerified(id) { if (gate.published || gate.runId !== id) throw Error("wrong gate"); gate.published=true; },
     async gate() { return { ...gate }; }, async prepareUnpublished(id) { gate = { published: false, runId: id }; },
     async *listItems() { yield* structuredClone(items); }, async *listOwners() { yield* structuredClone([...owners.values()]); }, async getJob(id) { return structuredClone(jobs.get(id) ?? null); },
     async replaceImage(previous, next, job) { if (failReplace) { failReplace = false; throw new Error("synthetic interrupted"); } const index = items.findIndex(value => value.ownerId === previous.ownerId && value.id === previous.id); assert.deepEqual(items[index], previous); items[index] = next; jobs.set(job.jobId, job); jobs.get(previous.thumbnail!.imageId)!.state = "done"; },
@@ -218,6 +219,11 @@ void test("recovery_cli_requires_private_identity_inputs_and_only_explicit_flags
     fake.setGate(true); assert.equal(await recoveryMain(argv, io, runtime), 2); assert.equal((await fake.store.gate(testBudget())).published, true);
     fake.store.bindRun = async () => {}; fake.store.saveReport = async () => {};
     assert.equal(await recoveryMain([...argv, "--prepare-restored"], io, runtime), 0); assert.equal((await fake.store.gate(testBudget())).published, false);
+    const beforePublication=creates;
+    for(const extra of [["--prepare-restored"],["--preserve-images"],["--owner-map","unused-private-path"]])assert.equal(await recoveryMain([...argv,"--publish-restored",...extra],io,runtime),2);
+    assert.equal(creates,beforePublication);
+    assert.equal(await recoveryMain([...argv,"--publish-restored"],io,runtime),0);
+    assert.deepEqual(await fake.store.gate(testBudget()),{published:true,runId});
     await writeFile(join(dir, "target"), JSON.stringify({ ...harnessConfig, ...source })); const count = creates;
     assert.equal(await recoveryMain([...argv, "--prepare-restored"], io, runtime), 2); assert.equal(creates, count);
     assert.doesNotMatch(output.join("") + error.join(""), /old-sub|Test reminder|synthetic.invalid|original-version/);
@@ -286,4 +292,36 @@ void test("explicit_prepare_can_create_missing_restored_gate_and_never_touches_l
   await f.deps.restored.prepareUnpublished(runId, f.deps.budget);
   assert.deepEqual(await f.deps.restored.gate(f.deps.budget), { published: false, runId });
   assert.equal([...f.db.table(source.ownerStateTable).values()][0]!.published, true);
+});
+
+void test("explicit recovered publication freshly verifies and binds the restored run", async () => {
+  const recovery = await import("../../scripts/operations/recovery");
+  assert.ok("publishRecovery" in recovery, "explicit verified publication operation required");
+  const publish = recovery.publishRecovery as (input:RecoveryInput,deps:RecoveryDeps)=>Promise<unknown>;
+  const f=await adapterFixture();
+  await f.deps.restored.prepareUnpublished(runId,f.deps.budget);
+  await preserveRecoveryImages(base,f.deps);
+  const original=[...f.db.table(base.restored.remindersTable).values()][0]!;
+  f.db.table(base.restored.remindersTable).set(JSON.stringify([old, original.id]),{...original,title:"changed"});
+  // Counter corruption after successful preservation must prevent publication.
+  const counter=f.db.table(base.restored.ownerStateTable).get(JSON.stringify([`OWNER#${old}`,"STORAGE"]))!;
+  counter.itemCount=99;
+  await assert.rejects(publish(base,f.deps));
+  assert.equal((await f.deps.restored.gate(f.deps.budget)).published,false);
+  counter.itemCount=1;
+  await publish(base,f.deps);
+  assert.deepEqual(await f.deps.restored.gate(f.deps.budget),{published:true,runId});
+  await assert.rejects(publish(base,f.deps));
+});
+
+void test("publication gate race and foreign image bucket remain fail closed",async()=>{
+ const {publishRecovery}=await import("../../scripts/operations/recovery");
+ const f=await adapterFixture(false);
+ await f.deps.restored.prepareUnpublished(runId,f.deps.budget);
+ await f.deps.restored.bindRun(base,[],f.deps.budget);
+ const save=f.deps.restored.saveReport;
+ f.deps.restored.saveReport=async(...args)=>{await save(...args);f.db.table(base.restored.ownerStateTable).get(JSON.stringify(["GLOBAL","PUBLICATION"]))!.runId="changed-run";};
+ await assert.rejects(publishRecovery(base,f.deps));
+ assert.equal((await f.deps.restored.gate(f.deps.budget)).published,false);
+ await assert.rejects(verifyRecovery({...base,restored:{...base.restored,imagesBucket:"other-bucket"}},f.deps));
 });

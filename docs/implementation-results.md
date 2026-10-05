@@ -1,9 +1,10 @@
 # AWS implementation results
 
-Updated 2026-10-05. The approved 19-task scope is implemented locally on
-feature/aws-sdd-implementation. Eighteen controller task gates are complete;
-D08's docs/security-rule task gate and the subsequent wholebranch independent
-review remain pending. This document is local evidence, not production acceptance.
+Updated 2026-10-06. The approved 19-task scope is implemented locally on
+feature/aws-sdd-implementation. All19 controller task gates are complete. The
+whole-branch review identified I1/I2/I3 and M1/M2; their combined fix wave is in
+progress, with full final verification and one scoped independent re-review pending.
+This document is local evidence, not production acceptance.
 The [historical audit](repository-audit-2026-10-02.md), design and original approval
 handoff have not been rewritten. The [resume handoff](superpowers/handoffs/2026-10-03-reminder-server-aws-sdd-resume.md)
 now points here instead of directing a future session to restart R02.
@@ -20,7 +21,7 @@ capture earlier intent or historical defects.
 ## Local verification and evidence limits
 
 The final commands/results and measured ZIP are recorded in [acceptance](operations/acceptance.md).
-D08 focused secret tests:8/8; fresh full303/303 Node tests comprise runtime157,
+Historical pre-fix D08 evidence: focused secret tests8/8 and full303/303 Node tests comprise runtime157,
 operations72 and delivery74 (previously66 plus8 new cases), Python3/3 and56
 Terraform mocks. Typecheck/lint/build/package/verify and .devcontainer baseline
 check passed. Fresh runtime/full audits both report zero at every severity. Package
@@ -29,7 +30,7 @@ schema/validate/mock checks. D07 resolved all six development dependency finding
 current runtime/full audits are reported separately from historical audit16/R08audit7.
 Local audit zero is point-in-time evidence, not certification of perpetual safety.
 
-The local ZIP digest `b50f7fed609c49b4bcefc86cf6379478dbcd798ddede7c80713c1d533c1ae15a`
+The historical pre-fix local ZIP digest `b50f7fed609c49b4bcefc86cf6379478dbcd798ddede7c80713c1d533c1ae15a`
 is not registered/deployed: no real S3 versionId, Lambda CodeSha256/version/alias,
 AWS/GHA execution, Chrome login/extension version, migration, Cognito operation,
 PITR, rollback or production smoke was verified. In particular, IAM-only direct-auth
@@ -68,7 +69,7 @@ not that a production deployment was performed. Explicit exclusions remain open.
 | F07 | Local implemented: no per-request DNS lookup, literal IP allowlist | [boundaries](../tests/runtime/boundaries.test.ts), [config](../src/config.ts) |
 | F08 | Local implemented: explicit Chrome origin/Gateway CORS | application gateway.tf/mock, [API](../tests/runtime/api.test.ts); live extension CORS untested |
 | F09 | Local implemented: v2 media/DTO/header contract | [API spec](api-v2.md), [contracts](../tests/runtime/contracts.test.ts), [API](../tests/runtime/api.test.ts) |
-| F10 | Local implemented: safe structured errors/logs/request IDs | [boundaries](../tests/runtime/boundaries.test.ts), [API](../tests/runtime/api.test.ts), monitoring.tf; private TF failure detail remains Minor |
+| F10 | Local implemented: safe structured errors/logs/request IDs | [boundaries](../tests/runtime/boundaries.test.ts), [API](../tests/runtime/api.test.ts), monitoring.tf; bounded private failure diagnostics; live reader restrictions unverified |
 | F11 | Architecture replaced: DynamoDB conditional transactions | [writes](../tests/runtime/writes.test.ts), [images](../tests/runtime/images.test.ts); real failure/load acceptance unperformed |
 | F12 | Architecture replaced: partitioned item query, bounded pagination | [reads/rate](../tests/runtime/reads-rate.test.ts); no synchronous whole-user file IO or invented performance measurement |
 | F13 | Architecture replaced: AWS managed HTTPS endpoint | application gateway.tf; certificate watcher removed; actual TLS endpoint uncreated |
@@ -106,13 +107,14 @@ not that a production deployment was performed. Explicit exclusions remain open.
 ## Pending controller review and production acceptance
 
 The three ignored SDD ledgers retain exact task RED/GREEN commands/reports,
-producer/ruling history and independent task reviews. Controller final review
-will collect all Rulings and triage known Minors (private Terraform diagnostics,
-dense conditions, synthetic test logs, ESLint warning, Terraform target warning).
-D08 does not silently expand into production fixes or claim those issues resolved.
-All19 task gates are complete only after the D08 controller gate. Wholebranch
-review and final acceptance require their own evidence after that; this current
-record does not preempt them. Follow [acceptance](operations/acceptance.md) for the
+producer/ruling history and independent task reviews. All19 task gates completed
+before the whole-branch review. The five findings are being corrected in one wave;
+controller full verification and the subsequent scoped independent re-review are
+pending. The historical303-test/ZIP evidence above does not describe the changed
+runtime. Current measurements will be recorded only after actual verification.
+Deferred maintenance remains dense conditions, synthetic test logs, ESLint9.39
+maintenance and the expected API-only seed target warning. No live acceptance is
+claimed. Follow [acceptance](operations/acceptance.md) for the
 separately authorized live steps and record actual results/version IDs without
 private data. Cost coefficients remain the existing budget inputs, with no
 invented durations, billing or platform measurements.

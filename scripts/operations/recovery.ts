@@ -25,6 +25,7 @@ export interface RecoveryStore {
   listJobs(): AsyncIterable<ImageJob>;
   stageImageReplacement(previous: ActiveReminder, targetOwnerId: OwnerId, runId: string, budget: Budget): Promise<ImageJob>;
   gate(budget: Budget): Promise<PublicationGate>;
+  publishVerified(runId: string, report: RecoveryReport, budget: Budget): Promise<void>;
   prepareUnpublished(runId: string, budget: Budget): Promise<void>;
   listItems(): AsyncIterable<StoredReminder>;
   listOwners(): AsyncIterable<{ ownerId: OwnerId; itemCount: number; imageBytes: number }>;
@@ -46,7 +47,7 @@ export function assertRecoveryInput(input: RecoveryInput): void {
   }
   // Table names across roles must also be disjoint: swapped live table names are unsafe.
   const live = new Set([input.source.remindersTable, input.source.ownerStateTable, input.source.imageJobsTable]);
-  if ([input.restored.remindersTable, input.restored.ownerStateTable, input.restored.imageJobsTable].some(table => live.has(table)) || input.source.accountId !== input.restored.accountId || input.source.region !== input.restored.region) throw failure();
+  if ([input.restored.remindersTable, input.restored.ownerStateTable, input.restored.imageJobsTable].some(table => live.has(table)) || input.source.accountId !== input.restored.accountId || input.source.region !== input.restored.region || input.source.imagesBucket !== input.restored.imagesBucket) throw failure();
   for (const value of input.ownerIdentities) if (!value || !/^[0-9a-f]{64}$/.test(value.ownerId) || typeof value.issuer !== "string" || !value.issuer || typeof value.sub !== "string" || !value.sub) throw failure();
 }
 async function unpublished(input: RecoveryInput, deps: RecoveryDeps): Promise<void> {
@@ -130,6 +131,16 @@ export async function verifyRecovery(input: RecoveryInput, deps: RecoveryDeps): 
   }
   report.readyToSwitch = report.missingImages.length + report.mismatchedOwners.length + report.countDiscrepancies.length + report.unresolvedJobs.length === 0;
   await unpublished(input, deps); return report;
+}
+/** Explicit operator cutover only, after traffic/writers are quiesced and deployment verified. */
+export async function publishRecovery(input: RecoveryInput, deps: RecoveryDeps): Promise<RecoveryReport> {
+  const report = await verifyRecovery(input, deps); // Never trust an earlier saved ready receipt.
+  if (!report.readyToSwitch || (await deps.restored.gate(deps.budget)).runId !== input.runId) throw failure();
+  await deps.restored.saveReport(input.runId, report, deps.budget);
+  await deps.restored.publishVerified(input.runId, report, deps.budget);
+  const gate = await deps.restored.gate(deps.budget);
+  if (!gate.published || gate.runId !== input.runId) throw failure();
+  return report;
 }
 export async function preserveRecoveryImages(input: RecoveryInput, deps: RecoveryDeps): Promise<RecoveryReport> {
   await unpublished(input, deps); await deps.restored.bindRun(input, [], deps.budget);
@@ -299,6 +310,17 @@ export function createRecoveryStore(client: DynamoDBDocumentClient, config: Conf
   const finishOldJob = (ref: ImageRef, ownerId: string): Actions[number] => ({ Update: { TableName: config.imageJobsTable, Key: { jobId: ref.imageId }, UpdateExpression: "SET #state = :done, #updated = :at", ConditionExpression: "#state = :committed AND #owner = :owner AND #key = :key AND #version = :version", ExpressionAttributeNames: { "#state": "state", "#updated": "updatedAtMs", "#owner": "ownerId", "#key": "key", "#version": "versionId" }, ExpressionAttributeValues: { ":done": "done", ":at": images.clock(), ":committed": "committed", ":owner": ownerId, ":key": ref.key, ":version": ref.versionId } } });
   const store: RecoveryStore = {
     gate: ownerStore.gate,
+    async publishVerified(runId, report, suppliedBudget) {
+      bound(runId, suppliedBudget);
+      if (!report.readyToSwitch) throw failure();
+      const row = rootSchema.parse(await get(config.ownerStateTable, rootKey));
+      if (row.inputSha256 !== inputSha256 || typeof row.report !== "object" || row.report === null || Reflect.get(row.report, "sha256") !== digest(report) || Reflect.get(row.report, "readyToSwitch") !== true) throw failure();
+      requireBudget(budget);
+      await client.send(new TransactWriteCommand({ TransactItems: [
+        { ConditionCheck: { TableName: config.ownerStateTable, Key: rootKey, ...exact(row) } },
+        { Update: { TableName: config.ownerStateTable, Key: keys.publication, UpdateExpression: "SET #published = :true", ConditionExpression: "#published = :false AND #run = :run", ExpressionAttributeNames: { "#published": "published", "#run": "runId" }, ExpressionAttributeValues: { ":true": true, ":false": false, ":run": runId } } }
+      ] }), { abortSignal: budget.signal });
+    },
     async prepareUnpublished(runId, suppliedBudget) {
       bound(runId, suppliedBudget); const existing = await get(config.ownerStateTable, keys.publication);
       if (!existing) {

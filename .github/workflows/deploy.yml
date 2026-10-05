@@ -80,6 +80,17 @@ jobs:
         run: npm run release:workflow -- authorize
         env:
           DRIVER_GITHUB_TOKEN: ${{ github.token }}
+      - name: Retain private failure diagnostics
+        if: ${{ failure() && github.event.repository.private == true }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: failure-diagnostics-authorize-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/release-diagnostics/*.json
+            ${{ runner.temp }}/infra-diagnostics/*.json
+          retention-days: 1
+          if-no-files-found: ignore
+          include-hidden-files: false
   register:
     needs: [authorize]
     if: needs.authorize.result == 'success' && inputs.target == 'application' && !inputs.apply && inputs.reviewed_run == ''
@@ -160,6 +171,17 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           include-hidden-files: false
+      - name: Retain private failure diagnostics
+        if: ${{ failure() && github.event.repository.private == true }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: failure-diagnostics-register-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/release-diagnostics/*.json
+            ${{ runner.temp }}/infra-diagnostics/*.json
+          retention-days: 1
+          if-no-files-found: ignore
+          include-hidden-files: false
   plan:
     needs: [authorize, register]
     if: always() && needs.authorize.result == 'success' && (needs.register.result == 'success' || needs.register.result == 'skipped')
@@ -231,6 +253,17 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           include-hidden-files: false
+      - name: Retain private failure diagnostics
+        if: ${{ failure() && github.event.repository.private == true }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: failure-diagnostics-plan-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/release-diagnostics/*.json
+            ${{ runner.temp }}/infra-diagnostics/*.json
+          retention-days: 1
+          if-no-files-found: ignore
+          include-hidden-files: false
   apply:
     needs: [authorize, plan]
     if: ${{ !cancelled() && needs.authorize.result == 'success' && needs.plan.result == 'success' && inputs.apply }}
@@ -286,4 +319,13 @@ jobs:
           path: ${{ runner.temp }}/release/
           if-no-files-found: error
           retention-days: 1
+          include-hidden-files: false
+      - name: Retain private failure diagnostics
+        if: ${{ failure() && github.event.repository.private == true }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: failure-diagnostics-apply-${{ github.run_id }}
+          path: ${{ runner.temp }}/release-diagnostics/*.json
+          retention-days: 1
+          if-no-files-found: ignore
           include-hidden-files: false

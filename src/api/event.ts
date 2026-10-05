@@ -40,7 +40,7 @@ export function parseGatewayEvent(value: unknown, config: Pick<Config, "expected
       typeof event.routeKey !== "string" || context.routeKey !== event.routeKey ||
       typeof event.rawPath !== "string" || !event.rawPath.startsWith("/") || /[\r\n]/.test(event.rawPath) ||
       typeof http.method !== "string" || !/^[A-Z]+$/.test(http.method) ||
-      (event.routeKey !== "$default" && !event.routeKey.startsWith(`${http.method} /`)) ||
+      (event.routeKey !== "$default" && !event.routeKey.startsWith(`${http.method} /`) && !event.routeKey.startsWith("ANY /")) ||
       typeof context.requestId !== "string" || !context.requestId || typeof http.sourceIp !== "string" ||
       typeof event.isBase64Encoded !== "boolean" || (event.body !== undefined && typeof event.body !== "string")) return invalidGateway();
   const headers: Record<string, string> = Object.create(null) as Record<string, string>;

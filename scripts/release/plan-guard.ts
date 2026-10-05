@@ -1,3 +1,4 @@
+import {requireRuntimeData,runtimeDataEnvironment,selectedRuntimeData} from "./runtime-data";
 import {createHash} from "node:crypto";
 import {readFile,writeFile} from "node:fs/promises";
 import {resolve} from "node:path";
@@ -58,6 +59,8 @@ const platformTypes=["aws_cognito_user_pool","aws_cognito_user_pool_client","aws
 const protectedTypes=[...appTypes,...platformTypes,"aws_apigatewayv2_route"];
 const addresses:Record<string,string>={aws_apigatewayv2_api:"aws_apigatewayv2_api.production",aws_apigatewayv2_stage:"aws_apigatewayv2_stage.production",aws_apigatewayv2_authorizer:"aws_apigatewayv2_authorizer.cognito",aws_cognito_user_pool:"aws_cognito_user_pool.production",aws_cognito_user_pool_client:"aws_cognito_user_pool_client.chrome",aws_cognito_user_pool_domain:"aws_cognito_user_pool_domain.production"};
 const v2Routes=["GET /v2/reminders","POST /v2/reminders","GET /v2/reminders/{id}","PATCH /v2/reminders/{id}","DELETE /v2/reminders/{id}","GET /v2/reminders/{id}/thumbnail-url"];
+const fallbackRoutes=["ANY /healthz","ANY /readyz","ANY /reminders","ANY /v2/reminders","ANY /v2/reminders/{id}","ANY /v2/reminders/{id}/thumbnail-url"];
+const isFallback=(key:unknown)=>typeof key==="string"&&(key.startsWith("ANY ")||key==="$default");
 const isV2=(key:unknown)=>typeof key==="string"&&/^[A-Z]+ \/v2(?:\/|$)/.test(key);
 function anyUnknown(value:unknown):boolean {return value===true||(Array.isArray(value)?value.some(anyUnknown):value!==null&&typeof value==="object"&&Object.values(value).some(anyUnknown));}
 function same(a:unknown,b:unknown):boolean {return canonical(a)===canonical(b);}
@@ -75,11 +78,11 @@ export function inspectPlan(input:unknown,baseline:ReleaseBaseline|null):PlanRev
       if(expectedType&&r.type!==expectedType)reject(r.address,"PROTECTED_TYPE_CHANGED");
       if(r.mode!=="managed"||!protectedTypes.includes(r.type))continue;
       const c=r.change,a=c.after,u=c.after_unknown,creating=c.actions.length===1&&c.actions[0]==="create"&&c.before===null;
-      if(r.type==="aws_apigatewayv2_route"&&!isV2(a?.route_key)&&!isV2(c.before?.route_key)&&!anyUnknown(u.route_key))continue;
+      if(r.type==="aws_apigatewayv2_route"&&!isV2(a?.route_key)&&!isV2(c.before?.route_key)&&!isFallback(a?.route_key)&&!isFallback(c.before?.route_key)&&!anyUnknown(u.route_key))continue;
       if(c.actions.some(v=>v==="delete"||v==="forget")||!a) {reject(r.address,"PROTECTED_RESOURCE_REMOVED");continue;}
       if(!creating&&!c.actions.every(v=>v==="no-op"||v==="update"))reject(r.address,"PROTECTED_ACTION");
       if(b&&creating&&["aws_apigatewayv2_api",...platformTypes].includes(r.type))reject(r.address,"EXISTING_IDENTITY_REQUIRED");
-      if(c.before&&!creating)for(const field of ["id",...(r.type==="aws_apigatewayv2_api"?["api_endpoint"]:r.type==="aws_cognito_user_pool_domain"?["domain","user_pool_id"]:r.type==="aws_cognito_user_pool_client"?["user_pool_id"]:r.type==="aws_apigatewayv2_stage"?["api_id","name"]:r.type==="aws_apigatewayv2_authorizer"?["api_id"]:r.type==="aws_apigatewayv2_route"?["api_id","route_key","authorizer_id"]:[])]){
+      if(c.before&&!creating)for(const field of ["id",...(r.type==="aws_apigatewayv2_api"?["api_endpoint"]:r.type==="aws_cognito_user_pool_domain"?["domain","user_pool_id"]:r.type==="aws_cognito_user_pool_client"?["user_pool_id"]:r.type==="aws_apigatewayv2_stage"?["api_id","name"]:r.type==="aws_apigatewayv2_authorizer"?["api_id"]:r.type==="aws_apigatewayv2_route"?["api_id","route_key",...(isFallback(a.route_key)?[]:["authorizer_id"])]:[])]){
         if(c.before[field]===undefined||c.before[field]===null||a[field]===undefined||anyUnknown(u[field])||!same(c.before[field],a[field]))reject(r.address,"CHANGED_OR_UNKNOWN_IDENTITY");
       }
       if(b){const poolId=b.cognitoIssuer.split("/").at(-1),domain=new URL(b.cognitoAuthBaseUrl).hostname.split(".")[0];const expected:Record<string,unknown>=r.type==="aws_apigatewayv2_api"?{id:b.apiId,api_endpoint:b.apiBaseUrl}:r.type==="aws_apigatewayv2_stage"?{api_id:b.apiId,name:"$default"}:r.type==="aws_cognito_user_pool"?{id:poolId}:r.type==="aws_cognito_user_pool_client"?{id:b.cognitoClientId,user_pool_id:poolId}:r.type==="aws_cognito_user_pool_domain"?{domain,user_pool_id:poolId}:{api_id:b.apiId};
@@ -89,7 +92,9 @@ export function inspectPlan(input:unknown,baseline:ReleaseBaseline|null):PlanRev
         const jwt=block(a.jwt_configuration),issuer=b?.cognitoIssuer??p.variables?.cognito_issuer?.value,client=b?.cognitoClientId??p.variables?.cognito_client_id?.value;
         if(anyUnknown(u.jwt_configuration)||anyUnknown(u.authorizer_type)||anyUnknown(u.identity_sources)||a.authorizer_type!=="JWT"||!exactSet(a.identity_sources,["$request.header.Authorization"])||typeof issuer!=="string"||typeof client!=="string"||jwt?.issuer!==issuer||!exactSet(jwt?.audience,[client]))reject(r.address,"JWT_IDENTITY_REOPENED");
       }
-      if(r.type==="aws_apigatewayv2_route") {
+      if(r.type==="aws_apigatewayv2_route"&&isFallback(a.route_key)) {
+        if(!fallbackRoutes.includes(String(a.route_key))||anyUnknown(u.route_key)||anyUnknown(u.authorization_type)||anyUnknown(u.authorization_scopes)||anyUnknown(u.authorizer_id)||a.authorization_type!=="NONE"||!exactSet(a.authorization_scopes,[])||(a.authorizer_id!==null&&a.authorizer_id!==undefined))reject(r.address,"UNBOUNDED_FALLBACK_ROUTE");
+      } else if(r.type==="aws_apigatewayv2_route") {
         const scope=typeof a.route_key==="string"&&a.route_key.startsWith("GET ")?"reminder-api/read":"reminder-api/write";
         const authorizer=p.resource_changes.find(resource=>resource.type==="aws_apigatewayv2_authorizer")?.change;
         if(anyUnknown(u.route_key)||anyUnknown(u.authorization_type)||anyUnknown(u.authorization_scopes)||a.authorization_type!=="JWT"||!exactSet(a.authorization_scopes,[scope])||(!creating&&(anyUnknown(u.authorizer_id)||a.authorizer_id!==authorizer?.after?.id))||(!anyUnknown(u.authorizer_id)&&a.authorizer_id!==authorizer?.after?.id))reject(r.address,"ROUTE_AUTH_REOPENED");
@@ -106,7 +111,7 @@ export function inspectPlan(input:unknown,baseline:ReleaseBaseline|null):PlanRev
       for(const [field,value] of Object.entries(outputFields(b))){const out=p.output_changes[field];if(!out||anyUnknown(out.after_unknown)||out.after===undefined||!same(out.after,value))reject(`output.${field}`,"CHANGED_OR_UNKNOWN_OUTPUT");}
       if(b.root==="application")for(const [field,value] of Object.entries({operator_api_seed:false,production_api_id:b.apiId,cognito_issuer:b.cognitoIssuer,cognito_client_id:b.cognitoClientId,cognito_auth_base_url:b.cognitoAuthBaseUrl})){const actual=p.variables?.[field]?.value;if(actual===undefined||!same(actual,value))reject(`var.${field}`,"BASELINE_INPUT_MISMATCH");}
       if(b.root==="application") {
-        for(const route of v2Routes)if(p.resource_changes.filter(r=>r.type==="aws_apigatewayv2_route"&&r.change.after?.route_key===route).length!==1)reject("aws_apigatewayv2_route.api","MISSING_OR_DUPLICATE_V2_ROUTE");
+        for(const route of [...v2Routes,...fallbackRoutes])if(p.resource_changes.filter(r=>r.type==="aws_apigatewayv2_route"&&r.change.after?.route_key===route).length!==1)reject("aws_apigatewayv2_route.api","MISSING_OR_DUPLICATE_V2_ROUTE");
         const apiFunctions=p.resource_changes.filter(r=>r.type==="aws_lambda_function"&&(r.name==="api"||r.change.before?.handler==="dist/api.handler"||r.change.after?.handler==="dist/api.handler"));
         if(apiFunctions.length!==1)reject("aws_lambda_function.api","MISSING_OR_DUPLICATE_API_FUNCTION");
         for(const api of apiFunctions){
@@ -136,9 +141,26 @@ export function createPlanManifest(plan:unknown,binary:Uint8Array,inputs:Uint8Ar
   if(b===null&&p.resource_changes.some(r=>r.mode==="managed"&&own.includes(r.type)&&(r.change.before!==null||!same(r.change.actions,["create"]))))throw new Error("Existing platform requires a baseline");
   const variables=object.parse(JSON.parse(Buffer.from(inputs).toString("utf8")));
   for(const [key,value] of Object.entries(variables)){const planned=p.variables?.[key]?.value;if(planned===undefined||!same(planned,value))throw new Error("Plan input mismatch");}
+  if(root==="platform"&&variables.restored_tables&&Object.keys(object.parse(variables.restored_tables)).length){
+    const data=selectedRuntimeData(variables);
+    for(const key of ["reminders","owner_state","image_jobs"] as const){
+      const original=p.resource_changes.find(r=>r.address===`aws_dynamodb_table.runtime["${key}"]`);
+      if(!original||original.type!=="aws_dynamodb_table"||!original.change.actions.every(a=>a==="no-op"||a==="update")||original.change.after?.name!==`${variables.name_prefix}-production-${key.replaceAll("_","-")}`||original.change.after.deletion_protection_enabled!==true||anyUnknown(original.change.after_unknown.name))throw Error("Recovery must retain original managed tables");
+      const output=p.output_changes[`${key}_table`],arn=p.output_changes[`${key}_table_arn`];
+      if(!output||anyUnknown(output.after_unknown)||output.after!==data[`${key}_table`]||!arn||anyUnknown(arn.after_unknown)||arn.after!==`arn:aws:dynamodb:${variables.region}:${variables.account_id}:table/${data[`${key}_table`]}`)throw Error("Restored platform handoff mismatch");
+    }
+    if(!same(p.output_changes.restored_tables?.after??null,data.restored_tables)||anyUnknown(p.output_changes.restored_tables?.after_unknown))throw Error("Restored platform map mismatch");
+  }
   if(a){
     const expected={bucket:a.bucket,key:a.key,version_id:a.versionId,sha256_base64:a.sha256Base64};if(!same(p.variables?.artifact?.value??null,expected)||!same(variables.artifact??null,expected))throw new Error("Plan artifact mismatch");
     const functions=p.resource_changes.filter(r=>r.mode==="managed"&&r.type==="aws_lambda_function");if(functions.length!==2||!["dist/api.handler","dist/cleanup.handler"].every(handler=>functions.filter(r=>r.change.after?.handler===handler).length===1))throw new Error("Missing release function");
+    const data=requireRuntimeData(variables);
+    for(const fn of functions){
+      const env=block(fn.change.after?.environment)?.variables;
+      for(const [key,value] of Object.entries(runtimeDataEnvironment(data)))if(!env||typeof env!=="object"||(env as Record<string,unknown>)[key]!==value||anyUnknown(fn.change.after_unknown.environment))throw Error("Planned Lambda runtime data mismatch");
+    }
+    const plannedData=p.output_changes.runtime_data;
+    if(!plannedData||anyUnknown(plannedData.after_unknown)||!same(plannedData.after,data))throw Error("Planned runtime data output mismatch");
     for(const fn of functions)for(const [key,value] of Object.entries({s3_bucket:a.bucket,s3_key:a.key,s3_object_version:a.versionId,source_code_hash:a.sha256Base64}))if(fn.change.after?.[key]!==value||anyUnknown(fn.change.after_unknown[key]))throw new Error("Planned Lambda artifact mismatch");
   }
   return {schemaVersion:1,root,commit,binarySha256:digest(binary),reviewSha256:reviewPlanSha256(plan),inputSha256:digest(inputs),artifact:a,baseline:b};

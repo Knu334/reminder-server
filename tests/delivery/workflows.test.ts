@@ -64,11 +64,31 @@ void test("all_actions_pinned_and_apply_not_cancelled",()=>{
 });
 void test("private_custody_before_oidc_and_one_day_transfer",()=>{
   const d=workflow("deploy");assert.ok(d.jobs.authorize?.if?.includes("github.event.repository.private == true"));assert.ok(d.jobs.authorize?.if?.includes("github.ref == 'refs/heads/main'"));
-  let uploads=0;for(const job of Object.values(d.jobs))for(const step of job.steps){if(step.uses?.startsWith("actions/upload-artifact@")){uploads++;assert.equal(step.with?.["retention-days"],1);assert.equal(step.with?.["if-no-files-found"],"error");assert.equal(step.with?.["include-hidden-files"],false);assert.ok(String(step.with?.path).startsWith("${{ runner.temp }}"));}if(step.run){assert.ok(!/terraform .*show.*-json/.test(step.run));assert.ok(!/AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY)\s*:/.test(step.run));}}
+  let uploads=0;for(const job of Object.values(d.jobs))for(const step of job.steps){if(step.uses?.startsWith("actions/upload-artifact@")){uploads++;assert.equal(step.with?.["retention-days"],1);assert.equal(step.with?.["if-no-files-found"],String(step.with?.name).startsWith("failure-diagnostics-")?"ignore":"error");assert.equal(step.with?.["include-hidden-files"],false);assert.ok(String(step.with?.path).startsWith("${{ runner.temp }}"));}if(step.run){assert.ok(!/terraform .*show.*-json/.test(step.run));assert.ok(!/AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY)\s*:/.test(step.run));}}
   assert.ok(uploads>=2);
 });
 void test("maintenance_or_user_admin_workflow_absent",()=>{
   assert.deepEqual(readdirSync(".github/workflows").filter(f=>/\.ya?ml$/.test(f)).sort(),["ci.yml","deploy.yml"]);
   for(const name of ["ci","deploy"]){const w=workflow(name);assert.ok(!/Admin(Create|Delete|Initiate|Respond)|migrate:json|recovery:verify|maintenance|docker compose/i.test(JSON.stringify(w)));}
   const dep=parseDocument(readFileSync(".github/dependabot.yml","utf8")).toJS() as {updates:Array<{"package-ecosystem":string;directory:string;schedule:{interval:string}}>};assert.deepEqual(dep.updates.map(u=>u["package-ecosystem"]).sort(),["github-actions","npm","terraform","terraform","terraform"]);for(const u of dep.updates){assert.equal(u.schedule.interval,"weekly");assert.ok(!u.directory.includes(".devcontainer"));}
+});
+
+void test("failure diagnostics upload follows commands and cannot become approved preview evidence",()=>{
+ const d=workflow("deploy");
+ for(const name of ["authorize","register","plan","apply"]){
+  const job=d.jobs[name]!,last=job.steps.at(-1)!;
+  assert.ok(last.if?.includes("failure()"));assert.ok(last.if?.includes("github.event.repository.private == true"));
+  assert.ok(String(last.with?.name).startsWith("failure-diagnostics-"));assert.equal(last.with?.["retention-days"],1);
+  assert.ok(job.steps.slice(0,-1).some(s=>s.run));
+  for(const step of job.steps.slice(0,-1).filter(s=>s.uses?.startsWith("actions/upload-artifact@")))assert.equal(step.if?.includes("failure()"),undefined);
+ }
+});
+
+void test("bootstrap fixture subjects match the actual three workflow environments",()=>{
+ const d=workflow("deploy"),fixture=readFileSync("infra/bootstrap/tests/bootstrap.tftest.hcl","utf8");
+ const subjects=fixture.match(/oidc_subjects\s*=\s*\{([^}]+)\}/)![1]!;
+ for(const [role,job] of [["artifact","register"],["plan","plan"],["apply","apply"]] as const){
+  const subject=new RegExp(`${role}\\s*=\\s*"([^"]+)"`).exec(subjects)![1];
+  assert.equal(subject,`repo:synthetic/reminder-server:environment:${d.jobs[job]!.environment}`);
+ }
 });

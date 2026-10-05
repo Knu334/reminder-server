@@ -8,8 +8,8 @@ variables {
   repository         = "synthetic/reminder-server"
   github_environment = "production"
   oidc_subjects = {
-    artifact = "repo:synthetic/reminder-server:environment:production"
-    plan     = "repo:synthetic/reminder-server:environment:production"
+    artifact = "repo:synthetic/reminder-server:environment:production-artifact"
+    plan     = "repo:synthetic/reminder-server:environment:production-plan"
     apply    = "repo:synthetic/reminder-server:environment:production"
   }
   name_prefix       = "synthetic-reminder"
@@ -47,7 +47,7 @@ run "private_versioned_buckets" {
 run "trust_is_exact_oidc_subject" {
   command = plan
   assert {
-    condition     = alltrue([for role in aws_iam_role.github : alltrue([for s in jsondecode(role.assume_role_policy).Statement : s.Action == "sts:AssumeRoleWithWebIdentity" && s.Principal.Federated == "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com" && s.Condition.StringEquals["token.actions.githubusercontent.com:aud"] == "sts.amazonaws.com" && s.Condition.StringEquals["token.actions.githubusercontent.com:sub"] == "repo:synthetic/reminder-server:environment:production" && !can(s.Condition.StringLike)])])
+    condition     = alltrue([for key, role in aws_iam_role.github : alltrue([for s in jsondecode(role.assume_role_policy).Statement : s.Action == "sts:AssumeRoleWithWebIdentity" && s.Principal.Federated == "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com" && s.Condition.StringEquals["token.actions.githubusercontent.com:aud"] == "sts.amazonaws.com" && s.Condition.StringEquals["token.actions.githubusercontent.com:sub"] == var.oidc_subjects[key] && !can(s.Condition.StringLike)])])
     error_message = "All three roles require exact audience and explicit subject."
   }
   assert {
@@ -319,7 +319,7 @@ run "runtime_ceilings_enforce_exact_operation_scopes" {
   command = plan
   assert {
     condition = toset(flatten([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : try(statement.Effect, "") == "Allow" ? statement.Action : []])) == toset(keys(jsondecode("{\"dynamodb:GetItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-reminders\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-owner-state\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:PutItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-reminders\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:UpdateItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-owner-state\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:Query\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-reminders\"],\"s3:ListBucket\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images\"],\"s3:GetObject\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"s3:GetObjectVersion\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"s3:PutObject\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"logs:CreateLogStream\":[\"arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/synthetic-reminder-production-api:*\"],\"logs:PutLogEvents\":[\"arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/synthetic-reminder-production-api:*\"]}"))) && alltrue([for action, resources in jsondecode("{\"dynamodb:GetItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-reminders\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-owner-state\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:PutItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-reminders\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:UpdateItem\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-owner-state\",\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-image-jobs\"],\"dynamodb:Query\":[\"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-reminder-production-reminders\"],\"s3:ListBucket\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images\"],\"s3:GetObject\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"s3:GetObjectVersion\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"s3:PutObject\":[\"arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images/images/*\"],\"logs:CreateLogStream\":[\"arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/synthetic-reminder-production-api:*\"],\"logs:PutLogEvents\":[\"arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/synthetic-reminder-production-api:*\"]}") :
-      anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : statement.Effect == "Allow" && contains(try(statement.Action, []), action) && toset(try(statement.Resource, [])) == toset(resources)]) &&
+      toset(flatten([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : try(statement.Resource, []) if statement.Effect == "Allow" && contains(try(statement.Action, []), action)])) == toset(resources) &&
       (resources == ["*"] || anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : statement.Effect == "Deny" && contains(try(statement.Action, []), action) && toset(try(statement.NotResource, [])) == toset(resources)]))
     ])
     error_message = "api ceiling must exactly match the adapter inventory and explicitly deny foreign resources, state and artifacts."
@@ -375,5 +375,89 @@ run "presigned_version_read_is_api_only_and_bounded" {
   assert {
     condition     = anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : statement.Effect == "Deny" && try(statement.Action, []) == ["s3:GetObjectVersion"] && try(statement.Condition.StringEquals["s3:authType"], "") == "REST-QUERY-STRING" && try(tonumber(statement.Condition.NumericGreaterThan["s3:signatureAge"]), 0) == 900000]) && anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : statement.Effect == "Deny" && try(statement.Action, []) == ["s3:GetObjectVersion"] && try(statement.Condition.StringEquals["s3:authType"], "") == "REST-QUERY-STRING" && try(statement.Condition.Null["s3:signatureAge"], "") == "true"]) && anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : statement.Effect == "Deny" && try(statement.Action, []) == ["s3:GetObjectVersion"] && try(statement.Condition.StringEquals["s3:authType"], "") == "REST-QUERY-STRING" && try(statement.Condition.StringNotEquals["s3:signatureversion"], "") == "AWS4-HMAC-SHA256"])
     error_message = "Even Allow-star/session resource grants must not bypass expired/missing-age or non-SigV4 query conditions."
+  }
+}
+
+run "reject_collapsed_environments" {
+  command = plan
+  variables { oidc_subjects = { artifact = "repo:synthetic/reminder-server:environment:production", plan = "repo:synthetic/reminder-server:environment:production", apply = "repo:synthetic/reminder-server:environment:production" } }
+  expect_failures = [var.oidc_subjects]
+}
+run "reject_branch_subject" {
+  command = plan
+  variables { oidc_subjects = { artifact = "repo:synthetic/reminder-server:ref:refs/heads/main", plan = "repo:synthetic/reminder-server:environment:production-plan", apply = "repo:synthetic/reminder-server:environment:production" } }
+  expect_failures = [var.oidc_subjects]
+}
+
+run "restored_table_ceiling_is_finite" {
+  command = plan
+  variables { restored_tables = { reminders = "synthetic-restore-reminders", owner_state = "synthetic-restore-owners", image_jobs = "synthetic-restore-jobs" } }
+  assert {
+    condition     = toset(flatten([for s in jsondecode(aws_iam_policy.runtime_ceiling["api"].policy).Statement : try(s.Resource, []) if s.Effect == "Allow" && contains(try(s.Action, []), "dynamodb:GetItem")])) == toset(["arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-reminders", "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-owners", "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-jobs"])
+    error_message = "Bootstrap must select only the reviewed restored table set, never arbitrary tables."
+  }
+}
+
+run "reject_restored_partial" {
+  command = plan
+  variables { restored_tables = { reminders = "restore-reminders" } }
+  expect_failures = [var.restored_tables]
+}
+
+run "reject_restored_alias_original" {
+  command = plan
+  variables { restored_tables = { reminders = "synthetic-reminder-production-owner-state", owner_state = "restore-owners", image_jobs = "restore-jobs" } }
+  expect_failures = [var.restored_tables]
+}
+
+run "reject_restored_duplicate" {
+  command = plan
+  variables { restored_tables = { reminders = "restore-same", owner_state = "restore-same", image_jobs = "restore-jobs" } }
+  expect_failures = [var.restored_tables]
+}
+
+run "reject_restored_wildcard" {
+  command = plan
+  variables { restored_tables = { reminders = "restore-*", owner_state = "restore-owners", image_jobs = "restore-jobs" } }
+  expect_failures = [var.restored_tables]
+}
+
+run "reject_extra_oidc_role" {
+  command = plan
+  variables { oidc_subjects = { artifact = "repo:synthetic/reminder-server:environment:production-artifact", plan = "repo:synthetic/reminder-server:environment:production-plan", apply = "repo:synthetic/reminder-server:environment:production", admin = "repo:synthetic/reminder-server:environment:production" } }
+  expect_failures = [var.oidc_subjects]
+}
+
+run "maximum_restored_names_fit_policy_limits" {
+  command = plan
+  variables {
+    name_prefix = "abcdefghijklmnopqrstuvwxyz"
+    region      = "us-east-1"
+    restored_tables = {
+      reminders   = "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      owner_state = "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+      image_jobs  = "jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj"
+    }
+  }
+  assert {
+    condition     = alltrue([for p in aws_iam_policy.runtime_ceiling : length(p.policy) <= 6144]) && length(aws_iam_policy.production_read.policy) <= 6144 && alltrue([for p in aws_iam_role_policy.github : length(p.policy) <= 10240])
+    error_message = "Largest valid prefix and selected table identities must fit all IAM policy limits."
+  }
+}
+
+run "maximum_bucket_and_restored_names_fit_policy_limits" {
+  command = plan
+  variables {
+    name_prefix = "abcdefghijklmnopqrstuvwxy"
+    region      = "ap-southeast-1"
+    restored_tables = {
+      reminders   = "rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr"
+      owner_state = "oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo"
+      image_jobs  = "jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj"
+    }
+  }
+  assert {
+    condition     = alltrue([for p in aws_iam_policy.runtime_ceiling : length(p.policy) <= 6144]) && length(aws_iam_policy.production_read.policy) <= 6144 && alltrue([for p in aws_iam_role_policy.github : length(p.policy) <= 10240])
+    error_message = "Largest valid prefix and selected table identities must fit all IAM policy limits."
   }
 }

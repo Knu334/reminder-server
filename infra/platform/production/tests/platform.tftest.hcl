@@ -176,3 +176,91 @@ run "reject_invalid_account" {
   }
   expect_failures = [var.account_id]
 }
+
+run "reject_restored_partial" {
+  command = plan
+  variables { restored_tables = { reminders = "restore-reminders" } }
+  expect_failures = [var.restored_tables]
+}
+
+run "reject_restored_alias_original" {
+  command = plan
+  variables { restored_tables = { reminders = "synthetic-reminder-production-owner-state", owner_state = "restore-owners", image_jobs = "restore-jobs" } }
+  expect_failures = [var.restored_tables]
+}
+
+run "reject_restored_duplicate" {
+  command = plan
+  variables { restored_tables = { reminders = "restore-same", owner_state = "restore-same", image_jobs = "restore-jobs" } }
+  expect_failures = [var.restored_tables]
+}
+
+run "reject_restored_wildcard" {
+  command = plan
+  variables { restored_tables = { reminders = "restore-*", owner_state = "restore-owners", image_jobs = "restore-jobs" } }
+  expect_failures = [var.restored_tables]
+}
+
+run "verified_restored_handoff_retains_originals" {
+  command = plan
+  variables { restored_tables = { reminders = "synthetic-restore-reminders", owner_state = "synthetic-restore-owners", image_jobs = "synthetic-restore-jobs" } }
+  override_data {
+    target = data.aws_dynamodb_table.restored["reminders"]
+    values = { attribute = [{ name = "ownerId", type = "S" }, { name = "id", type = "S" }], arn = "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-reminders", name = "synthetic-restore-reminders", hash_key = "ownerId", range_key = "id", billing_mode = "PAY_PER_REQUEST", deletion_protection_enabled = true, point_in_time_recovery = [{ enabled = true, recovery_period_in_days = 35 }], }
+  }
+  override_data {
+    target = data.aws_dynamodb_table.restored["owner_state"]
+    values = { attribute = [{ name = "pk", type = "S" }, { name = "sk", type = "S" }], arn = "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-owners", name = "synthetic-restore-owners", hash_key = "pk", range_key = "sk", billing_mode = "PAY_PER_REQUEST", deletion_protection_enabled = true, point_in_time_recovery = [{ enabled = true, recovery_period_in_days = 35 }], ttl = [{ attribute_name = "expiresAt", enabled = true }] }
+  }
+  override_data {
+    target = data.aws_dynamodb_table.restored["image_jobs"]
+    values = { attribute = [{ name = "jobId", type = "S" }, { name = "cleanupPartition", type = "S" }, { name = "cleanupSortKey", type = "S" }], arn = "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-jobs", name = "synthetic-restore-jobs", hash_key = "jobId", range_key = "", billing_mode = "PAY_PER_REQUEST", deletion_protection_enabled = true, point_in_time_recovery = [{ enabled = true, recovery_period_in_days = 35 }], global_secondary_index = [{ name = "cleanup_by_due", hash_key = "cleanupPartition", range_key = "cleanupSortKey", projection_type = "KEYS_ONLY" }] }
+  }
+
+  assert {
+    condition     = output.reminders_table == "synthetic-restore-reminders" && output.owner_state_table == "synthetic-restore-owners" && output.image_jobs_table == "synthetic-restore-jobs" && output.reminders_table_arn == "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-reminders" && length(aws_dynamodb_table.runtime) == 3 && aws_dynamodb_table.runtime["reminders"].name == "synthetic-reminder-production-reminders" && alltrue([for t in aws_dynamodb_table.runtime : t.deletion_protection_enabled])
+    error_message = "Verified selected outputs must not adopt, rename or destroy originals."
+  }
+  assert {
+    condition     = anytrue([for s in jsondecode(aws_iam_role_policy.api.policy).Statement : contains(s.Action, "dynamodb:GetItem") && toset(s.Resource) == toset(["arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-reminders", "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-owners", "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-jobs"])])
+    error_message = "Grants must follow the verified selected set."
+  }
+}
+
+run "reject_unprotected_restored_table" {
+  command = plan
+  variables { restored_tables = { reminders = "synthetic-restore-reminders", owner_state = "synthetic-restore-owners", image_jobs = "synthetic-restore-jobs" } }
+  override_data {
+    target = data.aws_dynamodb_table.restored["reminders"]
+    values = { attribute = [{ name = "ownerId", type = "S" }, { name = "id", type = "S" }], arn = "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-reminders", name = "synthetic-restore-reminders", hash_key = "ownerId", range_key = "id", billing_mode = "PAY_PER_REQUEST", deletion_protection_enabled = false, point_in_time_recovery = [{ enabled = true, recovery_period_in_days = 35 }], }
+  }
+  override_data {
+    target = data.aws_dynamodb_table.restored["owner_state"]
+    values = { attribute = [{ name = "pk", type = "S" }, { name = "sk", type = "S" }], arn = "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-owners", name = "synthetic-restore-owners", hash_key = "pk", range_key = "sk", billing_mode = "PAY_PER_REQUEST", deletion_protection_enabled = true, point_in_time_recovery = [{ enabled = true, recovery_period_in_days = 35 }], ttl = [{ attribute_name = "expiresAt", enabled = true }] }
+  }
+  override_data {
+    target = data.aws_dynamodb_table.restored["image_jobs"]
+    values = { attribute = [{ name = "jobId", type = "S" }, { name = "cleanupPartition", type = "S" }, { name = "cleanupSortKey", type = "S" }], arn = "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-jobs", name = "synthetic-restore-jobs", hash_key = "jobId", range_key = "", billing_mode = "PAY_PER_REQUEST", deletion_protection_enabled = true, point_in_time_recovery = [{ enabled = true, recovery_period_in_days = 35 }], global_secondary_index = [{ name = "cleanup_by_due", hash_key = "cleanupPartition", range_key = "cleanupSortKey", projection_type = "KEYS_ONLY" }] }
+  }
+
+  expect_failures = [data.aws_dynamodb_table.restored["reminders"]]
+}
+
+run "reject_wrong_restored_key_type" {
+  command = plan
+  variables { restored_tables = { reminders = "synthetic-restore-reminders", owner_state = "synthetic-restore-owners", image_jobs = "synthetic-restore-jobs" } }
+  override_data {
+    target = data.aws_dynamodb_table.restored["reminders"]
+    values = { attribute = [{ name = "ownerId", type = "N" }, { name = "id", type = "S" }], arn = "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-reminders", name = "synthetic-restore-reminders", hash_key = "ownerId", range_key = "id", billing_mode = "PAY_PER_REQUEST", deletion_protection_enabled = true, point_in_time_recovery = [{ enabled = true, recovery_period_in_days = 35 }], }
+  }
+  override_data {
+    target = data.aws_dynamodb_table.restored["owner_state"]
+    values = { attribute = [{ name = "pk", type = "S" }, { name = "sk", type = "S" }], arn = "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-owners", name = "synthetic-restore-owners", hash_key = "pk", range_key = "sk", billing_mode = "PAY_PER_REQUEST", deletion_protection_enabled = true, point_in_time_recovery = [{ enabled = true, recovery_period_in_days = 35 }], ttl = [{ attribute_name = "expiresAt", enabled = true }] }
+  }
+  override_data {
+    target = data.aws_dynamodb_table.restored["image_jobs"]
+    values = { attribute = [{ name = "jobId", type = "S" }, { name = "cleanupPartition", type = "S" }, { name = "cleanupSortKey", type = "S" }], arn = "arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-restore-jobs", name = "synthetic-restore-jobs", hash_key = "jobId", range_key = "", billing_mode = "PAY_PER_REQUEST", deletion_protection_enabled = true, point_in_time_recovery = [{ enabled = true, recovery_period_in_days = 35 }], global_secondary_index = [{ name = "cleanup_by_due", hash_key = "cleanupPartition", range_key = "cleanupSortKey", projection_type = "KEYS_ONLY" }] }
+  }
+
+  expect_failures = [data.aws_dynamodb_table.restored["reminders"]]
+}

@@ -84,7 +84,7 @@ variable "reminders_table" {
   type     = string
   nullable = false
   validation {
-    condition     = var.reminders_table == "${var.name_prefix}-production-reminders"
+    condition     = var.reminders_table == lookup(var.restored_tables, "reminders", "${var.name_prefix}-production-reminders")
     error_message = "reminders_table must match the exact platform output."
   }
 }
@@ -92,7 +92,7 @@ variable "owner_state_table" {
   type     = string
   nullable = false
   validation {
-    condition     = var.owner_state_table == "${var.name_prefix}-production-owner-state"
+    condition     = var.owner_state_table == lookup(var.restored_tables, "owner_state", "${var.name_prefix}-production-owner-state")
     error_message = "owner_state_table must match the exact platform output."
   }
 }
@@ -100,7 +100,7 @@ variable "image_jobs_table" {
   type     = string
   nullable = false
   validation {
-    condition     = var.image_jobs_table == "${var.name_prefix}-production-image-jobs"
+    condition     = var.image_jobs_table == lookup(var.restored_tables, "image_jobs", "${var.name_prefix}-production-image-jobs")
     error_message = "image_jobs_table must match the exact platform output."
   }
 }
@@ -209,4 +209,19 @@ locals {
     }, var.allowed_source_ips == null ? {} : { ALLOWED_SOURCE_IPS = jsonencode(var.allowed_source_ips) }, {
     for key, value in var.runtime_limits : key => tostring(value)
   })
+}
+
+variable "restored_tables" {
+  type        = map(string)
+  default     = {}
+  nullable    = false
+  description = "Exceptional reviewed same-account/region PITR set. Empty selects originals; otherwise exactly three disjoint names, maximum 64 chars for bounded IAM policies. Bootstrap must select the identical set first."
+  validation {
+    condition = length(var.restored_tables) == 0 || (
+      toset(keys(var.restored_tables)) == toset(["reminders", "owner_state", "image_jobs"]) &&
+      length(toset(values(var.restored_tables))) == 3 &&
+      alltrue([for name in values(var.restored_tables) : can(regex("^[A-Za-z0-9_.-]{3,64}$", name)) && !contains(["${var.name_prefix}-production-reminders", "${var.name_prefix}-production-owner-state", "${var.name_prefix}-production-image-jobs"], name)])
+    )
+    error_message = "restored_tables must be empty or exactly three valid distinct names disjoint from every original production table."
+  }
 }

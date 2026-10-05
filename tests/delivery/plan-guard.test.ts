@@ -4,7 +4,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {test} from "node:test";
 import {inspectPlan,reviewPlanSha256,createPlanManifest,verifySavedPlan,verifyPostApplyBaseline,planGuardMain} from "../../scripts/release/plan-guard";
-import {applicationPlan,platformPlan,baseline,artifact} from "../fixtures/synthetic/plans/fixtures";
+import {applicationPlan,platformPlan,baseline,artifact,dataInputs} from "../fixtures/synthetic/plans/fixtures";
 const platformBaseline={...baseline,root:"platform" as const};
 void test("blocks_delete_replace_or_removed_protected_resource",()=>{
   for(const actions of [["delete"],["delete","create"],["create","delete"]]) for(const make of [applicationPlan,platformPlan]) {
@@ -42,7 +42,7 @@ void test("review_digest_removes_only_root_timestamp_and_keeps_array_order",()=>
   assert.throws(()=>reviewPlanSha256({x:undefined}));assert.equal(inspectPlan({resource_changes:"bad"},baseline).allowed,false);
 });
 void test("saved_plan_binds_binary_commit_inputs_and_artifact_separately",()=>{
-  const p=applicationPlan(),inputs=Buffer.from(JSON.stringify({operator_api_seed:false,production_api_id:baseline.apiId,artifact:applicationPlan().variables.artifact.value})),binary=Buffer.from("synthetic saved plan");
+  const p=applicationPlan(),inputs=Buffer.from(JSON.stringify({...dataInputs,operator_api_seed:false,production_api_id:baseline.apiId,artifact:applicationPlan().variables.artifact.value})),binary=Buffer.from("synthetic saved plan");
   const m=createPlanManifest(p,binary,inputs,artifact,artifact.commit,baseline,"application");verifySavedPlan(m,p,binary,inputs,artifact,artifact.commit,baseline,"application");
   for(const changed of [{binary:Buffer.from("changed")},{inputs:Buffer.from("{}")},{commit:"b".repeat(40)},{artifact:{...artifact,versionId:"different"}},{baseline:{...baseline,apiId:"xyz123def4"}},{plan:{...p,unknown_extra:"changed"}}]){
     assert.throws(()=>verifySavedPlan(m,changed.plan??p,changed.binary??binary,changed.inputs??inputs,changed.artifact??artifact,changed.commit??artifact.commit,changed.baseline??baseline,"application"));
@@ -51,7 +51,7 @@ void test("saved_plan_binds_binary_commit_inputs_and_artifact_separately",()=>{
 });
 void test("plan_cli_writes_private_manifest_and_rechecks_without_leaking_inputs",async()=>{
   const dir=await mkdtemp(join(tmpdir(),"guard-synthetic-"));try{
-    const files={"plan-json":applicationPlan(),inputs:{operator_api_seed:false,production_api_id:baseline.apiId,artifact:applicationPlan().variables.artifact.value},artifact,baseline};for(const [name,value] of Object.entries(files))await writeFile(join(dir,name),JSON.stringify(value));await writeFile(join(dir,"plan"),"binary");
+    const files={"plan-json":applicationPlan(),inputs:{...dataInputs,operator_api_seed:false,production_api_id:baseline.apiId,artifact:applicationPlan().variables.artifact.value},artifact,baseline};for(const [name,value] of Object.entries(files))await writeFile(join(dir,name),JSON.stringify(value));await writeFile(join(dir,"plan"),"binary");
     const args=["root",...Object.keys(files),"plan","manifest","commit"].flatMap(key=>[`--${key}`,key==="root"?"application":key==="commit"?artifact.commit:join(dir,key)]);const lines:string[]=[];const io={stdout:(s:string)=>lines.push(s),stderr:(s:string)=>lines.push(s)};
     assert.equal(await planGuardMain(["--mode","review",...args],io),0);assert.equal((await stat(join(dir,"manifest"))).mode&0o777,0o600);assert.ok(JSON.parse(await readFile(join(dir,"manifest"),"utf8")).reviewSha256);
     assert.equal(await planGuardMain(["--mode","check",...args],io),0);await writeFile(join(dir,"plan"),"changed");assert.equal(await planGuardMain(["--mode","check",...args],io),1);assert.ok(!lines.join("").includes(baseline.cognitoIssuer));assert.ok(!lines.join("").includes(artifact.versionId));
@@ -86,11 +86,18 @@ void test("protects_actual_gateway_authorizer_and_v2_route_scopes",()=>{
   for(const bad of [{authorization_type:"NONE"},{authorization_scopes:[]},{authorization_scopes:["reminder-api/write"]},{authorizer_id:"wrong"}]){const p=applicationPlan();Object.assign(p.resource_changes[3]!.change.after,bad);assert.equal(inspectPlan(p,baseline).allowed,false);}
   const unknown=applicationPlan();unknown.resource_changes[2]!.change.after_unknown={jwt_configuration:[{issuer:true}]};assert.equal(inspectPlan(unknown,baseline).allowed,false);
   const removed=applicationPlan();removed.resource_changes.splice(3,1);assert.equal(inspectPlan(removed,baseline).allowed,false);
-  const first=applicationPlan();for(const r of first.resource_changes.slice(1)){r.change.actions=["create"];r.change.before=null as unknown as Record<string,unknown>;r.change.after_unknown=r.type==="aws_apigatewayv2_route"?{id:true,authorizer_id:true}:{id:true};delete r.change.after.id;if(r.type==="aws_apigatewayv2_route")delete r.change.after.authorizer_id;}assert.equal(inspectPlan(first,baseline).allowed,true);
+  const first=applicationPlan();for(const r of first.resource_changes.slice(1)){r.change.actions=["create"];r.change.before=null as unknown as Record<string,unknown>;r.change.after_unknown=r.type==="aws_apigatewayv2_route"&&r.change.after.authorization_type==="JWT"?{id:true,authorizer_id:true}:{id:true};delete r.change.after.id;if(r.type==="aws_apigatewayv2_route")delete r.change.after.authorizer_id;}assert.equal(inspectPlan(first,baseline).allowed,true);
 });
 void test("protects_literal_api_runtime_auth_and_both_lambda_artifact_inputs",()=>{
   for(const field of ["COGNITO_ISSUER","COGNITO_CLIENT_ID","EXPECTED_API_ID","EXPECTED_API_STAGE"]){const p=applicationPlan();const api=p.resource_changes.find(r=>r.type==="aws_lambda_function"&&r.name==="api")!;const env=api.change.after.environment as Array<{variables:Record<string,string>}>;env[0]!.variables[field]="wrong";assert.equal(inspectPlan(p,baseline).allowed,false);}
   for(const unknown of [{environment:[{variables:{COGNITO_ISSUER:true}}]},{environment:[{variables:true}]},{environment:true}]){const p=applicationPlan();p.resource_changes.find(r=>r.type==="aws_lambda_function"&&r.name==="api")!.change.after_unknown=unknown;assert.equal(inspectPlan(p,baseline).allowed,false);}
-  const binary=Buffer.from("binary"),inputs=Buffer.from(JSON.stringify({artifact:applicationPlan().variables.artifact.value}));
+  const binary=Buffer.from("binary"),inputs=Buffer.from(JSON.stringify({...dataInputs,artifact:applicationPlan().variables.artifact.value}));
   for(const name of ["api","cleanup"]){const p=applicationPlan();p.resource_changes.find(r=>r.type==="aws_lambda_function"&&r.name===name)!.change.after.s3_object_version="wrong";assert.throws(()=>createPlanManifest(p,binary,inputs,artifact,artifact.commit,baseline,"application"));}
+});
+
+void test("fallback allowlist rejects greedy or default routes and any auth drift",()=>{
+ for(const bad of [{route_key:"ANY /{proxy+}"},{route_key:"$default"},{authorization_type:"JWT"},{authorization_scopes:["reminder-api/read"]}]){
+  const p=applicationPlan();const fallback=p.resource_changes.find(r=>r.change.after.route_key==="ANY /v2/reminders")!;
+  Object.assign(fallback.change.after,bad);assert.equal(inspectPlan(p,baseline).allowed,false);
+ }
 });

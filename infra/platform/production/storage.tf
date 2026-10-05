@@ -4,9 +4,10 @@ locals {
     owner_state = { suffix = "owner-state", hash = "pk", range = "sk", attributes = ["pk", "sk"] }
     image_jobs  = { suffix = "image-jobs", hash = "jobId", range = null, attributes = ["jobId", "cleanupPartition", "cleanupSortKey"] }
   }
-  table_arns         = { for key, table in local.tables : key => "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${local.production}-${table.suffix}" }
-  images_bucket_name = "${var.name_prefix}-${var.account_id}-${var.region}-images"
-  images_bucket_arn  = "arn:aws:s3:::${local.images_bucket_name}"
+  selected_table_names = { for key, table in local.tables : key => lookup(var.restored_tables, key, "${local.production}-${table.suffix}") }
+  table_arns           = { for key, name in local.selected_table_names : key => "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${name}" }
+  images_bucket_name   = "${var.name_prefix}-${var.account_id}-${var.region}-images"
+  images_bucket_arn    = "arn:aws:s3:::${local.images_bucket_name}"
 }
 resource "aws_dynamodb_table" "runtime" {
   for_each                    = local.tables
@@ -102,5 +103,26 @@ resource "aws_s3_bucket_cors_configuration" "images" {
   cors_rule {
     allowed_origins = [var.chrome_origin]
     allowed_methods = ["GET", "HEAD"]
+  }
+}
+
+# Restores stay operator-owned. Read and verify, never import/adopt or replace originals.
+data "aws_dynamodb_table" "restored" {
+  for_each = var.restored_tables
+  name     = each.value
+  lifecycle {
+    postcondition {
+      condition = (
+        self.arn == local.table_arns[each.key] && self.name == each.value &&
+        self.deletion_protection_enabled && self.billing_mode == "PAY_PER_REQUEST" &&
+        self.hash_key == local.tables[each.key].hash &&
+        coalesce(self.range_key, "none") == coalesce(local.tables[each.key].range, "none") &&
+        toset([for attribute in self.attribute : "${attribute.name}:${attribute.type}"]) == toset([for name in local.tables[each.key].attributes : "${name}:S"]) &&
+        try(self.point_in_time_recovery[0].enabled && self.point_in_time_recovery[0].recovery_period_in_days == 35, false) &&
+        (each.key != "owner_state" || anytrue([for ttl in self.ttl : ttl.enabled && ttl.attribute_name == "expiresAt"])) &&
+        (each.key != "image_jobs" || anytrue([for index in self.global_secondary_index : index.name == "cleanup_by_due" && index.projection_type == "KEYS_ONLY" && index.hash_key == "cleanupPartition" && index.range_key == "cleanupSortKey"]))
+      )
+      error_message = "Restored table must match exact account/region identity, runtime keys/index, on-demand billing, deletion protection, 35-day PITR and owner TTL before handoff."
+    }
   }
 }

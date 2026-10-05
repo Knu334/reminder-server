@@ -54,3 +54,12 @@ jobs:
           npm run audit:runtime
           npm run audit:all
           npm run --silent sbom > "$RUNNER_TEMP/sbom.json"
+      - name: Retain private infrastructure failure diagnostics
+        if: ${{ failure() && github.event.repository.private == true }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: failure-diagnostics-infra-${{ github.run_id }}
+          path: ${{ runner.temp }}/infra-diagnostics/*.json
+          retention-days: 1
+          if-no-files-found: ignore
+          include-hidden-files: false

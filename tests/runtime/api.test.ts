@@ -240,3 +240,16 @@ void test("well_formed_surrogate_pair_id_has_location_and_can_be_read", async ()
   const fetched = await s.call("GET", "/v2/reminders/{id}", { pathParameters: { id } });
   assert.equal(fetched.statusCode, 200); assert.equal(json(fetched).id, id); assert.equal(fetched.body, created.body); assert.equal(s.h.snapshot().storage[0]?.itemCount, 1);
 });
+
+void test("finite ANY fallback returns Allow without reaching storage even with forged supported method", async () => {
+  const s=setup();
+  for(const [method,path,status] of [["PUT","/v2/reminders",405],["POST","/v2/reminders",404],["DELETE","/healthz",405]] as const) {
+    const routeKey=`ANY ${path}`;
+    const base=event(method!,path!) as {requestContext:Record<string,unknown>};
+    const response=await s.call(method!,path!,{routeKey,requestContext:{...base.requestContext,routeKey,authorizer:{}},body:JSON.stringify(validCreate())});
+    assert.equal(response.statusCode,status);
+    if(status===405)assert.ok(response.headers?.Allow);
+  }
+  assert.equal(s.h.snapshot().transactions.length,0);
+  assert.equal(s.h.snapshot().rates.length,0);
+});

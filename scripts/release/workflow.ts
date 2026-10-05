@@ -1,4 +1,7 @@
-import {spawnSync} from "node:child_process";
+import {isDeepStrictEqual} from "node:util";
+import {requireRuntimeData, selectedRuntimeData, verifyRuntimeDataOutputs} from "./runtime-data";
+import {runPrivateCommand,PrivateCommandError} from "./private-command";
+import {tmpdir} from "node:os";
 import {createHash} from "node:crypto";
 import {chmod,copyFile,lstat,mkdir,readFile,readdir,writeFile} from "node:fs/promises";
 import {join,resolve} from "node:path";
@@ -89,7 +92,12 @@ export async function planRelease(c:WorkflowContext,config:WorkflowConfig,source
   if(c.root==="application"){
     await init(c,"platform",services.run);const values=JSON.parse(await services.run("terraform",[`-chdir=${rootPath("platform")}`,"output","-json"]));const selected=Object.fromEntries(handoffFields.map(name=>[name,output(values,name)]));
     for(const [name,value] of Object.entries(selected)){if(inputs[name]!==undefined&&inputs[name]!==value)throw Error("Platform input handoff changed");inputs[name]=value;}
-    await privateJson(path(c,"platform-outputs.json"),selected);
+    const restored=jsonObject.parse(jsonObject.parse(values).restored_tables).value;
+    if(inputs.restored_tables!==undefined&&!isDeepStrictEqual(inputs.restored_tables,restored))throw Error("Platform restored selection changed");
+    inputs.restored_tables=restored;
+    const data=requireRuntimeData(inputs);
+    for(const name of ["reminders","owner_state","image_jobs"] as const)if(output(values,`${name}_table_arn`)!==`arn:aws:dynamodb:${c.region}:${inputs.account_id}:table/${data[`${name}_table`]}`)throw Error("Platform table ARN mismatch");
+    await privateJson(path(c,"platform-outputs.json"),{...selected,restored_tables:restored});
     for(const [name,value] of Object.entries({cognito_issuer:config.baseline!.cognitoIssuer,cognito_client_id:config.baseline!.cognitoClientId,cognito_auth_base_url:config.baseline!.cognitoAuthBaseUrl}))if(inputs[name]!==value)throw Error("Platform baseline changed");
     inputs.operator_api_seed=false;inputs.scheduler_enabled=c.schedulerEnabled;const a=registered!.artifact;inputs.artifact={bucket:a.bucket,key:a.key,version_id:a.versionId,sha256_base64:a.sha256Base64};
   }
@@ -124,11 +132,17 @@ export async function applyRelease(c:WorkflowContext,services:ReleaseServices):P
   await services.run("terraform",[`-chdir=${rootPath(c.root)}`,"apply","-input=false","-lock=true","-lock-timeout=5m",path(c,"saved.tfplan")]);
   const outputs:unknown=JSON.parse(await services.run("terraform",[`-chdir=${rootPath(c.root)}`,"output","-json"]));await privateJson(path(c,"outputs.json"),outputs);
   const known=baseline??initialPlatformBaseline(outputs,JSON.parse(await services.run("terraform",[`-chdir=${rootPath(c.root)}`,"show","-json"])),jsonObject.parse(await parseJson(path(c,"inputs.json"))));verifyPostApplyBaseline(outputs,known);await privateJson(path(c,"post-baseline.json"),known);
-  if(a){await services.verify(a,outputs,c.region);await services.smoke(known,c.published);}
+  if(c.root==="platform"){
+    const selected=selectedRuntimeData(jsonObject.parse(await parseJson(path(c,"inputs.json"))));
+    for(const name of ["reminders","owner_state","image_jobs"] as const)if(output(outputs,`${name}_table`)!==selected[`${name}_table`]||output(outputs,`${name}_table_arn`)!==`arn:aws:dynamodb:${c.region}:${jsonObject.parse(await parseJson(path(c,"inputs.json"))).account_id}:table/${selected[`${name}_table`]}`)throw Error("Post-apply platform table mismatch");
+    if(!isDeepStrictEqual(jsonObject.parse(jsonObject.parse(outputs).restored_tables).value,selected.restored_tables))throw Error("Post-apply restored map mismatch");
+  }
+  if(a){verifyRuntimeDataOutputs(jsonObject.parse(outputs),jsonObject.parse(await parseJson(path(c,"inputs.json"))));await services.verify(a,outputs,c.region);await services.smoke(known,c.published);}
   const ledger:ReleaseLedger={commit:c.commit,root:c.root,reviewSha256:manifest.reviewSha256,artifactSha256:a?.sha256Hex??null,apiVersion:a?output(outputs,"api_version"):null,cleanupVersion:a?output(outputs,"cleanup_version"):null,url:a?output(outputs,"api_base_url"):null,result:"verified"};await privateJson(path(c,"ledger.json"),ledger);return ledger;
 }
 const localRun:CommandRunner=(command,args)=>{
-  const result=spawnSync(command,args,{encoding:"utf8",maxBuffer:128*1024*1024});if(result.error||result.status!==0)throw Error("Private release command failed; inspect trusted private diagnostics");return Promise.resolve(result.stdout);
+  const phase=command==="terraform"?(args[1]??"terraform"):command==="git"?"git":"provenance";
+  return Promise.resolve(runPrivateCommand(command,args,{directory:join(process.env.RUNNER_TEMP??tmpdir(),"release-diagnostics"),phase,captureStdout:phase==="init"}));
 };
 function required(name:string):string {const value=process.env[name];if(!value)throw Error("Missing workflow configuration");return value;}
 function boolean(name:string):boolean {const value=required(name);if(value!=="true"&&value!=="false")throw Error("Invalid workflow boolean");return value==="true";}
@@ -156,4 +170,4 @@ export async function workflowMain(argv:string[]):Promise<void>{
   if(!c.expectedCustodySha256)throw Error("Apply requires plan-job custody digest");
   const ledger=await applyRelease(c,defaultServices);process.stdout.write(JSON.stringify(ledger)+"\n");
 }
-if(require.main===module)void workflowMain(process.argv.slice(2)).catch(()=>{process.stderr.write("Protected release denied; no success claim. Review private inputs, evidence and plan.\n");process.exitCode=1;});
+if(require.main===module)void workflowMain(process.argv.slice(2)).catch((error:unknown)=>{process.stderr.write(error instanceof PrivateCommandError?`${error.message}\n`:"Protected release denied; no success claim. Review private inputs, evidence and plan.\n");process.exitCode=1;});

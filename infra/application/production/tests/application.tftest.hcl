@@ -106,11 +106,11 @@ run "jwt_routes_and_cors_are_exact" {
     error_message = "JWT authorizer must match the platform issuer and public client ID."
   }
   assert {
-    condition     = toset(keys(aws_apigatewayv2_route.api)) == toset(["GET /healthz", "GET /readyz", "POST /reminders", "PUT /reminders", "GET /v2/reminders", "POST /v2/reminders", "GET /v2/reminders/{id}", "PATCH /v2/reminders/{id}", "DELETE /v2/reminders/{id}", "GET /v2/reminders/{id}/thumbnail-url"]) && alltrue([for key, r in aws_apigatewayv2_route.api : r.route_key == key && r.target == "integrations/${aws_apigatewayv2_integration.api.id}" && (strcontains(key, "/v2/") ? r.authorization_type == "JWT" && r.authorizer_id == aws_apigatewayv2_authorizer.cognito.id && r.authorization_scopes == toset([startswith(key, "GET ") ? "reminder-api/read" : "reminder-api/write"]) : r.authorization_type == "NONE" && r.authorizer_id == null && length(r.authorization_scopes) == 0)])
+    condition     = toset(keys(aws_apigatewayv2_route.api)) == toset(["ANY /healthz", "ANY /readyz", "ANY /reminders", "ANY /v2/reminders", "ANY /v2/reminders/{id}", "ANY /v2/reminders/{id}/thumbnail-url", "GET /healthz", "GET /readyz", "POST /reminders", "PUT /reminders", "GET /v2/reminders", "POST /v2/reminders", "GET /v2/reminders/{id}", "PATCH /v2/reminders/{id}", "DELETE /v2/reminders/{id}", "GET /v2/reminders/{id}/thumbnail-url"]) && alltrue([for key, r in aws_apigatewayv2_route.api : r.route_key == key && r.target == "integrations/${aws_apigatewayv2_integration.api.id}" && (strcontains(key, "/v2/") && !startswith(key, "ANY ") ? r.authorization_type == "JWT" && r.authorizer_id == aws_apigatewayv2_authorizer.cognito.id && r.authorization_scopes == toset([startswith(key, "GET ") ? "reminder-api/read" : "reminder-api/write"]) : r.authorization_type == "NONE" && r.authorizer_id == null && length(r.authorization_scopes) == 0)])
     error_message = "Only v2 routes use JWT/read-write scopes; health, ready and legacy410 are public, OPTIONS is Gateway CORS."
   }
   assert {
-    condition     = aws_apigatewayv2_api.production.cors_configuration[0].allow_origins == toset([var.chrome_origin]) && aws_apigatewayv2_api.production.cors_configuration[0].allow_methods == toset(["GET", "POST", "PATCH", "DELETE", "PUT", "OPTIONS"]) && aws_apigatewayv2_api.production.cors_configuration[0].allow_headers == toset(["authorization", "content-type", "if-match"]) && aws_apigatewayv2_api.production.cors_configuration[0].expose_headers == toset(["ETag", "Location", "X-Request-Id", "Retry-After"]) && !aws_apigatewayv2_api.production.cors_configuration[0].allow_credentials
+    condition     = aws_apigatewayv2_api.production.cors_configuration[0].allow_origins == toset([var.chrome_origin]) && aws_apigatewayv2_api.production.cors_configuration[0].allow_methods == toset(["GET", "POST", "PATCH", "DELETE", "PUT", "OPTIONS"]) && aws_apigatewayv2_api.production.cors_configuration[0].allow_headers == toset(["authorization", "content-type", "if-match"]) && aws_apigatewayv2_api.production.cors_configuration[0].expose_headers == toset(["ETag", "Location", "X-Request-Id", "Retry-After", "Allow"]) && !aws_apigatewayv2_api.production.cors_configuration[0].allow_credentials
     error_message = "CORS needs exact origin and supported request/response headers without credentials or wildcard."
   }
 }
@@ -289,4 +289,42 @@ run "reject_unsafe_runtime_limit" {
   command = plan
   variables { runtime_limits = { MAX_OWNER_ITEMS = 9007199254740992 } }
   expect_failures = [var.runtime_limits]
+}
+
+run "restored_tables_reach_both_functions" {
+  command = plan
+  variables {
+    restored_tables   = { reminders = "synthetic-restore-reminders", owner_state = "synthetic-restore-owners", image_jobs = "synthetic-restore-jobs" }
+    reminders_table   = "synthetic-restore-reminders"
+    owner_state_table = "synthetic-restore-owners"
+    image_jobs_table  = "synthetic-restore-jobs"
+  }
+  assert {
+    condition     = alltrue([for f in [aws_lambda_function.api, aws_lambda_function.cleanup] : f.environment[0].variables.REMINDERS_TABLE == "synthetic-restore-reminders" && f.environment[0].variables.OWNER_STATE_TABLE == "synthetic-restore-owners" && f.environment[0].variables.IMAGE_JOBS_TABLE == "synthetic-restore-jobs"])
+    error_message = "Both functions must select the complete restored table set."
+  }
+}
+
+run "reject_restored_partial" {
+  command = plan
+  variables { restored_tables = { reminders = "restore-reminders" } }
+  expect_failures = [var.restored_tables]
+}
+
+run "reject_restored_alias_original" {
+  command = plan
+  variables { restored_tables = { reminders = "synthetic-reminder-production-owner-state", owner_state = "restore-owners", image_jobs = "restore-jobs" } }
+  expect_failures = [var.restored_tables]
+}
+
+run "reject_restored_duplicate" {
+  command = plan
+  variables { restored_tables = { reminders = "restore-same", owner_state = "restore-same", image_jobs = "restore-jobs" } }
+  expect_failures = [var.restored_tables]
+}
+
+run "reject_restored_wildcard" {
+  command = plan
+  variables { restored_tables = { reminders = "restore-*", owner_state = "restore-owners", image_jobs = "restore-jobs" } }
+  expect_failures = [var.restored_tables]
 }

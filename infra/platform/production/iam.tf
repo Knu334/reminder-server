@@ -8,8 +8,9 @@ locals {
   runtime_log_arns = { for key in ["api", "cleanup"] : key => "arn:aws:logs:${var.region}:${var.account_id}:log-group:/aws/lambda/${local.production}-${key}:*" }
 }
 resource "aws_iam_role_policy" "api" {
-  name = "${local.production}-api-runtime"
-  role = basename(var.api_role_arn)
+  depends_on = [data.aws_dynamodb_table.restored]
+  name       = "${local.production}-api-runtime"
+  role       = basename(var.api_role_arn)
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -26,8 +27,9 @@ resource "aws_iam_role_policy" "api" {
   })
 }
 resource "aws_iam_role_policy" "cleanup" {
-  name = "${local.production}-cleanup-runtime"
-  role = basename(var.cleanup_role_arn)
+  depends_on = [data.aws_dynamodb_table.restored]
+  name       = "${local.production}-cleanup-runtime"
+  role       = basename(var.cleanup_role_arn)
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [

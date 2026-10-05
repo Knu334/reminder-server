@@ -33,3 +33,8 @@ artifact = {
 # Optional runtime overrides: omit IPs/limits to preserve loadConfig defaults.
 # allowed_source_ips = ["192.0.2.1", "2001:db8::1"]
 # runtime_limits = { MAX_JSON_BYTES = 2097152 }
+
+# Normal selection is original tables. Exceptional reviewed PITR selection must
+# match across bootstrap/platform/application; see docs/operations/recovery.md.
+restored_tables = {}
+# restored_tables = { reminders = "reviewed-restored-reminders", owner_state = "reviewed-restored-owners", image_jobs = "reviewed-restored-jobs" }

@@ -4,13 +4,13 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {createHash} from "node:crypto";
 import {test} from "node:test";
-import {artifact,baseline,applicationPlan,platformPlan} from "../fixtures/synthetic/plans/fixtures";
+import {artifact,baseline,applicationPlan,platformPlan,runtimeData} from "../fixtures/synthetic/plans/fixtures";
 import type {ReleaseManifest} from "../../scripts/release/artifact";
 import type {WorkflowContext,CommandRunner,ReleaseServices,WorkflowConfig} from "../../scripts/release/workflow";
 async function driver(){let module:typeof import("../../scripts/release/workflow")|undefined;try{module=await import("../../scripts/release/workflow");}catch{ /* missing implementation is an assertion below */ }assert.ok(module,"protected release driver must exist");return module;}
 const digest=(s:string)=>createHash("sha256").update(s).digest("hex");
-const outputs={api_id:{value:baseline.apiId},api_base_url:{value:baseline.apiBaseUrl},api_alias_arn:{value:"arn:aws:lambda:us-east-1:123456789012:function:synthetic-api:production"},cleanup_alias_arn:{value:"arn:aws:lambda:us-east-1:123456789012:function:synthetic-cleanup:production"},api_version:{value:"2"},cleanup_version:{value:"3"},release_sha256_base64:{value:artifact.sha256Base64}};
-const platformOutputs=Object.fromEntries(Object.entries({reminders_table:"synthetic-production-reminders",owner_state_table:"synthetic-production-owner-state",image_jobs_table:"synthetic-production-image-jobs",images_bucket:"synthetic-123456789012-us-east-1-images",api_role_arn:"arn:aws:iam::123456789012:role/synthetic-production-api",cleanup_role_arn:"arn:aws:iam::123456789012:role/synthetic-production-cleanup",api_log_group:"/aws/lambda/synthetic-production-api",cleanup_log_group:"/aws/lambda/synthetic-production-cleanup",gateway_log_group:"/aws/apigateway/synthetic-production-api",cognito_issuer:baseline.cognitoIssuer,cognito_client_id:baseline.cognitoClientId,cognito_auth_base_url:baseline.cognitoAuthBaseUrl,unused_secret:"never copy"}).map(([k,v])=>[k,{value:v}]));
+const outputs={runtime_data:{value:runtimeData},api_id:{value:baseline.apiId},api_base_url:{value:baseline.apiBaseUrl},api_alias_arn:{value:"arn:aws:lambda:us-east-1:123456789012:function:synthetic-api:production"},cleanup_alias_arn:{value:"arn:aws:lambda:us-east-1:123456789012:function:synthetic-cleanup:production"},api_version:{value:"2"},cleanup_version:{value:"3"},release_sha256_base64:{value:artifact.sha256Base64}};
+const platformOutputs=Object.fromEntries(Object.entries({reminders_table:"synthetic-production-reminders",owner_state_table:"synthetic-production-owner-state",image_jobs_table:"synthetic-production-image-jobs",images_bucket:"synthetic-123456789012-us-east-1-images",api_role_arn:"arn:aws:iam::123456789012:role/synthetic-production-api",cleanup_role_arn:"arn:aws:iam::123456789012:role/synthetic-production-cleanup",api_log_group:"/aws/lambda/synthetic-production-api",cleanup_log_group:"/aws/lambda/synthetic-production-cleanup",gateway_log_group:"/aws/apigateway/synthetic-production-api",cognito_issuer:baseline.cognitoIssuer,cognito_client_id:baseline.cognitoClientId,cognito_auth_base_url:baseline.cognitoAuthBaseUrl,restored_tables:{},reminders_table_arn:"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-production-reminders",owner_state_table_arn:"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-production-owner-state",image_jobs_table_arn:"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-production-image-jobs",unused_secret:"never copy"}).map(([k,v])=>[k,{value:v}]));
 async function fixture(root:"platform"|"application"="application") {
   const d=await driver(),directory=await mkdtemp(join(tmpdir(),"workflow-synthetic-"));
   const context:WorkflowContext={directory,root,commit:artifact.commit,region:"us-east-1",apply:false,expectedReviewSha256:"",published:false,schedulerEnabled:false};
@@ -84,4 +84,28 @@ void test("existing_zip_preview_can_review_new_scheduler_settings_without_regist
 
 void test("apply_requires_the_external_plan_job_custody_digest",async()=>{
   const f=await fixture();try{const sha=await f.d.planRelease(f.context,f.config,f.source,f.services);const c={...f.context,apply:true,expectedReviewSha256:sha};delete c.expectedCustodySha256;await assert.rejects(f.d.applyRelease(c,f.services));assert.equal(f.commands.some(c=>c[2]==="apply"),false);}finally{await f.cleanup();}
+});
+
+void test("restored platform handoff survives complete preview/apply custody and rejects ARN disagreement",async()=>{
+ for(const badArn of [false,true]){
+  const f=await fixture();
+  try {
+   const selected={reminders:"recovered-reminders",owner_state:"recovered-owners",image_jobs:"recovered-jobs"};
+   const data={reminders_table:selected.reminders,owner_state_table:selected.owner_state,image_jobs_table:selected.image_jobs,images_bucket:"synthetic-123456789012-us-east-1-images",restored_tables:selected};
+   const platform={...platformOutputs,restored_tables:{value:selected}};
+   for(const [key,name] of Object.entries(selected)){
+    Object.assign(platform,{[`${key}_table`]:{value:name},[`${key}_table_arn`]:{value:`arn:aws:dynamodb:us-east-1:${badArn?"999999999999":"123456789012"}:table/${name}`}});
+   }
+   Object.assign(f.plan.variables,Object.fromEntries(Object.entries(data).map(([key,value])=>[key,{value}])));
+   Object.assign(f.plan.output_changes,{runtime_data:{after:data,after_unknown:false,actions:["no-op"]}});
+   for(const fn of f.plan.resource_changes.filter(r=>r.type==="aws_lambda_function"))Object.assign((fn.change.after.environment as Array<{variables:Record<string,string>}>)[0]!.variables,{REMINDERS_TABLE:selected.reminders,OWNER_STATE_TABLE:selected.owner_state,IMAGE_JOBS_TABLE:selected.image_jobs});
+   const applied={...outputs,runtime_data:{value:data}};
+   const services={...f.services,run:async(c:string,a:string[])=>a[1]==="output"?JSON.stringify(a[0]?.includes("platform")?platform:applied):f.services.run(c,a),verify:async(a:unknown,o:unknown)=>{assert.deepEqual(a,artifact);assert.deepEqual(o,applied);}};
+   if(badArn){await assert.rejects(f.d.planRelease(f.context,f.config,f.source,services));assert.equal(f.commands.some(c=>c[2]==="plan"),false);continue;}
+   const sha=await f.d.planRelease(f.context,f.config,f.source,services);
+   const input=JSON.parse(await readFile(join(f.directory,"inputs.json"),"utf8"));assert.deepEqual(input.restored_tables,selected);assert.equal(input.owner_state_table,"recovered-owners");
+   const handoff=JSON.parse(await readFile(join(f.directory,"platform-outputs.json"),"utf8"));assert.deepEqual(handoff.restored_tables,selected);
+   const result=await f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha},services);assert.equal(result.result,"verified");
+  } finally {await f.cleanup();}
+ }
 });

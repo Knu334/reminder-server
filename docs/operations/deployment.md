@@ -24,7 +24,7 @@ Configure the three environments `production-artifact`, `production-plan` and
 reviewers/prevent self-review on `production` when the account plan supports
 those protections. The exact AWS OIDC subjects must match these environment
 names; set bootstrap's explicit `oidc_subjects.artifact`, `.plan`, `.apply` to
-those three concrete subjects. Its example placeholders are not deployment
+exactly `repo:<repository>:environment:production-artifact`, `repo:<repository>:environment:production-plan`, and `repo:<repository>:environment:production`, respectively. Bootstrap rejects branch/tag subjects, extra roles and collapsed environments. Its example placeholders are not deployment
 values. GitHub environment/protection availability varies by repository plan;
 verify the available controls before enabling delivery. No workflow can
 configure or certify those controls for the operator.
@@ -199,3 +199,11 @@ Current docs used for implementation: [GitHub deployment controls](https://docs.
 [saved Terraform plans](https://developer.hashicorp.com/terraform/tutorials/cli/plan),
 [npm audit](https://docs.npmjs.com/cli/v11/commands/npm-audit) and
 [npm SBOM](https://docs.npmjs.com/cli/v11/commands/npm-sbom).
+
+## Restored selection and private failure diagnostics
+
+`restored_tables` defaults to `{}` in all roots. Exceptional same-account/region recovery uses one complete reviewed three-name map and the original image bucket, following [recovery cutover](recovery.md). Bootstrap alone changes runtime ceilings; platform verifies read-only restored identities/protections and retains original tables. Application handoff, saved plan, both Lambda environments and post-apply verification bind the selected set. Existing API/Cognito baseline and exact ZIP custody remain required.
+
+On command failure, ordinary logs contain only the phase, exit status and private diagnostic directory. Download the failed private run's `failure-diagnostics-<job>-<run_id>` artifact from its Actions artifacts panel within one day. CI private-repository infrastructure failures use `failure-diagnostics-infra-<run_id>`. Access is limited by private repository read permissions; it is not exclusive to environment reviewers. Keep those readers restricted. Files are restored/created with0700 directory and0600 file permissions locally; remove review downloads after use. No artifact is uploaded for public repositories.
+
+Local `infra:check` failures use `<RUNNER_TEMP or OS temp>/infra-diagnostics`; release commands use `release-diagnostics`. JSON files record phase, exitStatus, signal/errorCode and bounded diagnostics. Each stream retains at most128KiB, at most8 failure files survive, and files older than one day are pruned on subsequent failure. Remove local diagnostics within one day even if no further command runs. Successful output, command arguments and environment are never persisted; plan/show/output stdout is omitted. Common credential assignments are redacted, but diagnostics remain private and must not be pasted into ordinary logs. Failed workflow runs cannot pass the successful-preview provenance check, and diagnostics use a separate path/name from release custody.

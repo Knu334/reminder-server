@@ -1,9 +1,9 @@
-# AWS SDD再開状態（2026-10-05更新）
+# AWS SDD再開状態（2026-10-06更新）
 
-この文書は2026-10-03 R01直後の停止地点から更新した現行案内です。R01–R08、
-O01–O03、D01–D07の18task gateはcontroller独立レビュー済み。D08の文書・secret
-rules・最終ローカル検証を実装し、D08 task gateとwholebranch reviewはcontroller
-確認待ちです。R02から再開しないでください。
+承認済み全19 task gateはcontroller独立レビュー済みです。wholebranch reviewで
+I1/I2/I3とM1/M2が指摘され、単一の最終修正waveを実装中です。controllerの最終
+build/test/audit検証と、その後のscoped独立re-reviewは未完了です。過去のtaskを再実行
+する再開地点ではありません。
 
 現行の[実装結果](../../implementation-results.md)と[受け入れ記録](../../operations/acceptance.md)、
 feature/aws-sdd-implementation（/workspace/.worktrees/aws-sdd）の実ソースを参照します。
@@ -13,9 +13,8 @@ feature/aws-sdd-implementation（/workspace/.worktrees/aws-sdd）の実ソース
 
 現在はNode24.21.0/npm11.11.1、Python3.13.16、Terraform1.16.5、AWS provider6.67.0
 で検証できます。準備済みPATHは/tmp/aws-sdd-tools/node_modules/.bin:
-/tmp/aws-sdd-tools/binを先頭に置きます。runtime157/operations72、deliveryはD08追加前66。
-以前のoperations/delivery 0は未作成であり検証済みではありません。D07 auditは両方0件。
-D08のfresh counts/audit/ZIPは現行受け入れ記録へ反映します。
+/tmp/aws-sdd-tools/binを先頭に置きます。過去の303tests/ZIP digestは修正前の履歴です。
+現行runtimeに対するfresh count/hash/auditはcontrollerの実測後に受け入れ記録へ反映します。
 
 承認済みの全19タスクのローカル実装・test・doc/config/security/deps/tools・feature commit
 は継続して許可されています。実AWS/GHA/ZIP登録/seed/deploy/data/user/PITR/push/PR/merge
@@ -23,6 +22,7 @@ D08のfresh counts/audit/ZIPは現行受け入れ記録へ反映します。
 合成fixtureだけ使用し、.devcontainerを変更しません。保護ファイルを含むdiff/statは
 生成前にpath除外し、保護pathの確認はname/statusとfilesystem存在だけに制限します。
 
-既知Minor（TF failure diagnostics、dense conditions、synthetic log noise、ESLint warning、
-Terraform target warning）はfinal controller reviewでtriageし、D08でproduction修正へ
-拡張しません。D04 admin-only authとclassic Hosted UIのjoint live受け入れも未検証です。
+最終修正waveはOIDCの3環境subject、復旧table選択・公開手順、quota削減、405fallback、
+private失敗diagnosticsを扱います。dense conditions、synthetic log noise、ESLint保守、
+API-only seedのtarget warningは継続保守事項です。admin-only authとclassic Hosted UIの
+joint live受け入れは未検証です。

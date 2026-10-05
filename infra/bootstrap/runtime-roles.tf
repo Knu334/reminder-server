@@ -8,7 +8,7 @@ locals {
   runtime_function_arns = {
     for key in ["api", "cleanup"] : key => "arn:aws:lambda:${var.region}:${var.account_id}:function:${local.production}-${key}"
   }
-  runtime_table_arns   = { for key in ["reminders", "owner-state", "image-jobs"] : key => "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${local.production}-${key}" }
+  runtime_table_arns   = { for key in ["reminders", "owner-state", "image-jobs"] : key => "arn:aws:dynamodb:${var.region}:${var.account_id}:table/${lookup(var.restored_tables, replace(key, "-", "_"), "${local.production}-${key}")}" }
   runtime_image_bucket = "arn:aws:s3:::${var.name_prefix}-${var.account_id}-${var.region}-images"
   runtime_log_arns     = { for key in ["api", "cleanup"] : key => "arn:aws:logs:${var.region}:${var.account_id}:log-group:/aws/lambda/${local.production}-${key}:*" }
 
@@ -41,6 +41,16 @@ locals {
     scheduler = [
       { Action = ["lambda:InvokeFunction"], Resource = ["${local.runtime_function_arns.cleanup}:production"] }
     ]
+  }
+  # Group API Dynamo allows by table to avoid repeating long restored ARNs.
+  # The action/resource relation is identical; per-action explicit denials below
+  # continue to use the independent runtime_operations inventory.
+  runtime_allow_operations = {
+    for key, statements in local.runtime_operations : key => key == "api" ? concat([
+      { Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Query"], Resource = [local.runtime_table_arns.reminders] },
+      { Action = ["dynamodb:GetItem", "dynamodb:UpdateItem"], Resource = [local.runtime_table_arns["owner-state"]] },
+      { Action = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"], Resource = [local.runtime_table_arns["image-jobs"]] }
+    ], [for statement in statements : statement if !startswith(statement.Action[0], "dynamodb:")]) : statements
   }
   runtime_actions = { for key, statements in local.runtime_operations : key => distinct(flatten([for statement in statements : statement.Action])) }
   # Lambda adds this context to runtime SDK requests and automatic log delivery.
@@ -84,7 +94,7 @@ locals {
   ]
   runtime_ceiling_statements = {
     for key, statements in local.runtime_operations : key => concat(
-      [for statement in statements : merge(statement, { Effect = "Allow" }, key == "scheduler" ? {} : { Condition = merge(local.runtime_source_conditions[key], contains(statement.Action, "cloudwatch:PutMetricData") ? { StringEquals = { "cloudwatch:namespace" = "ReminderServer", "aws:RequestedRegion" = var.region } } : {}) })],
+      [for statement in local.runtime_allow_operations[key] : merge(statement, { Effect = "Allow" }, key == "scheduler" ? {} : { Condition = merge(local.runtime_source_conditions[key], contains(statement.Action, "cloudwatch:PutMetricData") ? { StringEquals = { "cloudwatch:namespace" = "ReminderServer", "aws:RequestedRegion" = var.region } } : {}) })],
       [{ Effect = "Deny", NotAction = local.runtime_actions[key], Resource = ["*"] }],
       # Explicit resource denials close session resource-policy escape paths.
       [for statement in statements : { Effect = "Deny", Action = statement.Action, NotResource = statement.Resource } if !contains(statement.Resource, "*")],

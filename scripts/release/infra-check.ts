@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { runPrivateCommand } from "./private-command";
 import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,10 +21,8 @@ const terraform: TerraformRunner = (args, options) => {
       return terraform([`-chdir=${probe}`, ...args.slice(1)]);
     } finally { rmSync(probe, { recursive: true, force: true }); }
   }
-  const result = spawnSync("terraform", args, {encoding:"utf8", maxBuffer:64 * 1024 * 1024});
-  if (result.error || result.status !== 0) throw new Error(`Terraform ${args.includes("schema") ? "schema" : args[1] ?? args[0]} failed`);
-  // Schema is consumed privately; state/plan/credentials are never printed.
-  return result.stdout;
+  const phase=args.includes("schema")?"schema":(args[0]?.startsWith("-chdir=")?args[1]:args[0])??"infra";
+  return runPrivateCommand("terraform",args,{directory:join(process.env.RUNNER_TEMP??tmpdir(),"infra-diagnostics"),phase,captureStdout:["init","validate","test","fmt"].includes(phase)});
 };
 
 /** Static validation only: no backend initialization, account calls, plan files or apply. */

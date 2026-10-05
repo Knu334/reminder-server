@@ -1,16 +1,20 @@
 # Acceptance record
 
-Updated 2026-10-05. This separates completed local synthetic verification from
-future production acceptance. D01–D07/R01–R08/O01–O03 passed their controller task
-gates. D08's local evidence below awaits its independent task review; final
-wholebranch review follows that gate and is not yet claimed complete.
+Updated 2026-10-06. This separates completed local synthetic verification from
+future production acceptance. All19 task gates are complete. The whole-branch
+review found five issues; the combined fix wave is underway. Full final local
+verification and one scoped independent re-review remain pending.
+
+The table below is **historical pre-fix D08 evidence**. The changed runtime has
+not yet received the controller's final build/test/audit pass, so neither the303
+count nor the old ZIP digest is current evidence. No inferred315 count is used.
 
 ## Local reproducible commands and artifact
 
 Use Node24.21.0/npm11.11.1/Python3.13.16/Terraform1.16.5/AWS provider6.67.0.
 Run the exact [README verification block](../../README.md), with build/package
 before npm test. `infra:check` performs backend-free validation/schema checks,
-56 mocked Terraform runs across bootstrap/platform/application, and fmt.
+mocked Terraform runs across bootstrap/platform/application, and fmt.
 It makes no AWS account call. Synthetic tests cover authentication/ownership,
 ETag conflict, storage/uncertain writes, cleanup/checkpoints, migration/recovery,
 immutable artifact registration, saved plan custody, aliases and workflow gates.
@@ -37,9 +41,9 @@ ZIP contains only dist/*.js, dist/*.js.map and THIRD_PARTY_NOTICES, loads both
 handlers on Node24 without repository dependencies, and is not an AWS release
 until immutable S3 version/checksum and both Lambda versions/CodeSha are proven.
 The same locally measured digest must not be labeled a registered artifact.
-Fresh CycloneDX1.5 SBOM:157 components,209,092 bytes, SHA-256
+Historical D08 CycloneDX1.5 SBOM:157 components,209,092 bytes, SHA-256
 `cab45f38cba89ced69c2aee6296cce3ab2d209fde91de509b8f19f9827a0e065`.
-Fresh npm ci succeeded (157 packages /158 audited), with the existing ESLint9.39
+Historical D08 npm ci succeeded (157 packages /158 audited), with the existing ESLint9.39
 unsupported/deprecated warning. Safe synthetic runtime log noise and the Terraform
 target warning remain known; output is not claimed warning-free.
 SBOM/audit details and fresh command logs are retained in ignored D08 task report;

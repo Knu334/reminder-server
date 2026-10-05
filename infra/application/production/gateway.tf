@@ -6,7 +6,7 @@ resource "aws_apigatewayv2_api" "production" {
     allow_origins     = [var.chrome_origin]
     allow_methods     = ["GET", "POST", "PATCH", "DELETE", "PUT", "OPTIONS"]
     allow_headers     = ["authorization", "content-type", "if-match"]
-    expose_headers    = ["ETag", "Location", "X-Request-Id", "Retry-After"]
+    expose_headers    = ["ETag", "Location", "X-Request-Id", "Retry-After", "Allow"]
     allow_credentials = false
   }
   lifecycle {
@@ -47,6 +47,12 @@ resource "aws_apigatewayv2_integration" "api" {
 }
 locals {
   route_scopes = {
+    "ANY /healthz"                         = null
+    "ANY /readyz"                          = null
+    "ANY /reminders"                       = null
+    "ANY /v2/reminders"                    = null
+    "ANY /v2/reminders/{id}"               = null
+    "ANY /v2/reminders/{id}/thumbnail-url" = null
     "GET /healthz"                         = null
     "GET /readyz"                          = null
     "POST /reminders"                      = null
@@ -68,7 +74,8 @@ resource "aws_apigatewayv2_route" "api" {
   authorizer_id        = each.value == null ? null : aws_apigatewayv2_authorizer.cognito.id
   authorization_scopes = each.value == null ? [] : [each.value]
 }
-# Explicit routes keep unauthenticated OPTIONS owned by Gateway's CORS engine.
+# Finite unauthenticated ANY routes classify unsupported methods only; explicit
+# CRUD routes retain JWT/scopes. Gateway configured CORS owns preflight OPTIONS.
 # Do not add a JWT $default route, which would catch OPTIONS.
 resource "aws_apigatewayv2_stage" "production" {
   api_id      = aws_apigatewayv2_api.production.id
