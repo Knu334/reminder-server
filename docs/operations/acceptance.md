@@ -4,7 +4,9 @@ Updated 2026-10-06. This separates completed local synthetic verification from
 future production acceptance. All19 task gates are complete. The whole-branch
 review found five issues; the combined fix wave is committed as
 `63c1512f75d8cdf687083d71412be522b504efe1`. Controller full final local verification
-passed; one scoped independent re-review remains pending.
+passed. The ONE scoped independent re-review is complete: all five findings addressed,
+no new Critical/Important. One Minor about downloaded diagnostic permissions is explicitly
+deferred; see the [final review and controller disposition](../implementation-final-review.md).
 
 The table below records the controller's actual results on that code commit.
 Its raw container timestamp is `2026-10-05T19:42:04.110074+00:00`; the document

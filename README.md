@@ -11,7 +11,10 @@ S3画像バケットで構成します。常設環境はproductionのみ。旧�
 最終ローカル検証はNode331/331、Python3/3、3root infra、type/lint/build/package、
 両audit全severity0で成功しました。修正waveのTerraform covering証拠は78mockです。
 記録timestampは`2026-10-05T19:42:04.110074+00:00`（文書更新2026-10-06）。
-scoped独立re-reviewは未完了です。ZIP/SBOMの実測値は上記受け入れ記録にあります。
+scoped独立re-reviewも完了し、5件すべての修正を確認しました。新たなCritical/Importantはありません。
+診断artifact取得後の権限に関する文書のMinor1件を後続保守へ残しています。
+[最終レビューと制限](docs/implementation-final-review.md)、[全52件の判断](docs/implementation-rulings.md)
+を参照してください。ZIP/SBOMの実測値は上記受け入れ記録にあります。
 
 ## ローカル検証
 

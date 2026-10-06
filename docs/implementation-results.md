@@ -4,7 +4,10 @@ Updated 2026-10-06. The approved 19-task scope is implemented locally on
 feature/aws-sdd-implementation. All19 controller task gates are complete. The
 whole-branch review identified I1/I2/I3 and M1/M2; their combined fix wave is committed
 as `63c1512f75d8cdf687083d71412be522b504efe1` and full final local verification passed.
-One scoped independent re-review remains pending.
+The ONE scoped independent re-review is complete: all five findings addressed, no new
+Critical/Important. N1 (downloaded diagnostic permissions) is a real Minor explicitly deferred;
+[final review](implementation-final-review.md) gives its disposition and required local handling.
+All52 [controller rulings](implementation-rulings.md) are retained.
 This document is local evidence, not production acceptance.
 The [historical audit](repository-audit-2026-10-02.md), design and original approval
 handoff have not been rewritten. The [resume handoff](superpowers/handoffs/2026-10-03-reminder-server-aws-sdd-resume.md)
@@ -16,7 +19,7 @@ O01–O03 deliver explicit dry-run/import/verify/publish and restored-only verif
 image preservation/owner remap. D01–D08 deliver reproducible standalone ZIP,
 immutable S3 registration proof, three Terraform roots, root-specific saved-plan
 custody, two-alias proof/status-only smoke, OIDC workflows and these instructions.
-Source/types and reviewed task reports are the actual interfaces; plans/audit
+Source/types and committed verification/review records are the actual interfaces; plans/audit
 capture earlier intent or historical defects.
 
 ## Local verification and evidence limits
@@ -109,14 +112,17 @@ not that a production deployment was performed. Explicit exclusions remain open.
 | B05 | Architecture replaced: delegate TLS to AWS HTTP API | application gateway.tf and preserved baseline guard; no Caddy/reverse-proxy/real TLS acceptance |
 | B06 | Local implemented: maintained explicit esbuild bundle/reproducible ZIP | [bundle](../scripts/build/bundle.ts), [package](../scripts/build/package.py), bundle/Python tests; live artifact registration still pending |
 
-## Pending controller review and production acceptance
+## Completed local review and remaining production acceptance
 
-The three ignored SDD ledgers retain exact task RED/GREEN commands/reports,
-producer/ruling history and independent task reviews. All19 task gates completed
-before the whole-branch review. The five findings were corrected in one wave;
-controller full verification passed on the committed code. The subsequent scoped
-independent re-review remains pending. Current measurements above supersede the
-historical D08 303-test/56-mock/ZIP evidence retained in earlier reports.
+All19 task gates completed before the whole-branch review. Its five findings were
+corrected in one wave; controller full verification passed on the committed code.
+The ONE scoped independent re-review confirmed all five addressed and no new
+Critical/Important. All52 rulings were collected before cleaning this execution's
+three ignored SDD scratch directories; the worktree, branch and artifacts remain.
+[Final review](implementation-final-review.md) preserves the independent verdict,
+N1's explicit deferral and diagnostic-download handling limits. The original
+runbook's automatic mode-restoration claim needs a follow-up correction.
+Current measurements above supersede historical D08 303-test/56-mock/ZIP evidence.
 Deferred maintenance remains dense conditions, synthetic test logs, ESLint9.39
 maintenance and the expected API-only seed target warning. No live acceptance is
 claimed. Follow [acceptance](operations/acceptance.md) for the
