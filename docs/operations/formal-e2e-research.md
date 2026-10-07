@@ -64,17 +64,17 @@ read-onlyで確認した。コピーのsourceの存在は稼働native binaryの�
 
 | サービス/必要API | 根拠 | 現時点の採否・不足確認 |
 | --- | --- | --- |
-| Cognito pool/client/resource server/admin合成user/Hosted UI/token/JWKS | old実PKCE成功、refresh patch/報告 | SDK基盤に採用。negative PKCE/disable/discoveryは新実行必要 |
-| API Gateway v2 API/authorizer/integration/16route/stage | old CRUD成功、method優先patch | SDK採用。CORS・aliases・TFのGet/List/Tag/waiterに不足がないか未確認 |
-| Lambda ZIP/create/publish/alias/GetFunction/invoke/permission/concurrency/event-invoke-config | old API ZIP/Docker実行、null-body両handler報告 | SDK採用。TF providerの付随APIとimmutable qualifier結合は未確認 |
-| DDB 3table/GSI/Get/Query/TransactWrite/Describe/TTL/PITR設定 | old CRUD・rt real-adapter/fake | 基本SDK採用。実競合・GSI・TFの設定read-backは未確認。PITR復元は対象外 |
-| S3 buckets/version/checksum/CORS/Put/Get/HEAD/marker/ListVersions | old readiness、旧L画像/cleanup | SDK採用。署名URLDNS/CORS/TF付随read APIは未確認 |
+| Cognito pool/client/resource server/admin合成user/Hosted UI/token/JWKS | old実PKCE成功、refresh patch/報告 | Terraform管理の認証基盤を採用。SDKは合成user準備。negative PKCE/disable/discoveryは新実行必要 |
+| API Gateway v2 API/authorizer/integration/16route/stage | old CRUD成功、method優先patch | Terraform管理で必須。CORS・aliases・TFのGet/List/Tag/waiterに不足がないか未確認 |
+| Lambda ZIP/create/publish/alias/GetFunction/invoke/permission/concurrency/event-invoke-config | old API ZIP/Docker実行、null-body両handler報告 | Terraform管理で必須。TF providerの付随APIとimmutable qualifier結合は未確認 |
+| DDB 3table/GSI/Get/Query/TransactWrite/Describe/TTL/PITR設定 | old CRUD・rt real-adapter/fake | 基本Terraform管理で必須。実競合・GSI・TFの設定read-backは未確認。PITR復元は対象外 |
+| S3 buckets/version/checksum/CORS/Put/Get/HEAD/marker/ListVersions | old readiness、旧L画像/cleanup | Terraform管理で必須。署名URLDNS/CORS/TF付随read APIは未確認 |
 | S3署名強制 | PreSignedUrlFilter.java:期限を検査し、signature検証はenforceAuth/validateSignatures/登録credentialに依存。EmulatorConfig両flag既定false | 有効URL200だけで証明不可。改ざん/期限の実controlを必須調査にする。host設定変更は提案だけ |
-| IAM role/policy/PassRole/trust | old role/policy作成成功 | local作成採用。production IAM等価を主張しない。TF Tag/List/Get API不足は未確認 |
-| Logs/CloudWatch | 既存cleanup mockと過去L metric、health running | owned log/metric経路を調査。9alarm運用/通知はA |
+| IAM role/policy/PassRole/trust | old role/policy作成成功 | Terraform管理でlocal作成。production IAM等価を主張しない。TF Tag/List/Get API不足は未確認 |
+| Logs/CloudWatch | 既存cleanup mockと過去L metric、health running | 3log group設定とowned結果ログ実配信を必須採用。互換性未確認。9alarm運用/通知はA |
 | Scheduler schedule/group/Get/Update/Delete/at/cron/target | ScheduleDispatcherはenabled/invocationEnabledを確認、at/rate/cron処理。ScheduleInvokerはLambdaをInvocationType.Eventでinvoke | 設定read-backとowned one-time probeを採用。実起動未確認。SourceArn/IAM/async retry同等性は証明しない |
 | STS | 移行/復旧はexplicit account照合に使用 | 明示endpointのlocal GetCallerIdentityを確認してから運用adapter結合。実credential chainは使用しない |
-| Terraform1.16.5 / provider6.67.0 | 既存infra mockとlock。Context7でcustom endpoints設定を確認 | 独立E2E rootのsubset試行を計画へ採用。未対応APIは現在確定していない。全apply成功/不可能を断定しない |
+| Terraform1.16.5 / provider6.67.0 | 既存infra mockとlock。Context7でcustom endpoints設定を確認 | 独立E2E rootの構築・設定read-backを必須基盤として計画へ採用。未対応APIは現在確定していない。全apply成功/不可能を断定しない |
 | OIDC/S3 remote backend/GHA/Cognito domain本番/TLS/PITR/実Chrome | 本番受け入れ資料に未実施 | 今回は対象外。production rootをローカル用へ改変しない |
 
 承認後は必要APIを「成功実測 / sourceのみ / 未対応action / 未実施」の四区分で更新し、
@@ -109,3 +109,31 @@ WWW-Authenticateのraw値は秘密を含まない保証がないためpublic証�
 変更したのは新文書と/tmpの指定npmのみ。正式E2E、Floci合成resource、TF apply/destroy、
 製品修正、FW/devcontainer編集、AWS/GHA/push/PR/mergeは未実施。
 新SDD台帳は設計/計画承認後に新計画専用workspaceへ作り、過去計画の台帳を流用しない。
+
+## 入力から最終結果を見る方針への改訂
+
+ユーザーの指摘を受け、SDK構築と補足Terraform probeという初稿から、Terraform構築→設定確認→実HTTP→
+DDB/S3/CloudWatch確認→destroyへ改訂した。必要APIが不足する場合、TF/Logsをunsupported、
+依存ケースをnot-runとして記録し、正式E2E未完了とする。独立U/Iは継続できる。
+独立したローカルrootの成功は、本番3root全体のapply成功の証拠にはならない。
+
+公開ソースを確認すると、APIは安全なHTTPエラー応答を作るが結果ログを出していない。
+shared loggingと清掃Lambdaには構造化ログがある。Gateway access logはrequestId/routeKey/status/responseLengthで、
+アプリケーションerror codeは含まない。API結果ログ追加を改訂設計の承認対象に含めた。
+画像清掃はDeleteObjectにVersionIdを渡さずmarkerを作る。storage.tfはS3旧version60日、DDB PITR35日、
+logs.tfは3log group30日。これらを維持する案とし、構築設定の読み戻しへ追加した。
+
+## 費用・ログの公式資料確認
+
+ユーザー回答は東京リージョン、月100リクエスト未満。計算と採否は[費用・ログ方針](formal-e2e-cost-and-logging.md)。
+Context7は各質問library→docsの2commandをsandbox外で実行し、quotaエラーはなかった。
+
+- `Amazon S3` をresolveし `/websites/aws_amazon_s3` で非現行versionの課金・期限を照会。取得結果は概説のみで、AWS公式ユーザーガイドで補った。
+- `Amazon CloudWatch` をresolveし `/websites/aws_amazon_amazoncloudwatch` でログ取り込み・保存・retention・最小限の出力を照会。[公式billing説明](https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/cloudwatch_billing.md)を確認した。
+- [S3 versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html)、[lifecycle期限](https://docs.aws.amazon.com/AmazonS3/latest/userguide/lifecycle-expire-general-considerations.html)、[CloudWatch料金表](https://aws.amazon.com/cloudwatch/pricing/)を確認した。
+- [2026-02-04 AWS公式記事](https://aws.amazon.com/jp/blogs/news/cloudwatch-get-telemetry-data-logs/)の東京S3 USD0.025/GB・月、CloudWatch保存USD0.033/GB・月を参考単価として使用した。
+
+AWS公開Price Listの東京S3/CloudWatch JSON取得はnetworkのNo route to hostで失敗し、地域別の現在単価は取得できなかった。
+東京の取り込み価格を確定値として掲載せず、USD1/GBという比較仮定で追加費用の規模を示した。FW変更は行っていない。
+月100回、追加1KiB/回なら約100KiB。本文・画像を除いた結果ログの追加を勧める。
+S3の60日保持は小額の保存費と35日復旧を比較したうえで維持する案。短縮・永久削除は計画に含めない。

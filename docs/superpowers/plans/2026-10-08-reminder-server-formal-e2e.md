@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 要件別に必要なローカルE2Eを再現し、実HTTP・永続状態・副作用・失敗・未実施を証拠で区別する。
+**Goal:** Terraformで意図どおりに構築されたことを確認し、入力に対するHTTP・DynamoDB・S3・CloudWatchの結果を検証する。失敗と未実施を証拠で区別する。
 
-**Architecture:** 接続先を明示したローカルtransportと、この実行が所有するfixtureを使い、実Hosted UI PKCE→JWT Gateway→現行ZIP Docker Lambda→DDB/S3を実行する。清掃/合成運用は同じartifactまたは既存の実adapterを使う。決定的に再現する故障とIaC互換性は、独立した層で記録する。
+**Architecture:** 接続先を明示したローカルtransportと、この実行が所有するfixtureを使い、実Hosted UI PKCE→JWT Gateway→現行ZIP Docker Lambda→DDB/S3を実行する。清掃/合成運用は同じartifactまたは既存の実adapterを使う。先にE2E専用Terraformで構築して設定を読み戻し、その基盤で入力に対するDDB/S3/CloudWatchの最終結果を確認する。決定的な故障は独立した結合試験で記録する。
 
 **Tech Stack:** Node24.21.0/npm11.11.1、Python3.13.16、TypeScript/CommonJS/tsx/node:test/node:assert、既存固定AWS SDK v3。Terraform1.16.5/AWS provider6.67.0（独立local rootのみ）。
 
@@ -16,7 +16,7 @@
 ## Global Constraints
 
 - 既存worktree `/workspace/.worktrees/aws-sdd` / `feature/aws-sdd-implementation` を使用し、reset/checkout/historyの改変はしない。旧19タスクを再dispatchしない。
-- 未コミットのnull-body修正、過去の未追跡成果物、root FWのユーザー変更を保持する。新E2Eの明示したpathだけをstageする。
+- 未コミットのnull-body修正、過去の未追跡成果物、root FWのユーザー変更を保持する。新E2Eと承認対象のAPI結果ログの明示したpathだけをstageする。
 - 実AWS/GHA/push/PR/mergeは禁止。実データ/私有.env/AWS credentials/private mapping/state/plan/画像backupの読み取り・hash計算・表示・コピーも禁止する。
 - Node24.21.0/npm11.11.1/Python3.13.16、TFを使う場合1.16.5/provider6.67.0。全npm/npx/Python/準備commandは `PATH=/tmp/aws-sdd-tools/node_modules/.bin:/tmp/aws-sdd-tools/bin:$PATH` を付ける。
 - 接続先は `http://floci:4566` とそのdiscoveryで確認した同一RFC1918 IPv4/owned S3 hostだけ。SDK/providerは明示region `ap-northeast-1`、local dummyまたはFloci発行の合成role credential、maxAttempts=1、profile/metadata/default endpoint fallbackなし。
@@ -27,17 +27,17 @@
 - 現行sourceからbuild/packageした同じZIPをAPI/cleanupへ登録し、SHA-256/S3 pinned version/checksum/CodeSha256/aliasを照合する。dirty非秘密入力digestを保存する。
 - 元画像を変換しない。入力はBASE64/data URLとし、DBにはmetadataだけを保存する。直接upload APIを追加しない。
 - random owned prefixとrun manifestを用意し、finallyで全リソースを回収して不在を確認する。cleanup errors/leaksは別々に集計する。例外/子プロセス/TF出力に秘密・raw body・全envを出さない。
-- TFは新E2E root/local backend/run固有の合成inputs/stateだけを使う。本番root/backend/state/plan/private inputsは参照しない。所有するリソースだけをdestroyする。
-- 必須のE/L/Iに未実施が残れば完了としない。TF/Scheduler/署名強制は必ず調査し、非対応は別に記載する。実AWS/IAM/TLS/PITR/Chrome/性能との同等性を推定しない。
-- 製品バグ/Floci非互換は独立した失敗ケースと原因を記録する。製品動作の修正は、内容を提示して別途承認されるまでE2E実装へ含めない。host rebuild/接続先追加が必要なら、成果物と再開手順を保存して停止する。
+- TFは新E2E root/local backend/run固有の合成inputs/stateだけを使う。公開された本番resource定義との比較は行う。本番rootのapplyやbackend/state/plan/private inputsの参照はしない。所有するリソースだけをdestroyする。
+- Terraform apply・設定確認・CloudWatch結果ログ配信は必須。TF/Logs非対応では依存E/Lをnot-runとし、正式E2Eは未完了。独立U/Iは継続する。Scheduler起動/署名強制の互換性調査結果は別に記載する。必須E/L/Iに未実施が残れば完了としない。実AWS/IAM/TLS/PITR/Chrome/性能との同等性を推定しない。
+- 製品バグ/Floci非互換は独立した失敗ケースと原因を記録する。API結果ログの追加は本計画の承認対象。それ以外の製品動作の修正は、内容を提示して別途承認されるまでE2E実装へ含めない。host rebuild/接続先追加が必要なら、成果物と再開手順を保存して停止する。
 
 ## Review Focus
 
-1. fixture初期化や一ケースの失敗で後続ケースが消え、全体がGREENに見える問題を確認する。inventoryを先に作り、not-runを残し、独立したケースを継続する（Task1/2/10）。
-2. auth負例でsignature/期限/scopeの複数条件が同時に不正となり、偶然検証が通って拒否理由を誤認する問題を確認する。正常な対照と一条件の負例、実際に署名された期限切れtoken、層別のtoken_use検証を使う（Task3）。
-3. S3 hostname/redirect/SDK endpointのfallbackやassert diffから秘密が漏れる問題を確認する。DNS pin、未知hostの拒否、全出力のcanary検査で確認する（Task1/2/6）。
-4. image transaction失敗やcleanupの結果不明時に参照中のbytesを削除し、counterやcursorを重複させたり飛ばしたりする問題を確認する。実際の保存状態を照合し、before/after faultを使う（Task5/6/7/8）。
-5. 未コミット変更のあるソース、古いZIP、partial apply、cleanup失敗を成功と扱う問題を確認する。snapshot hash/両CodeSha、stateの所有関係、終了コードの集約を確認する（Task2/9/10）。
+1. fixture初期化や一ケースの失敗で後続ケースが消え、全体がGREENに見える問題を確認する。inventoryを先に作り、not-runを残し、独立したケースを継続する（Task1/3/4/12）。
+2. auth負例でsignature/期限/scopeの複数条件が同時に不正となり、偶然検証が通って拒否理由を誤認する問題を確認する。正常な対照と一条件の負例、実際に署名された期限切れtoken、層別のtoken_use検証を使う（Task5）。
+3. S3 hostname/redirect/SDK endpointのfallbackやassert diffから秘密が漏れる問題を確認する。DNS pin、未知hostの拒否、全出力のcanary検査で確認する（Task1/4/8）。
+4. image transaction失敗やcleanupの結果不明時に参照中のbytesを削除し、counterやcursorを重複させたり飛ばしたりする問題を確認する。実際の保存状態を照合し、before/after faultを使う（Task7/8/9/10）。
+5. 未コミット変更のあるソース、古いZIP、partial apply、cleanup失敗を成功と扱う問題を確認する。snapshot hash/両CodeSha、stateの所有関係、終了コードの集約を確認する（Task3/4/12）。
 
 ## 承認後のSDD準備と実行手順
 
@@ -49,7 +49,7 @@ Task completionを読み、同じTaskを再dispatchしない。過去台帳は�
 preflightでは全Taskの内部整合性と、共有file/interfaceの全組み合わせを表にする。矛盾はspecに照らして判断し、rulingへ記録する。
 ここに示す依存関係の要約だけで、この確認を代替しない。
 
-順序はTask1→2→3→4→5→6→7→8→9→10。共有fixture実装者の並列は禁止。
+順序はTask1→2→3→4→5→6→7→8→9→10→11→12。共有fixture実装者の並列は禁止。
 各TaskでBASE記録→task-brief file→新規実装者→RED/最小/GREEN/self-review/explicit commit→
 review-package→独立task reviewer（spec/quality両判定）の順に進める。実装者によるsubagentの起動は禁止する。
 修正round1〜3は元実装者、4〜5は上位modelの新実装者が担当する。controllerは実装を直さない。
@@ -62,7 +62,7 @@ dispatch時のallowlistを確認しmodel/effort/fork_turns:noneを明示する�
 
 ## 共通interface
 
-Task1で型を、Task2で実fixtureを定義する。
+Task1で型、Task3でTerraform構築、Task4でその出力に接続するfixtureを定義する。
 
 `tests/e2e/floci/support/types.ts` に以下の契約を置く。秘密の値はメモリ内だけで扱う。
 
@@ -78,17 +78,21 @@ Task1で型を、Task2で実fixtureを定義する。
 - `FixtureOptions = { suite: string; publication: boolean; limits?: Partial<Config['limits']> }`。Configは現行`src/config.ts`をtype import。
 - `OwnedManifest` はrunId、resource kind/name/IDとcreated/removed状態だけを含む。secret/token/user-dataは含めない。
 - `E2EFixture` はtarget/prefix/config/artifact/manifest、local clients、auth、`request(path: string, options?: { token?: string; method?: string; headers?: Record<string,string>; body?: string }): Promise<HttpResult>`、`setPublication(published: boolean): Promise<void>`、`dispose(): Promise<CleanupSummary>`。
-- `LocalClients` は明示設定のDynamoDBDocumentClient/S3Client/LambdaClient/CloudWatchClient/STSClient。
+- `LocalClients` は明示設定のDynamoDBDocumentClient/S3Client/LambdaClient/CloudWatchClient/CloudWatchLogsClient/STSClient。
 - `AuthSession = { accessToken: string; idToken?: string; refreshToken: string; claims: { iss: string; sub: string; client_id: string; iat: number; exp: number; scope: string } }`。
-- `FixtureAuth` は `login(owner: 'a'|'b', scopes: string[], client: 'primary'|'sibling'|'foreign'): Promise<AuthSession>` と `refresh(session: AuthSession): Promise<AuthSession>`。負例用の低水準exchange/refresh/revoke/disableはTask3のauth.tsで型を追記する。
+- `ProvisionedStack` はtarget/artifact/manifest、非秘密resource bindings、run専用state directory、`destroy(): Promise<CleanupSummary>`。state/outputsは公開証拠へdumpしない。
+- `LogExpectation = { service: 'api'|'gateway'|'cleanup'; requestId: string; since: number; status: number; operation?: string; code?: string }`、`SafeLogMatch`は許可項目とevent件数だけ。
+- `FixtureAuth` は `login(owner: 'a'|'b', scopes: string[], client: 'primary'|'sibling'|'foreign'): Promise<AuthSession>` と `refresh(session: AuthSession): Promise<AuthSession>`。負例用の低水準exchange/refresh/revoke/disableはTask5のauth.tsで型を追記する。
 
 ## ファイル責務・依存
 
-Task1がtransport/evidence/preflight/run registry、Task2がartifact/fixture/auth/storage/cleanupの共通基盤を所有する。
-auth supportを拡張するのはTask3だけとする。Task4〜6は各suiteファイルと合成fixtureだけを作る。
-Task7はcleanup suiteとfault support、Task8はoperations supportとfault suite、Task9はTF/compatibility、
-Task10はdocsと最終集約・inventory回帰を担当する。各Taskでは新しいcase registry entryだけを追加し、既存entryは維持する。
-`package.json` はTask1の入口追加、Task9のTF入口追加、Task10の文書照合だけ。lock依存変更は原則不要。
+Task1がtransport/evidence/preflight/run registry、Task2がAPI結果ログ、Task3がartifact/Terraform driverを所有する。
+Task4がfixture/auth/storage/cleanup/logsと設定読み戻しを実装する。auth拡張はTask5、API/保存/画像suiteはTask6〜8、
+cleanupはTask9、合成運用はTask10、Scheduler起動とサービス別ログ確認はTask11、全体集約はTask12。
+各Taskは新しいcase entryを追加し、既存entryを維持する。共有ファイルの変更は逐次実装する。
+`package.json` はTask1の入口、Task3のTerraform入口、Task4のLogs読取devDependency、Task12の入口照合。
+Task4で既存SDK固定versionに合わせた `@aws-sdk/client-cloudwatch-logs` の公開versionを確認し、必要なlock更新だけを行う。
+本番runtime依存へは追加しない。
 
 ### Task 1: ローカルtransport・ケース一覧・安全な検証記録・実行入口
 
@@ -102,23 +106,47 @@ Task10はdocsと最終集約・inventory回帰を担当する。各Taskでは新
 - [ ] Step 4 GREEN: harnessとpreflight、typecheck/lintを実行し、case assertionと安全な結果だけが出ることを確認する。現在のhealth/version/IPが不適合ならpreflightを失敗させ、fallbackしない。
 - [ ] Step 5 commit/review: 上記create fileを個別列挙 + package.jsonだけstage、`test: add isolated formal E2E harness`。SAFE-01〜03、Review Focus1/3を独立レビュー。
 
-### Task 2: 現行artifactと再利用可能なowned Floci fixture
+### Task 2: API Lambdaの成功・失敗を1件の安全な結果ログで記録する
 
-**Files:** Create `scripts/e2e/prepare-artifact.ts`, `tests/e2e/floci/support/{artifact,fixture,auth,storage,cleanup}.ts`, `tests/e2e/floci/fixture.test.ts`; Modify `support/cases.ts`, `tests/integration/formal-e2e/harness.test.ts`。
+**Files:** Modify `src/api.ts`（必要な場合だけ `src/shared/logging.ts`）; Create `tests/runtime/api-logging.test.ts`。
 
-**Interfaces:** `prepareArtifact(runDirectory: string): Promise<ArtifactSnapshot>`、`createFixture(options: FixtureOptions, artifact: ArtifactSnapshot, evidence: Evidence): Promise<E2EFixture>`、`readOwnerState(fixture: E2EFixture, ownerId: string): Promise<{ itemCount: number; imageBytes: number }>`、`readReminder(fixture: E2EFixture, ownerId: string, id: string): Promise<StoredReminder|null>`。DTO/typesは既存sourceを使う。fixture assertionsの期待データは独立して用意する。
+**Interfaces:** 既存のhandler応答とSafeLogEvent、`withApiResultLogging(delegate:ApiHandler):ApiHandler`。productionの初期化を含む外側のhandlerを一度だけ包む。Iでは同じwrapperにcreateApiHandlerを渡す。Lambda contextのrequest IDを受け取り、ログ分類は固定operation/codeに限定する。
 
-- [ ] Step 1 RED: `fresh_zip_matches_both_pinned_functions`、`stale_manifest_and_tampered_zip_rejected_before_register`、`fixture_setup_failure_disposes_every_created_resource`、`hosted_pkce_health_publication_smoke` を作る。両CodeSha/S3 checksum/versionが一致し、aliasが選択したpublished versionを指すことを確認する。ready503→200、health200、未認証v2で401となることも確認する。各作成段階で疑似的に失敗させ、残存リソースが0となることをharnessでassertする。
-- [ ] Step 2 RED実行: offline harnessを先に実行し、環境preflight後にfixture.testを実行する。exportの欠落または整合性検証によるFAILを記録する。
-- [ ] Step 3 最小実装: 毎runでbuild→package→verify:zip、一つの0700 snapshotを作り、非秘密input path allowlistは `src/**/*.ts`, `scripts/build/{bundle,notices}.ts`, `scripts/build/package.py`, `package.json`, `package-lock.json`, `tsconfig.json`。symlink/outside pathを拒否しpath+bytesでinputDigest。build前後でinputDigest一致を要求し、途中のsource変更を拒否する。秘密pathは探索対象外。ZIPを別versioned owned bucketに登録、2handler/version/alias、3table/GSI、画像bucket、role/log/pool/client/scope/16route/CORS。fixture API LambdaはGatewayだけ、cleanup invokeは専用role。resource success後即manifest、reverse cleanupを用意し各ID不在確認。標準fixtureはproduction defaults、quota/rate試験だけ明示override。
-- [ ] Step 4 GREEN: build/package検証、fixtureの実smoke、setup途中で失敗するharness、typecheck/lintを実行する。secret/ZIP raw dataを出力せず、cleanup errors/leaksがすべて0であることを確認する。OPS-05とSAFE-02の結果を記録する。
-- [ ] Step 5 commit/review: 明示create/modifyのみ、`test: provision owned Floci fixtures from current ZIP`。Review Focus3/5とauth経路・IAM分離・artifact provenanceをレビュー。
+- [ ] Step 1 RED: POST201、PATCH/DELETE200、入力拒否、依存先503、初期化503、health、cold/warm invocationで各1件をassertする。requestId/status/error codeと応答の一致、各ID最大128文字・不正ID省略、512bytes以内、本文/token/画像/例外canaryの不在を確認する。loggerが失敗してもHTTP応答が変わらないケースを作る。
+- [ ] Step 2 RED実行: prefix付きでapi-logging単独試験を実行する。現行APIが結果ログを出さないことによる失敗を記録し、既存null-body修正は保持する。
+- [ ] Step 3 最小実装: 既存logging helperを再利用し、通常・早期return・catch・初期化失敗を覆う最外側境界にwrapperを置く。内側のhandlerと二重に記録しない。安全なID、固定operation/status/code、durationだけをJSON出力する。APIからPutLogEventsを呼ばず、HTTP契約を変えない。import時のconfig/client/I/O初期化禁止を維持する。
+- [ ] Step 4 GREEN: api-logging、関連API/runtime回帰、typecheck/lintを実行する。JSON本体512bytes契約と秘密canary検査を確認する。stdoutのJSONをCloudWatch配信の証拠とは数えない。
+- [ ] Step 5 commit/review: 上記変更だけを個別stage、`feat: record safe API invocation outcomes`。OBS-01/04、cold/warmの一回性、応答維持、secret不在を独立レビュー。
 
-### Task 3: 認証正常系・独立負例・rotation
+### Task 3: 現行artifactと必須のTerraform構築・destroy基盤
+
+**Files:** Create `scripts/e2e/{prepare-artifact,terraform}.ts`, `tests/e2e/floci/support/artifact.ts`, `tests/e2e/floci/terraform.test.ts`, `tests/e2e/floci/infra/{versions,variables,main,outputs}.tf`, `tests/e2e/floci/infra/.terraform.lock.hcl`, `tests/integration/formal-e2e/terraform-driver.test.ts`; Modify `support/cases.ts`, `package.json`, `docs/operations/formal-e2e-research.md`。
+
+**Interfaces:** `prepareArtifact(runDirectory: string): Promise<ArtifactSnapshot>`、`provisionStack(target:LocalTarget, options:FixtureOptions, artifact:ArtifactSnapshot, evidence:Evidence):Promise<ProvisionedStack>`。Task4のfixtureには依存しない。driverはrun固有の0700 directory内だけにstate/plan/合成inputsを置く。
+
+- [ ] Step 1 RED: TF-01/02、OPS-05のdriver負例を作る。default endpoint/foreign stateではspawn0、tampered/stale ZIPは登録前拒否、partial applyでもowned destroy試行、出力canary不在、unsupported時に依存E/Lがnot-runとなることをassertする。
+- [ ] Step 2 RED実行: offline driver/artifact試験を実行する。その後、固定TF/provider version/schema/endpoint/APIを調査する。Context7はlibrary→docs、sandbox外、各質問最大3command。索引mainだけで6.67.0固有schemaの適合を断定しない。
+- [ ] Step 3 最小実装: build→package→verify:zipで一つのsnapshotを作る。input allowlistは `src/**/*.ts`, `scripts/build/{bundle,notices}.ts`, `scripts/build/package.py`, `package.json`, `package-lock.json`, `tsconfig.json`。path+bytesのdigestがbuild前後で一致することを要求し、symlink/outside pathを拒否する。local backend/pinned provider、dummy keys、metadata/profile閉鎖、全使用serviceの明示endpointを使う。bootstrap apply→owned ZIP bucketへSDK upload→discovery→runtime applyの順に進め、認証・16route・両Lambda/alias・3table/GSI・画像bucket・IAM・3log group・daily Schedulerを構築する。途中段階やSDK構築を正式E2E基盤成功と数えない。最終stackをTask4へ渡す。
+- [ ] Step 4 GREEN/互換性判定: offline試験、type/lint/fmt/validateとローカルapply/destroyを実行する。API不足はfailedActionと独立probeで示す。必要APIが非対応ならunsupportedと依存not-runを記録し、正式E2Eは未完了。fixtureの寿命/local HTTP以外の本番設定差分を隠さない。bucket内容を回収後、同じroot/stateでdestroyし、owned不在確認・cleanup/leaks0を要求する。`test:e2e:terraform=tsx scripts/e2e/run.ts --layer terraform` は構築診断用で、通常E/L入口もこの構築を必ず通す。
+- [ ] Step 5 commit/review: 明示pathのみ、`test: establish Terraform provisioned E2E foundation`。Review Focus5、ZIP生成元、state所有関係、default AWS送信防止、非対応時の未完了判定をレビュー。
+
+### Task 4: 構築設定の読み戻し・合成fixture・保存状態とログの照合
+
+**Files:** Create `tests/e2e/floci/support/{fixture,auth,storage,cleanup,logs}.ts`, `tests/e2e/floci/fixture.test.ts`, `tests/integration/formal-e2e/log-observer.test.ts`; Modify `support/cases.ts`, `tests/integration/formal-e2e/harness.test.ts`, `package.json`, `package-lock.json`。
+
+**Interfaces:** `createFixture(options:FixtureOptions, stack:ProvisionedStack, evidence:Evidence):Promise<E2EFixture>`、`readOwnerState(fixture:E2EFixture, ownerId:string):Promise<{itemCount:number; imageBytes:number}>`、`readReminder(fixture:E2EFixture, ownerId:string, id:string):Promise<StoredReminder|null>`、`expectLog(fixture:E2EFixture, expected:LogExpectation):Promise<SafeLogMatch>`。DTO/typesは既存sourceを使い、期待データは独立して用意する。
+
+- [ ] Step 1 RED: TF-03/OBS-02〜04、両CodeSha/S3 version/checksum/alias一致、ready503→200、health200、未認証v2の401を作る。設定差異・ログ欠落・別request ID・別log groupで失敗する負例、secret canaryとpoll期限、初期化失敗で全owned資源を回収するharnessを作る。
+- [ ] Step 2 RED実行: offline harness/log-observerを先に実行し、Task3の構築後にfixture試験を行う。構築失敗は依存not-runとして残し、REDの実装不足と区別する。
+- [ ] Step 3 最小実装: Terraform出力にlocal clientsを接続し、SDKでは合成user/データの準備だけを行う。3table/key/GSI/TTL/PITR35日、S3 versioning/暗号化/公開防止/旧version60日/CORS、Cognito/16route/JWT/alias/CORS、両Lambda runtime/handler/timeout/concurrency/ZIP、3log group30日、daily Schedulerを読み戻して公開定義と比較する。規定値と縮小quota/rate fixtureをそれぞれ照合する。owned Logs APIを開始時刻/request IDで短くpollし、60秒で打ち切る。rawログはメモリ内だけで照合し、公開結果は許可項目のみ。console captureや手動ログ投入をEの配信成功にしない。disposeはSDK合成データ・全bucket version/marker回収→stack.destroy→owned不在確認の順とする。
+- [ ] Step 4 GREEN: 実fixture smoke、ログ配信・Gateway拒否、offline負例、type/lintを確認する。CloudWatch Logs devDependencyは既存SDK固定versionに合わせ、runtime ZIPへ混入させない。必要設定または実ログ配信が非対応なら正式E2E未完了と記録する。
+- [ ] Step 5 commit/review: 明示pathのみ、`test: verify deployed settings storage and log delivery`。TF-03、OBS-02〜04、Review Focus1/3/5、秘密不在と本番設定差分をレビュー。
+
+### Task 5: 認証正常系・独立負例・rotation
 
 **Files:** Create `tests/e2e/floci/auth.test.ts`, `tests/integration/formal-e2e/auth-claims.test.ts`; Modify `support/auth.ts`, `support/cases.ts`。
 
-**Interfaces:** Task2 FixtureAuth。追加 `exchangeCode(fields: Record<string,string>): Promise<{ status:number; error?:string; session?:AuthSession }>`、`requestRefresh(token:string, client:'primary'|'sibling'): Promise<{ status:number; error?:string; session?:AuthSession }>`、`revoke(session:AuthSession):Promise<void>`、`disable(owner:'a'|'b'):Promise<void>`、`verifySession(session:AuthSession):void`。valueやerror_descriptionをpublic証拠へコピーしない。
+**Interfaces:** Task4 FixtureAuth。追加 `exchangeCode(fields: Record<string,string>): Promise<{ status:number; error?:string; session?:AuthSession }>`、`requestRefresh(token:string, client:'primary'|'sibling'): Promise<{ status:number; error?:string; session?:AuthSession }>`、`revoke(session:AuthSession):Promise<void>`、`disable(owner:'a'|'b'):Promise<void>`、`verifySession(session:AuthSession):void`。valueやerror_descriptionをpublic証拠へコピーしない。
 
 - [ ] Step 1 RED: AUTH-01〜12をcasesへ展開する。一条件だけが不正な各負例の前後で、有効tokenによる200とRATE/storage不変を確認する。signatureだけの改変→401、same-pool sibling401、read-only POST403/write-only GET403、ID403を確認する。実際に署名されたtokenでexp前200/exp後401/refresh後200を確認する。PKCE wrong/missing verifier、callback mismatch、code reuse、S256以外を別codeで試す。Iには、既存requireOwnerを実際に呼び出してtoken_use/issuerを単独で検証する401ケースを作る。
 - [ ] Step 2 RED実行: `PATH=… npx tsx --test tests/integration/formal-e2e/auth-claims.test.ts` と auth単独runner。負例準備自体の障害はnot-runで、REDの対象を新harness不足に限定する。
@@ -126,23 +154,23 @@ Task10はdocsと最終集約・inventory回帰を担当する。各Taskでは新
 - [ ] Step 4 GREEN: `test:e2e:floci -- --suite auth`、auth I、type/lint。case inventoryとpass/fail/not-run/unsupported、cleanup0を確認。FlociがPKCE負例を通すなら独立失敗記録、認証緩和しない。
 - [ ] Step 5 commit/review: 明示path、`test: verify formal PKCE JWT and refresh contracts`。Review Focus2とscope/token_use/issuer独立性をレビュー。
 
-### Task 4: API契約・入力境界・ページング
+### Task 6: API契約・入力境界・ページング
 
 **Files:** Create `tests/e2e/floci/api.test.ts`, `tests/e2e/floci/support/input-fixtures.ts`; Modify `support/cases.ts`。
 
-**Interfaces:** Task2 request/readReminderと`makeInput(overrides: Record<string,unknown>): Record<string,unknown>`、`makeJsonBodyBytes(bytes: number): string`。inputは合成のURL/title/date/booleansを使い、任意のownerId入力は禁止する。makeJsonBodyBytesはvalid JSONの余白で正確なUTF-8長を作る。
+**Interfaces:** Task4 request/readReminderと`makeInput(overrides: Record<string,unknown>): Record<string,unknown>`、`makeJsonBodyBytes(bytes: number): string`。inputは合成のURL/title/date/booleansを使い、任意のownerId入力は禁止する。makeJsonBodyBytesはvalid JSONの余白で正確なUTF-8長を作る。
 
 - [ ] Step 1 RED: API-01〜13、API-14の認証/入力gate順をparameter IDsへ展開。旧POST/PUT410、known6paths405/Allow、unknown404、DTO/header全field、owner全操作404、CORS/OPTIONS、media400/415、fields422、ID/codepoint128±1/URL4096±1/title1024±1、日時offset/閏日/invalid、JSON2097152±1。list51metadata・limit1/20/50/0/51、tombstone先頭empty page→cursor、BへA cursorと不正422をassert。
 - [ ] Step 2 RED実行: api選択runner。不足case/harnessの失敗を記録。fixture初期化に失敗した時は全caseがnot-runになることもassert。
-- [ ] Step 3 最小実装: suiteごとにfixtureを用意し、各caseはowner/item prefixで独立させる。入力拒否時にsnapshot storage/job/S3が変わらず、RATEは認証済みなら増えることを確認する。51個の初期seedは実APIを使い、rateの分境界の影響を避ける実行順を定める。encoded slashはURLを改変せず、Flociへの実pathで評価する。CORSはHTTP headersで確認し、実拡張ブラウザは未実施とする。負例が失敗した後も独立したcasesを実行する。
+- [ ] Step 3 最小実装: suiteごとにfixtureを用意し、各caseはowner/item prefixで独立させる。正常・入力拒否の結果ログはTask4のobserverで照合する。入力拒否時にsnapshot storage/job/S3が変わらず、RATEは認証済みなら増えることを確認する。51個の初期seedは実APIを使い、rateの分境界の影響を避ける実行順を定める。encoded slashはURLを改変せず、Flociへの実pathで評価する。CORSはHTTP headersで確認し、実拡張ブラウザは未実施とする。負例が失敗した後も独立したcasesを実行する。
 - [ ] Step 4 GREEN: api runner、既存api/contracts/boundaries/reads-rate covering、type/lint。旧APIやANYを触るproduct/Floci変更はしない。
 - [ ] Step 5 commit/review: 明示path、`test: cover API contracts boundaries and pagination`。Gateway edge errorとLambda独自codeの区別をレビュー。
 
-### Task 5: 強いETag・同時競合・quota/rateと保存状態の整合性
+### Task 7: 強いETag・同時競合・quota/rateと保存状態の整合性
 
 **Files:** Create `tests/e2e/floci/storage.test.ts`, `tests/integration/formal-e2e/concurrency.test.ts`; Modify `support/cases.ts`。
 
-**Interfaces:** FixtureOptions.limits、Task2 readOwnerState/readReminder、Task4 input-fixtures。共通fixture本体の変更は不要。
+**Interfaces:** FixtureOptions.limits、Task4 readOwnerState/readReminder、Task6 input-fixtures。共通fixture本体の変更は不要。
 
 - [ ] Step 1 RED: STORE-01〜06とAPI-14を独立したcasesにする。生HTTP body SHAによるexact rN-hexと、弱い/*/list/欠落/同revision別hash/逐次staleの拒否を確認する。barrierからPATCH/PATCH・DELETE/DELETE・PATCH/DELETEの2requestを送り、一方が200で他方が拒否され、revision/countersの変更が一回だけとなることを確認する。PATCH同士は412とし、DELETEが先に成功した後のcurrent readでは404を許容する。この分岐は、双方が旧activeを読むIのcontrolで分離する。create競合で一方が201、他方が409となること、different itemの保持、exact tombstone、再送で二重処理がないことを確認する。quota fixtureはitem2/image24、12byte PNG、rate3/two sessionsとし、4件目429とRetry-After一致を確認する。
 - [ ] Step 2 RED実行: storage runnerとconcurrency I。real service成功を得るためretryを追加しない。開始window余裕をpreconditionとして固定し、窓を跨いだ結果はfail。
@@ -150,7 +178,7 @@ Task10はdocsと最終集約・inventory回帰を担当する。各Taskでは新
 - [ ] Step 4 GREEN: storage runner、concurrency I、writes/reads-rate/lowered-quotas covering、type/lint。I fakeの並行とE client同時送信を別layer表示する。
 - [ ] Step 5 commit/review: 明示path、`test: assert concurrent revisions quotas and tombstones`。Review Focus4をレビュー。
 
-### Task 6: 元画像・実URL取得・差し替え・孤児
+### Task 8: 元画像・実URL取得・差し替え・孤児
 
 **Files:** Create `tests/e2e/floci/images.test.ts`, `tests/e2e/floci/support/image-fixtures.ts`, `tests/fixtures/synthetic/formal-e2e/image-fixtures.md`; Modify `support/cases.ts`, `support/transport.ts`, `tests/integration/formal-e2e/harness.test.ts`。
 
@@ -162,7 +190,7 @@ Task10はdocsと最終集約・inventory回帰を担当する。各Taskでは新
 - [ ] Step 4 GREEN: images runner、既存images/contracts covering、harness/type/lint。valid取得だけをSigV4強制成功としない。画像fixtureのfake PNGを実画像decoder検証済みとしない（製品はsignature検査契約）。
 - [ ] Step 5 commit/review: 明示path、`test: preserve original images through authenticated API`。Review Focus3/4、secret URL診断、孤児job条件をレビュー。
 
-### Task 7: 実清掃の状態遷移・合成日時・中断と上限
+### Task 9: 実清掃の状態遷移・合成日時・中断と上限
 
 **Files:** Create `tests/e2e/floci/cleanup.test.ts`, `tests/e2e/floci/support/cleanup-fixtures.ts`, `tests/integration/formal-e2e/{fault-transport,cleanup-resume.test}.ts`; Modify `support/cases.ts`。
 
@@ -170,11 +198,11 @@ Task10はdocsと最終集約・inventory回帰を担当する。各Taskでは新
 
 - [ ] Step 1 RED: CLEAN-01〜09。unpublished0、activelease保持/expireddone、24h両側/retired起点、committed/current画像保護、version/checksum mismatch保持、marker後version読取、same shard51/page50、二invoke収束、event injection拒否。Iはpage途中abort→cursor開始を維持、GSI stale/current read condition、claim/upload race、marker after-response-lost、checkpoint/metric失敗を単独注入。
 - [ ] Step 2 RED実行: cleanup-resume Iとcleanup runnerを実行する。HTTP200が返ってもFunctionErrorを見落とさない。seedjobがowned合成tableで正しいschema/GSI属性を持つことを、準備時にassertする。
-- [ ] Step 3 最小実装: Task6のreal APIから作ったcommitted/retired/orphanを再現するfixtureと、独立した合成jobを用意する。時刻の両側に5秒以上の余裕を取り、正確な等号はclockを制御したIで検証する。12partitionの末尾reset/51件は、GSI反映を期限付きpollで確認した後にinvokeする。fault adapterは送信前の故障と実送信後の応答遮断を区別し、traceへ固定codeだけを記録する。規定10000/5000/600/60/4の既存limit試験を保持し、小さなinventoryで実adapterの中断・再開を検証するケースを追加する。製品overrideは作らない。
-- [ ] Step 4 GREEN: cleanup runner、cleanup-resume I、既存jobs/cleanup/images covering、type/lint。削除actorがVersionId永久削除を送信しないことはI trace、実version保持はLで確認。
+- [ ] Step 3 最小実装: Task8のreal APIから作ったcommitted/retired/orphanを再現するfixtureと、独立した合成jobを用意する。時刻の両側に5秒以上の余裕を取り、正確な等号はclockを制御したIで検証する。12partitionの末尾reset/51件は、GSI反映を期限付きpollで確認した後にinvokeする。fault adapterは送信前の故障と実送信後の応答遮断を区別し、traceへ固定codeだけを記録する。規定10000/5000/600/60/4の既存limit試験を保持し、小さなinventoryで実adapterの中断・再開を検証するケースを追加する。製品overrideは作らない。
+- [ ] Step 4 GREEN: cleanup runner、cleanup-resume I、既存jobs/cleanup/images covering、type/lint。削除actorがVersionId永久削除を送信しないことはI trace、実version保持はLで確認。実清掃成功ログの処理件数を保存状態と照合する。
 - [ ] Step 5 commit/review: 明示path、`test: verify durable cleanup leases checkpoints and protections`。Review Focus4、fake索引遅延とreal GSI観測の区別をレビュー。
 
-### Task 8: 合成移行・復旧・依存先故障と実adapterの結合
+### Task 10: 合成移行・復旧・依存先故障と実adapterの結合
 
 **Files:** Create `tests/e2e/floci/operations.test.ts`, `tests/e2e/floci/support/operation-fixtures.ts`, `tests/integration/formal-e2e/faults.test.ts`; Modify `support/cases.ts`。
 
@@ -186,20 +214,19 @@ Task10はdocsと最終集約・inventory回帰を担当する。各Taskでは新
 - [ ] Step 4 GREEN: operations runner、faults I、既存legacy/migration/recovery covering、type/lint。画像保全後の強いread/pinned bytes、default verify前後のrestoredも不変を確認。
 - [ ] Step 5 commit/review: 明示path、`test: integrate synthetic migration recovery and uncertain outcomes`。Review Focus4とsource不変/未公開gate/再実行安全性をレビュー。
 
-### Task 9: 独立Terraform apply/destroyとScheduler互換性の採否
+### Task 11: Scheduler起動経路とサービスごとの結果ログ
 
-**Files:** Create `tests/e2e/floci/{terraform,scheduler}.test.ts`, `scripts/e2e/terraform.ts`, `tests/e2e/floci/infra/{versions,variables,main,outputs}.tf`, `tests/e2e/floci/infra/.terraform.lock.hcl`, `tests/integration/formal-e2e/terraform-driver.test.ts`; Modify `support/cases.ts`, `package.json`, `docs/operations/formal-e2e-research.md`。
+**Files:** Create `tests/e2e/floci/{scheduler,logging}.test.ts`; Modify `support/cases.ts`, `docs/operations/formal-e2e-research.md`。
 
-**Interfaces:** `TerraformProbeResult={status:'pass'|'fail'|'unsupported'; failedAction?:string; cleanup:CleanupSummary; assertions:string[]}`、`runTerraformProbe(fixture:E2EFixture,directory:string):Promise<TerraformProbeResult>`。state directoryはrun manifestに紐付け、他runや対象外のpathは禁止する。共通API assertionsはfixture.requestと互換性のあるbindingをTF outputsから生成し、値を公開出力へdumpしない。
+**Interfaces:** Task4 expectLog、fixture.request、Task9 invokeCleanup。one-time scheduleはowned manifestに登録し、日次設定を変更しない。
 
-- [ ] Step 1 RED: TF-01/02、OPS-06、`unknown_endpoint_and_foreign_state_rejected_before_spawn`、`partial_apply_always_attempts_owned_destroy`、`provider_output_canary_not_logged` を作る。分離したprocess fakeで、default endpoint/foreign stateではspawnが0であることを確認する。partial失敗でも回収を試み、errorsを別集計し、unsupportedをpassに数えないことを確認する。実Schedulerではdaily configを読み戻し、owned atからcleanup checkpoint/jobが変化することを確認する。
-- [ ] Step 2 RED実行: offline terraform-driver。その後version/schema/endpoint/APIのread-only preflight。Context7のlibrary→docsをsandbox外、各質問最大3command、quotaは明示。6.67.0は実schemaを確認、索引mainだけでversion適合を確定しない。
-- [ ] Step 3 最小実装: 新rootはlocal backend、pinned lock、dummy keys、metadata/profile閉鎖、全使用service endpoints明示。ZIP uploadとsynthetic Cognito userはSDK fixture、TFはowned3table/bucket/role/両ZIP functions/version/alias/Gateway/16routes/CORSを必要APIの段階ごとに追加。providerの付随read/Tag/waiterが不足ならfailedActionと最小probeを保存してunsupported。production tfを編集しない。supportedならTF outputs上でhealth/ready/auth拒否/CRUD/画像bytes/CodeSha共通assert→finally destroy→owned不在確認。`test:e2e:terraform=tsx scripts/e2e/run.ts --layer terraform`。
-- [ ] Step 4 Scheduler/互換性記録: 別owned groupでdaily03UTC/OFF/DISABLED/retry2/3600/cleanup alias設定を読み戻す。独立at+input{}は90秒以内の期限付きpollで確認する。確認後はschedule停止/削除→invocation終了確認→リソース回収の順に進める。runtimeが起動しない場合はunsupported/failの理由を区別し、日次運転/IAM/asyncの同等性を主張しない。hostの再設定が必要なら、差分・再開手順を保存して停止する。
-- [ ] Step 5 GREEN/採否: offlinedriver/type/lint/fmt/validateと、対応している場合のapply testを実行する。SDK daily/one-time probeの実測をservice API表へ記載する。unsupportedのsuite選択でexit1となるのは期待された互換性判定であり、GREENとは書かない。cleanup/leaksは常に0が必要。
-- [ ] Step 6 commit/review: 明示pathと研究記録のみ、`test: probe isolated Terraform and Scheduler integration`。Review Focus5、local state ownership・AWS送信防止・非対応の証拠をレビュー。
+- [ ] Step 1 RED: OPS-06/OBS-02/03を展開する。POST201/PATCH200/DELETE200、入力拒否のHTTP status/code、Gateway401/403、cleanup200と件数を、それぞれ実log groupでrequest IDに紐づける。Gateway拒否後にAPIの結果ログがないことも、観測期限まで確認する。
+- [ ] Step 2 RED実行: logging suiteとScheduler probeを実行する。ログ内容の不一致と未配信を区別し、既存mock/consoleを配送証拠にしない。
+- [ ] Step 3 最小実装: daily03UTC/OFF/DISABLED/retry2/age3600/cleanup aliasの読み戻しを確認後、独立したowned one-time at/input{}を作る。90秒以内の短いpollでjob/checkpoint実変化と清掃ログを照合する。delivery受付だけで処理成功としない。通常のAPI結果ログはevent IDで再取得重複を除外して1件を確認する。Gatewayログにアプリケーションcodeを要求しない。
+- [ ] Step 4 GREEN/採否: logging必須群を実行し、Scheduler起動は実測・不足API・非対応理由をサービス表へ記録する。schedule停止/削除→処理終了→回収の順を守る。日次運転、実AWS IAM/async再試行は未検証とし、host再設定が必要なら具体的差分と再開手順を保存して停止する。
+- [ ] Step 5 commit/review: 明示pathのみ、`test: observe invocation outcomes and Scheduler delivery`。通常ログ/認証拒否/清掃の出力元、実配信とI captureの区別、処理完了と受付の区別をレビュー。
 
-### Task 10: 日本語手順・全case照合・新たな実行結果
+### Task 12: 日本語手順・全case照合・新たな実行結果
 
 **Files:** Create `docs/operations/formal-e2e-{README,results,limitations}.md`, `tests/integration/formal-e2e/coverage.test.ts`; Modify `README.md`, `docs/operations/formal-e2e-coverage.md`, `support/cases.ts`, `scripts/e2e/run.ts`（最終inventory統合のみ）。
 
@@ -208,15 +235,16 @@ Task10はdocsと最終集約・inventory回帰を担当する。各Taskでは新
 - [ ] Step 1 RED: `every_required_case_has_result_and_source`、`partial_selection_cannot_claim_full_completion`、`unsupported_not_run_cleanup_are_separate` を作る。fixtureの最上位での失敗/timeoutでは、全caseがnot-runとして残りexit1となることをassertする。結果から消えたcaseや出力されたbody canaryが0であり、U/AだけのrowをE必須にしないこともassertする。
 - [ ] Step 2 RED実行: coverage/harness/terraform-driverのoffline試験を実行する。ケースplaceholderを未実施のままpassにしない。
 - [ ] Step 3 最小完成: registry/matrix/READMEの実存在入口を一致させ、依存準備・fixture生成・suite選択・失敗診断・owned recovery・後片付け・CI runner準備を日本語で記載。現在のpatched imageのhost準備は既存手順へリンク、GHA/workflow変更なし。結果reportはfresh UTC、HEAD/dirty入力digest/tool/ZIP/API-cleanup hashes、layer別counts/required not-run/unsupported、cleanup/leaks、review/rulings、既知制限を保持。
-- [ ] Step 4 fresh検証: prefix付き `npm ci`（必要時）、typecheck/lint→build/package/verify:zip→`npm test`→test:packaging→必要infra:check→audit:runtime/audit:all→test:integration:e2e→test:e2e:floci→test:e2e:terraform。ZIPはE2E prepareでも現行buildから作る。Floci必須groupsを全実行、TF非対応はfail/unsupportedとして別結果。順序/実際のcommand/exit/count/安全なwarningsを記録。今回のuser baseline diffはstageしていない新E2E pathだけを検査。
+- [ ] Step 4 fresh検証: prefix付き `npm ci`（必要時）、typecheck/lint→build/package/verify:zip→`npm test`→test:packaging→必要infra:check→audit:runtime/audit:all→test:integration:e2e→test:e2e:floci→test:e2e:terraform。ZIPはE2E prepareでも現行buildから作る。Floci必須groupsを全実行、TF/Logs非対応はfail/unsupportedと依存not-runを記録し、正式E2Eは未完了。順序/実際のcommand/exit/count/安全なwarningsを記録。今回のuser baseline diffはstageしていない新E2E pathだけを検査。
 - [ ] Step 5 commit/task review: 日本語docs/registry/runner限定path、`docs: record reproducible formal E2E evidence and limits`。未実施/cleanupが漏れず、既存337件等をfresh結果なしで流用していないことをレビュー。
-- [ ] Step 6 controller final review: Task1〜10の範囲のreview packageと、deferred/parked/rulings全件を、最も能力の高いreviewerへ渡す。修正waveの上限を守る。必須E/L/Iが未完了なら未完了と報告し、製品修正の承認を求める前に独立した失敗の証拠を提示する。
+- [ ] Step 6 controller final review: Task1〜12の範囲のreview packageと、deferred/parked/rulings全件を、最も能力の高いreviewerへ渡す。修正waveの上限を守る。必須TF/Logs/E/L/Iが未完了なら未完了と報告し、製品修正の承認を求める前に独立した失敗の証拠を提示する。
 
 ## 実行計画の自己レビューと承認対象
 
-AUTH→Task3、API→Task4/5、STORE→Task5/8、IMG→Task6/8、CLEAN→Task7、
-OPS→Task2/8/9、TF→Task9、SAFE→Task1/2/10。Review Focusの全項目に失敗ケースを割り当てた。
-共通型・署名と既存operationsのexportsを照合した。製品ソースの変更やprivate入力の参照は含めず、
-現行ソースからのartifactと新たな検証記録の準備・cleanup・非対応判定を計画に含めた。
-承認待ちの対象は、新E2Eの設計/対応表とこの計画である。実行方式はSDDを維持する。
-旧taskは再開せず、新計画専用台帳を承認後に作成する。
+TF構築→設定読み戻し→入力→HTTP/DDB/S3/CloudWatch確認→destroyの順序と、未実施を残す集計を確認した。
+AUTH→Task5、API→Task6/7、STORE→Task7/10、IMG→Task8/10、CLEAN→Task9、
+OPS→Task3/10/11、TF→Task3/4、OBS→Task2/4/11、SAFE→Task1/3/4/12。
+既存null-body修正を保持し、API結果ログ以外の製品動作変更やprivate入力の参照は含めない。
+承認待ちの対象は設計/対応表、本計画、API結果ログの追加範囲。S3旧version60日保持とログ保持30日は維持する案。
+費用判断は[費用・ログ方針](../../operations/formal-e2e-cost-and-logging.md)に記載する。
+SDD方式は選択済み。旧taskは再開せず、新計画専用台帳を承認後に作成する。

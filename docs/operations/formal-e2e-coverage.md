@@ -18,6 +18,14 @@ HTTP拒否の不変はSTORAGE/reminder/job/S3を指す。認証済み入力拒�
 パラメーター列を持つ行は、実装時に各入力を `<ID>/<固定label>` としてinventoryへ展開する。
 正常系の前提失敗で負例を検証済みにせず、not-runを残す。
 
+## 実行順と最終結果の見方
+
+TF-01/03でTerraform構築と設定を確認してから、E/Lケースを実行する。
+正常系はHTTP応答に加え、DDBレコード・S3元bytes/job・OBSのCloudWatch結果ログを確認する。
+削除直後はtombstone/retired、保護期間後の清掃はmarker/done、旧versionは60日保持という段階を分ける。
+異常系もHTTP・ログと保存状態を照合する。認証拒否はGateway、APIに到達した拒否はAPI Lambdaのログを使う。
+具体的な入力→出力の表は[設計案の冒頭](../superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)にある。
+
 ## 認証
 
 | 要件ID / 出典 | ケース | HTTP・保存状態・副作用の期待 | 分類 | 既存test | 追加E2E / 必須度 | 層 | Floci対応可否 | 未検証理由・境界 |
@@ -103,19 +111,24 @@ HTTP拒否の不変はSTORAGE/reminder/job/S3を指す。認証済み入力拒�
 | OPS-03 / S§8, R | 合成復旧3table、read-only検証、非current画像保全・rerun | source不変、target未公開、新unique current key元bytes、revision/created/counter維持 | 正常/遷移 | op recovery | 実local adapters / 必須 | L | 未確認 | PITR実行/APIや本番切替ではない |
 | OPS-04 / S§8, R | recreated sub、explicit remap、target collision/bad counter | 自動対応なし、明示mapのみ、bad stateでreadyToSwitch=false、Cognito復元false | 異常 | op recovery | local単独ケース / 必須 | L+I | 見込 | Cognito password/sessionや35日PITRはA |
 | OPS-05 / S§10, D / F19,B06 | current build/package→S3 ZIP→API/cleanup | local digest=manifest=S3 pinned checksum=両Lambda CodeSha256/alias選択version | 正常/異常 | dl bundle/artifact/release、旧L報告 | stale/tampered control + actual register / 必須 | L+E | 一部過去成功 | ZIP古い固定hash禁止、dirty build入力digestを併記 |
-| OPS-06 / S§6, J | daily configとowned one-time起動 | cron03UTC/OFF/DISABLED/retry2/age3600/cleanup alias read-back。at→job変化 | 正常/遷移 | application mock | 起動実probe / 互換性調査必須 | L+A | sourceにEvent invokeあり、live未確認 | source記載は稼働binary証明ではない。日次運転/配信保証はA |
-| TF-01 / S§9〜11, handoff§8 | E2E local root apply→current ZIP/Gateway/save→destroy | provider1.16.5/6.67.0、同route/scope/schema/hash、動作assert、owned資源のみ回収 | 正常/互換性 | dl infra-check/plan-guardはmock | capabilityを確認して試行 / 調査必須 | L | 未確認、必要APIごと判定 | production3root/OIDC/remote state full applyは対象外 |
+| OPS-06 / S§6, J | daily configとowned one-time起動 | cron03UTC/OFF/DISABLED/retry2/age3600/cleanup alias read-back。at→job変化 | 正常/遷移 | application mock | 設定はTF-03必須、起動実probeは互換性調査必須 | L+A | sourceにEvent invokeあり、live未確認 | source記載は稼働binary証明ではない。日次運転/配信保証はA |
+| TF-01 / S§9〜11, handoff§8 | E2E local root apply→current ZIP/Gateway/save→destroy | Terraform1.16.5/provider6.67.0、同route/scope/schema/hash、動作assert、owned資源のみ回収 | 正常/互換性 | dl infra-check/plan-guardはmock | 構築成功・destroy / 必須 | L | 未確認、必要APIごと判定 | production3root/OIDC/remote state full applyは対象外 |
 | TF-02 / handoff安全境界 | apply途中失敗、destroy失敗、endpoint漏れ | default AWS送信前拒否、ローカルstateだけ、partial owned inventory回収、cleanup別報告 | 障害/異常 | old transport、dl private-command | isolated driver負例 / 必須 | I+L | driverを新規実装 | 本番state/plan/inputsは存在確認以上の対象にしない |
+| TF-03 / S§4〜6,9〜13 | apply後の構築設定read-back、差異control | 3table/GSI/TTL/PITR35日、S3 versioning/暗号化/公開防止/CORS/旧version60日、認証/16route/alias/同一ZIP、Lambda実行設定、3log group30日、daily Scheduler一致 | 正常/異常 | dl infra mock | 実read-back gate / 必須 | L | 必要API未確認 | 不足設定を省略してpassにしない。本番との差分を列挙 |
+| OBS-01 / S§13 / F10 | APIの成功/拒否/503/初期化失敗、cold/warm | 1 invocation 1件、operation/status/code/IDs/duration、安全なJSON512bytes以内、HTTP契約不変 | 正常/異常 | shared loggingのみ、API結果ログなし | 製品結果ログ追加・handler境界capture / 必須 | U+I | APIコード追加後に確認 | captureはCloudWatch配信証拠ではない |
+| OBS-02 / S§13 | CRUD成功、入力拒否、Gateway認証拒否 | APIとGatewayのrequestId/status照合、API error codeはHTTPと一致。認証拒否はGatewayのみ | 正常/異常 | Gateway access log設定のみ | owned Logs実読取、60秒poll / 必須 | E | 配信未確認 | raw console/手動PutLogEventsで代用しない |
+| OBS-03 / S§6,13, J | 清掃Lambda成功/不完全結果、件数照合 | Lambda request ID、cleanup/status/処理件数と実保存状態一致 | 正常/障害 | cleanup構造化ログ既存 | 実成功配信 + 故障時境界capture / 必須 | L+I | 配信未確認 | 決定的故障Iのcaptureを実配信扱いにしない |
+| OBS-04 / S§13,15 | logs reader/page/poll、canary、長いID | 別run/別serviceは不一致、poll有期限、秘密と生ログの保存なし、追加1KiB/呼び出しの予算 | 異常/費用 | rt logging安全化 | logger/observer負例 / 必須 | U+I | 実装可能 | 1KiBは費用仮定、AWS請求量の上限保証ではない |
 | SAFE-01 / S§13, handoff | 未認証外host/redirect/DNS drift、ambient AWS設定 | local pinned IPv4以外拒否、profile/metadata/default endpoint参照0、Host保持 | 異常 | old local-transport2件 | transport/harness単独回帰 / 必須 | I | 実装可能 | 権限/FW変更をテスト成功条件にしない |
 | SAFE-02 / S§13, handoff | fixture各段階失敗、cleanup一action失敗/割込 | 後続dependent not-run、独立case継続、全cleanup試行、errors/leaks別、exit非0 | 障害 | old transport/CRUD finally | resource manifestと結果registry / 必須 | I+E+L | 実装可能 | SIGKILLはfinally保証不能、owned手動回収手順 |
-| SAFE-03 / S§13 / F10 | assertion diff/SDK例外/子process/TF診断にcanary | token/code/cookie/password/URL/credential/body/envを保存/表示しない、固定assert名とcounts | 異常 | rt never_logs_secrets、dl private-command | harness failure canary / 必須 | I | 実装可能 | production CloudWatch全ログ/reader/IAMはA |
+| SAFE-03 / S§13 / F10 | assertion diff/SDK例外/子process/TF診断にcanary | token/code/cookie/password/URL/credential/body/envを保存/表示しない、固定assert名とcounts | 異常 | rt never_logs_secrets、dl private-command | harness failure canary / 必須 | I | 実装可能 | owned Logs読取・配信はOBS必須。本番ログ全体/IAMはA |
 | SAFE-04 / S§15 / F18,F23〜24 | IAM/TLS/timeout/freeze/concurrency、AWS alarm/GHA/PITR/Chrome | 実受け入れ未実施を維持。mock/Flociから同等性/性能を推定しない | 対象外 | dl infra/workflows、op recovery | 既存回帰と未検証記録 | U+A | 本番同等性不可 | 別承認、拡張ソースなし、GHA起動禁止 |
 
 ## 受け入れ集計規則
 
 行数やold CRUD内チェック数を新case件数に足さない。実装registryの各caseに上記ID・層・必須度・
 source・期待assertを持たせ、日本語結果の全case inventoryと一対一で照合する。
-Uだけの成功でE/L未実施を埋めない。互換性調査必須のIMG-09/OPS-06/TF-01は、
+Uだけの成功でE/L未実施を埋めない。互換性調査必須のIMG-09/OPS-06起動経路は、
 実際の採否・失敗probe・制限が記録されれば調査完了、未確認のまま除外しない。
-E/L必須をFlociが阻害する場合は正式E2E未完了とする。
+TF-01/03・OBS実配信・E/L必須をFlociが阻害する場合は正式E2E未完了とする。Terraform構築失敗時は依存E/Lをnot-runとし、SDK構築を成功の代替にしない。
 rate、容量、cleanup上限を小fixtureで実施した値と、規定値のU/I証拠を別々に記録する。
