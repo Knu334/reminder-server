@@ -1,0 +1,1455 @@
+diff --git a/docs/services/cognito.md b/docs/services/cognito.md
+index adebb5e..9c80646 100644
+--- a/docs/services/cognito.md
++++ b/docs/services/cognito.md
+@@ -235,7 +235,7 @@ which a pre token generation trigger leaves when it suppresses every scope.
+ | AdminInitiateAuth | Starts an admin authentication flow for a user pool user. |
+ | RespondToAuthChallenge | Responds to supported Cognito auth challenges, including TOTP setup and software-token MFA. |
+ | AdminRespondToAuthChallenge | Responds to a challenge from `AdminInitiateAuth`, with the same challenges `RespondToAuthChallenge` supports. |
+-| GetTokensFromRefreshToken | Issues new access and ID tokens from a refresh token. A client's `RefreshTokenRotation` setting is stored but not applied, so no new refresh token is issued. |
++| GetTokensFromRefreshToken | Refreshes a user grant, preserving its scopes and issuing a new refresh token when `RefreshTokenRotation` is enabled. OAuth grants receive an ID token only when they contain `openid`. |
+ | RevokeToken | Revokes a refresh token. The client must have token revocation enabled and, when it has a secret, present it. Only refresh tokens can be revoked. |
+ | AssociateSoftwareToken | Creates a TOTP secret for a user identified by an MFA setup session or access token. |
+ | VerifySoftwareToken | Verifies the TOTP code and enables the user's software token. |
+@@ -398,7 +398,7 @@ client-credentials flow:
+   code and redirects to the registered callback with a one-time Cognito authorization code.
+ - `POST /cognito-idp/oauth2/token` redeems that authorization code once, checking its PKCE
+   `code_verifier` when the authorization request sent a `code_challenge`, or issues a machine
+-  token for `grant_type=client_credentials`.
++  token for `grant_type=client_credentials`, or refreshes a user grant with `grant_type=refresh_token`.
+ 
+ ### Managed login
+ 
+@@ -699,3 +699,38 @@ http://localhost:4566/$POOL_ID
+ ```
+ 
+ This keeps the issuer, discovery document, JWKS URL, and token endpoint internally consistent for local JWT validation while supporting LocalStack-style confidential clients and resource-server-backed scopes.
++
++### Refresh grants and rotation
++
++`POST /cognito-idp/oauth2/token` also accepts `grant_type=refresh_token`, `client_id` and
++`refresh_token`. Confidential clients must provide their secret using `client_secret` or
++HTTP Basic authentication. Either active secret is accepted during client-secret rotation;
++after removing a secret, the remaining active secret is still required.
++Custom domains expose the same operation at `/oauth2/token`
++and bind it to their user pool. The client must allow the authorization code flow.
++
++OAuth refresh and `GetTokensFromRefreshToken` share token validation and rotation. They
++preserve the original granted scopes, subject, issuer, client and token-family `origin_jti`.
++Adding scopes to a client's configuration never grants them to an existing refresh token;
++removed scopes are dropped. OAuth returns an ID token only for a grant containing `openid`.
++Access and ID token lifetimes follow the client's configured validity values.
++
++With `RefreshTokenRotation.Feature=ENABLED`, each refresh returns a distinct refresh token
++with the original absolute expiry. The submitted token remains usable for its configured
++`RetryGracePeriodSeconds` (0 through 60 seconds) after first use; retries do not extend that
++deadline. `RevokeToken` revokes the family, including rotated descendants. The legacy
++`REFRESH_TOKEN_AUTH` and `REFRESH_TOKEN` authentication flows are refused when rotation is
++enabled. With rotation disabled, refresh omits a new refresh token and the original remains
++usable until expiry or revocation.
++
++Granted scopes, absolute expiry and rotation deadlines use Cognito's configured storage
++backend in `cognito-refresh-tokens.json`. They survive persistent storage reloads and are
++removed on reset or deletion of their user, client or pool. Expired and consumed records
++are cleaned up when tokens are issued or refreshed. Signed tokens from older Floci versions
++remain usable for nonrotating API refresh with their original API scope; OAuth refresh and
++rotation require the persisted grant created by the current version.
++
++Missing OAuth refresh tokens return `invalid_request`; invalid, expired, revoked or
++cross-client tokens and disabled or deleted users return `invalid_grant`. Client credential
++failures return `invalid_client`, and clients without the code flow return
++`unauthorized_client`.
+diff --git a/src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2Service.java b/src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2Service.java
+index bd4230a..faaae9c 100644
+--- a/src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2Service.java
++++ b/src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2Service.java
+@@ -616,6 +616,7 @@ public class ApiGatewayV2Service {
+     /**
+      * Finds the best matching route for the given HTTP method and path.
+      * Priority: exact match > path-template match > $default.
++     * For the same path template, a concrete method takes precedence over ANY.
+      */
+     public Route findMatchingRoute(String region, String apiId, String httpMethod, String path) {
+         List<Route> routes = getRoutes(region, apiId);
+@@ -629,7 +630,26 @@ public class ApiGatewayV2Service {
+         // 2. Path-template match (e.g. "GET /users/{id}")
+         for (Route r : routes) {
+             if (r.getRouteKey() == null || r.getRouteKey().equals("$default")) continue;
+-            if (routeKeyMatchesPath(r.getRouteKey(), httpMethod, path)) return r;
++            if (routeKeyMatchesPath(r.getRouteKey(), httpMethod, path)) {
++                String routeKey = r.getRouteKey();
++                int space = routeKey.indexOf(' ');
++                if ("ANY".equalsIgnoreCase(routeKey.substring(0, space))) {
++                    String template = routeKey.substring(space + 1);
++                    for (Route concrete : routes) {
++                        String concreteKey = concrete.getRouteKey();
++                        if (concreteKey == null) {
++                            continue;
++                        }
++                        int concreteSpace = concreteKey.indexOf(' ');
++                        if (concreteSpace >= 0
++                                && concreteKey.substring(0, concreteSpace).equalsIgnoreCase(httpMethod)
++                                && template.equals(concreteKey.substring(concreteSpace + 1))) {
++                            return concrete;
++                        }
++                    }
++                }
++                return r;
++            }
+         }
+ 
+         // 3. $default catch-all
+diff --git a/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoAuthFlowHandler.java b/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoAuthFlowHandler.java
+index 0a53da6..038fb00 100644
+--- a/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoAuthFlowHandler.java
++++ b/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoAuthFlowHandler.java
+@@ -642,56 +642,20 @@ final class CognitoAuthFlowHandler {
+ 
+     private Map<String, Object> handleRefreshToken(UserPool pool, UserPoolClient client,
+                                                     Map<String, String> params, Map<String, String> clientMetadata) {
++        if (service.isRefreshRotationEnabled(client)) {
++            throw new AwsException("InvalidParameterException",
++                    "REFRESH_TOKEN_AUTH is not supported when refresh token rotation is enabled", 400);
++        }
+         String refreshToken = params.get("REFRESH_TOKEN");
+-        if (refreshToken == null) throw new AwsException("InvalidParameterException", "REFRESH_TOKEN is required", 400);
+-        String[] parts = service.parseRefreshToken(refreshToken);
+-        if (parts == null) {
+-            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+-        }
+-        // Scope the token to the pool that minted it. HMAC verification only proves the token
+-        // was signed by parts[0]'s pool, not that parts[0] is the pool serving this request, so
+-        // a token legitimately issued for pool A must not be replayed against pool B's client.
+-        // Mirrors getTokensFromRefreshToken's pool-id check.
+-        if (!pool.getId().equals(parts[0])) {
+-            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+-        }
+-        String username = parts[1];
+-        long iat;
+-        try {
+-            iat = parts.length > 3 && !parts[3].isEmpty() ? Long.parseLong(parts[3]) : 0L;
+-        } catch (NumberFormatException e) {
+-            throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
++        if (refreshToken == null) {
++            throw new AwsException("InvalidParameterException", "REFRESH_TOKEN is required", 400);
+         }
+-        String refreshTokenUuid = parts.length > 4 ? parts[4] : null;
+-
+-        if (service.isRefreshTokenExpired(client, parts)) {
+-            throw new AwsException("NotAuthorizedException", "Refresh Token has expired", 400);
++        String[] parts = service.parseRefreshToken(refreshToken);
++        if (parts != null) {
++            validateSecretHash(client, params, parts[1]);
+         }
+-
+-        // Check revocation before issuing new tokens
+-        service.validateRefreshTokenNotRevoked(refreshTokenUuid, pool.getId(), username, iat);
+-
+-        CognitoUser user;
+-        try {
+-            user = service.adminGetUser(pool.getId(), username);
+-        } catch (AwsException ae) {
+-            // Real Cognito never reveals whether the encoded username exists; any
+-            // refresh token that doesn't resolve to a real user is simply invalid.
+-            if ("UserNotFoundException".equals(ae.getErrorCode())) {
+-                throw new AwsException("NotAuthorizedException", "Invalid Refresh Token", 400);
+-            }
+-            throw ae;
+-        }
+-        CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user,
+-                clientMetadata, "TokenGeneration_RefreshTokens", List.of());
+-        Map<String, Object> auth = new HashMap<>();
+-        auth.put("AccessToken", service.generateSignedJwt(user, pool, "access", client, override, refreshTokenUuid));
+-        auth.put("IdToken", service.generateSignedJwt(user, pool, "id", client, override, refreshTokenUuid));
+-        auth.put("ExpiresIn", service.getAccessTokenExpiresInSeconds(client));
+-        auth.put("TokenType", "Bearer");
+-        Map<String, Object> result = new HashMap<>();
+-        result.put("AuthenticationResult", auth);
+-        return result;
++        Map<String, Object> auth = service.refreshTokens(client, refreshToken, false, clientMetadata);
++        return Map.of("AuthenticationResult", auth);
+     }
+ 
+     private Map<String, Object> buildNewPasswordRequiredChallenge(UserPool pool, UserPoolClient client, CognitoUser user) {
+@@ -1932,8 +1896,9 @@ final class CognitoAuthFlowHandler {
+         return service.generateAuthResult(user, pool, client, override);
+     }
+ 
+-    CognitoService.ClaimsOverride preTokenGenerationForRefresh(UserPool pool, UserPoolClient client, CognitoUser user) {
+-        return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_RefreshTokens", List.of());
++    CognitoService.ClaimsOverride preTokenGenerationForRefresh(UserPool pool, UserPoolClient client, CognitoUser user,
++                                                               List<String> scopes, Map<String, String> clientMetadata) {
++        return firePreTokenGeneration(pool, client, user, clientMetadata, "TokenGeneration_RefreshTokens", scopes);
+     }
+ 
+     /**
+diff --git a/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoJsonHandler.java b/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoJsonHandler.java
+index 2f16251..8aed468 100644
+--- a/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoJsonHandler.java
++++ b/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoJsonHandler.java
+@@ -857,7 +857,8 @@ public class CognitoJsonHandler {
+     private Response handleGetTokensFromRefreshToken(JsonNode request) {
+         Map<String, Object> result = service.getTokensFromRefreshToken(
+                 request.path("ClientId").asText(),
+-                request.path("RefreshToken").asText()
++                request.path("RefreshToken").asText(null),
++                request.path("ClientSecret").asText(null)
+         );
+         return Response.ok(objectMapper.valueToTree(result)).build();
+     }
+diff --git a/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoOAuthController.java b/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoOAuthController.java
+index cff9d69..94f132d 100644
+--- a/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoOAuthController.java
++++ b/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoOAuthController.java
+@@ -432,8 +432,27 @@ public class CognitoOAuthController {
+         if ("authorization_code".equals(grantType)) {
+             return redeemAuthorizationCode(clientId, clientSecret, formParams, domainPoolId);
+         }
++        if ("refresh_token".equals(grantType)) {
++            String refreshToken = trimToNull(formParams.getFirst("refresh_token"));
++            if (refreshToken == null) {
++                return oauthError("invalid_request", "refresh_token is required");
++            }
++            try {
++                Map<String, Object> result = cognitoService.issueOAuthRefreshToken(clientId, clientSecret,
++                        refreshToken, domainPoolId);
++                return Response.ok(objectMapper.valueToTree(result)).type(MediaType.APPLICATION_JSON)
++                        .header("Cache-Control", "no-store").header("Pragma", "no-cache").build();
++            } catch (AwsException e) {
++                return switch (e.getErrorCode()) {
++                    case "ResourceNotFoundException", "InvalidClientException" -> oauthError("invalid_client", e.getMessage());
++                    case "UnauthorizedClientException" -> oauthError("unauthorized_client", e.getMessage());
++                    case "NotAuthorizedException", "UserNotFoundException" -> oauthError("invalid_grant", e.getMessage());
++                    default -> oauthError("invalid_request", e.getMessage());
++                };
++            }
++        }
+         if (!"client_credentials".equals(grantType)) {
+-            return oauthError("unsupported_grant_type", "Only client_credentials and authorization_code are supported");
++            return oauthError("unsupported_grant_type", "Only client_credentials, authorization_code and refresh_token are supported");
+         }
+         String scope = trimToNull(formParams.getFirst("scope"));
+ 
+diff --git a/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoService.java b/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoService.java
+index 1b10d79..e227a0c 100644
+--- a/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoService.java
++++ b/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoService.java
+@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.acm.AcmService;
+ import io.github.hectorvent.floci.services.acm.model.Certificate;
+ import io.github.hectorvent.floci.services.acm.model.CertificateStatus;
+ import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
++import io.github.hectorvent.floci.services.cognito.model.CognitoRefreshToken;
+ import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
+ import io.github.hectorvent.floci.services.cognito.model.IdentityProvider;
+ import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
+@@ -139,6 +140,8 @@ public class CognitoService implements ResourceProvider {
+     private final StorageBackend<String, CognitoUser> userStore;
+     private final StorageBackend<String, CognitoGroup> groupStore;
+     private final StorageBackend<String, RevokedTokenInfo> revokedTokenStore;
++    private final StorageBackend<String, CognitoRefreshToken> refreshTokenStore;
++    private final Clock clock;
+     private final String baseUrl;
+     private final String cloudFrontDomainSuffix;
+     private final RegionResolver regionResolver;
+@@ -148,6 +151,8 @@ public class CognitoService implements ResourceProvider {
+     private final CognitoMessageDispatcher messageDispatcher;
+     private final TlsCertificateManager certificateManager;
+     private final Object[] userLocks = newUserLockStripes();
++    // Grant writers take the canonical user lock first. Deletion never takes a user lock while holding this lock.
++    private final Object refreshGrantLock = new Object();
+ 
+     // Keyed by session token; contains SRP ephemeral state (bPrivate, B, A, secretBlock)
+     private final CognitoAuthFlowHandler authFlowHandler;
+@@ -195,7 +200,9 @@ public class CognitoService implements ResourceProvider {
+                 new VerificationCodeService(storageFactory, clock),
+                 new CognitoMessageDispatcher(sesService, snsService, regionResolver.getDefaultRegion()),
+                 certificateManager,
+-                clock
++                clock,
++                storageFactory.create("cognito", "cognito-refresh-tokens.json",
++                        new TypeReference<Map<String, CognitoRefreshToken>>() {})
+         );
+     }
+ 
+@@ -287,6 +294,28 @@ public class CognitoService implements ResourceProvider {
+             CognitoMessageDispatcher messageDispatcher,
+             TlsCertificateManager certificateManager,
+             Clock clock) {
++        this(poolStore, clientStore, resourceServerStore, domainStore, identityProviderStore, userStore,
++                groupStore, revokedTokenStore, baseUrl, cloudFrontDomainSuffix, regionResolver, lambdaService,
++                acmService, verificationCodeService, messageDispatcher, certificateManager, clock, new InMemoryStorage<>());
++    }
++
++    CognitoService(StorageBackend<String, UserPool> poolStore,
++            StorageBackend<String, UserPoolClient> clientStore,
++            StorageBackend<String, ResourceServer> resourceServerStore,
++            StorageBackend<String, UserPoolDomain> domainStore,
++            StorageBackend<String, IdentityProvider> identityProviderStore,
++            StorageBackend<String, CognitoUser> userStore,
++            StorageBackend<String, CognitoGroup> groupStore,
++            StorageBackend<String, RevokedTokenInfo> revokedTokenStore,
++            String baseUrl,
++            String cloudFrontDomainSuffix,
++            RegionResolver regionResolver, LambdaService lambdaService, AcmService acmService,
++            VerificationCodeService verificationCodeService,
++            CognitoMessageDispatcher messageDispatcher,
++            TlsCertificateManager certificateManager,
++            Clock clock, StorageBackend<String, CognitoRefreshToken> refreshTokenStore) {
++        this.refreshTokenStore = refreshTokenStore;
++        this.clock = clock;
+         this.poolStore = poolStore;
+         this.clientStore = clientStore;
+         this.resourceServerStore = resourceServerStore;
+@@ -942,7 +971,11 @@ public class CognitoService implements ResourceProvider {
+         synchronized (identityProviderLock) {
+             identityProviderStore.scan(k -> k.startsWith(prefix))
+                     .forEach(p -> identityProviderStore.delete(identityProviderKey(id, p.getProviderName())));
+-            poolStore.delete(id);
++            synchronized (refreshGrantLock) {
++                poolStore.delete(id);
++                refreshTokenStore.scan(k -> true).stream().filter(t -> id.equals(t.userPoolId()))
++                        .forEach(t -> refreshTokenStore.delete(t.tokenId()));
++            }
+         }
+     }
+ 
+@@ -1111,13 +1144,23 @@ public class CognitoService implements ResourceProvider {
+     }
+ 
+     public void deleteUserPoolClient(String clientId) {
+-        clientStore.get(clientId).orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
+-        clientStore.delete(clientId);
++        synchronized (refreshGrantLock) {
++            clientStore.get(clientId).orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
++            deleteClientAndRefreshGrants(clientId);
++        }
+     }
+ 
+     public void deleteUserPoolClient(String userPoolId, String clientId) {
+-        describeUserPoolClient(userPoolId, clientId);
++        synchronized (refreshGrantLock) {
++            describeUserPoolClient(userPoolId, clientId);
++            deleteClientAndRefreshGrants(clientId);
++        }
++    }
++
++    private void deleteClientAndRefreshGrants(String clientId) {
+         clientStore.delete(clientId);
++        refreshTokenStore.scan(k -> true).stream().filter(t -> clientId.equals(t.clientId()))
++                .forEach(t -> refreshTokenStore.delete(t.tokenId()));
+     }
+ 
+     public UserPoolClient updateUserPoolClient(String userPoolId, String clientId, String clientName,
+@@ -2265,6 +2308,9 @@ public class CognitoService implements ResourceProvider {
+                 groupStore.put(groupKey(userPoolId, groupName), group);
+             });
+         }
++        refreshTokenStore.scan(k -> true).stream()
++                .filter(t -> userPoolId.equals(t.userPoolId()) && user.getUsername().equals(t.username()))
++                .forEach(t -> refreshTokenStore.delete(t.tokenId()));
+         userStore.delete(userKey(userPoolId, user.getUsername()));
+     }
+ 
+@@ -3653,47 +3699,152 @@ public class CognitoService implements ResourceProvider {
+     }
+ 
+     public Map<String, Object> getTokensFromRefreshToken(String clientId, String refreshToken) {
+-        if (refreshToken == null) {
+-            throw new AwsException("InvalidParameterException", "RefreshToken is required", 400);
++        return getTokensFromRefreshToken(clientId, refreshToken, null);
++    }
++
++    public Map<String, Object> getTokensFromRefreshToken(String clientId, String refreshToken, String clientSecret) {
++        if (clientId == null || clientId.isBlank()) {
++            throw new AwsException("InvalidParameterException", "ClientId is required", 400);
+         }
+-        UserPoolClient client = clientStore.get(clientId)
+-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
+-        String[] parts = parseRefreshToken(refreshToken);
+-        if (parts == null) {
+-            throw new AwsException("NotAuthorizedException", "Invalid refresh token", 400);
++        UserPoolClient client = findClientById(clientId);
++        authenticateRefreshClient(client, clientSecret);
++        return Map.of("AuthenticationResult", refreshTokens(client, refreshToken, false, Map.of()));
++    }
++
++    Map<String, Object> issueOAuthRefreshToken(String clientId, String clientSecret, String refreshToken,
++                                               String domainPoolId) {
++        UserPoolClient client = findClientById(clientId);
++        authenticateRefreshClient(client, clientSecret);
++        if (domainPoolId != null && !domainPoolId.equals(client.getUserPoolId())) {
++            throw invalidRefreshToken();
+         }
+-        String poolId = parts[0];
+-        String username = parts[1];
+-        String refreshTokenUuid = parts[4]; // UUID from refresh token
++        if (!client.isAllowedOAuthFlowsUserPoolClient() || client.getAllowedOAuthFlows() == null
++                || !client.getAllowedOAuthFlows().contains("code")) {
++            throw new AwsException("UnauthorizedClientException", "Client is not allowed to refresh OAuth tokens", 400);
++        }
++        Map<String, Object> auth = refreshTokens(client, refreshToken, true, Map.of());
++        Map<String, Object> result = new HashMap<>();
++        result.put("access_token", auth.get("AccessToken"));
++        result.put("expires_in", auth.get("ExpiresIn"));
++        result.put("token_type", auth.get("TokenType"));
++        if (auth.containsKey("IdToken")) {
++            result.put("id_token", auth.get("IdToken"));
++        }
++        if (auth.containsKey("RefreshToken")) {
++            result.put("refresh_token", auth.get("RefreshToken"));
++        }
++        return result;
++    }
+ 
+-        if (!client.getUserPoolId().equals(poolId)) {
+-            throw new AwsException("NotAuthorizedException", "Invalid refresh token", 400);
++    private void authenticateRefreshClient(UserPoolClient client, String clientSecret) {
++        String expected = client.getClientSecret();
++        List<UserPoolClientSecret> activeSecrets = client.getUserPoolClientSecrets();
++        if (activeSecrets.isEmpty() && (expected == null || expected.isBlank())) {
++            return;
+         }
+-        if (isRefreshTokenExpired(client, parts)) {
+-            throw new AwsException("NotAuthorizedException", "Refresh Token has expired", 400);
++        if (clientSecret != null && !clientSecret.isBlank()) {
++            byte[] supplied = clientSecret.getBytes(StandardCharsets.UTF_8);
++            for (UserPoolClientSecret activeSecret : activeSecrets) {
++                if (MessageDigest.isEqual(activeSecret.getClientSecretValue().getBytes(StandardCharsets.UTF_8), supplied)) {
++                    return;
++                }
++            }
++            if (expected != null && !expected.isBlank()
++                    && MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), supplied)) {
++                return;
++            }
+         }
++        throw new AwsException("InvalidClientException", "Invalid client secret", 400);
++    }
+ 
+-        // Check if refresh token has been revoked
+-        validateTokenNotRevoked(refreshTokenUuid, poolId, "refresh");
+-        long issuedAt = 0L;
+-        try {
+-            issuedAt = Long.parseLong(parts[3]);
+-        } catch (NumberFormatException ignored) {}
+-        validateUserNotGloballySignedOut(username, poolId, "refresh", issuedAt);
++    boolean isRefreshRotationEnabled(UserPoolClient client) {
++        return client.getRefreshTokenRotation() != null
++                && "ENABLED".equals(client.getRefreshTokenRotation().get("Feature"));
++    }
+ 
+-        UserPool pool = describeUserPool(poolId);
+-        CognitoUser user = adminGetUser(poolId, username);
+-        ClaimsOverride override = authFlowHandler.preTokenGenerationForRefresh(pool, client, user);
++    Map<String, Object> refreshTokens(UserPoolClient client, String refreshToken, boolean oauth,
++                                      Map<String, String> clientMetadata) {
++        if (refreshToken == null || refreshToken.isBlank()) {
++            throw new AwsException("InvalidParameterException", "RefreshToken is required", 400);
++        }
++        String[] parts = parseRefreshToken(refreshToken);
++        if (parts == null || !client.getUserPoolId().equals(parts[0]) || !client.getClientId().equals(parts[2])) {
++            throw invalidRefreshToken();
++        }
++        synchronized (userLock(parts[0], parts[1])) {
++            long issuedAt;
++            try {
++                issuedAt = Long.parseLong(parts[3]);
++            } catch (NumberFormatException ignored) {
++                // A signed token with a malformed timestamp must never bypass expiry validation.
++                throw invalidRefreshToken();
++            }
++            long now = clock.millis();
++            cleanupExpiredRefreshTokens(now);
++            CognitoRefreshToken stored = parts.length == 7 ? refreshTokenStore.get(parts[5]).orElse(null) : null;
++            if (parts.length == 7 && stored == null) {
++                throw invalidRefreshToken();
++            }
++            // Legacy tokens predate grant storage; only nonrotating API refresh can preserve their known scopes.
++            if ((stored == null && (oauth || isRefreshRotationEnabled(client)))
++                    || (oauth && !stored.hosted())) {
++                throw invalidRefreshToken();
++            }
++            long expiresAt = stored != null ? stored.expiresAt()
++                    : issuedAt + resolveTokenLifetimeSeconds(client, "refresh") * 1000L;
++            if (now >= expiresAt || (stored != null && stored.retryUntil() != null && now >= stored.retryUntil())) {
++                throw invalidRefreshToken();
++            }
++            validateRefreshTokenNotRevoked(parts[4], parts[0], parts[1], issuedAt);
++            UserPool pool = describeUserPool(parts[0]);
++            CognitoUser user;
++            try {
++                user = adminGetUser(parts[0], parts[1]);
++            } catch (AwsException ignored) {
++                // Refresh errors do not disclose whether the token's user still exists.
++                throw invalidRefreshToken();
++            }
++            if (!user.isEnabled()) {
++                throw invalidRefreshToken();
++            }
++            boolean hosted = stored != null && stored.hosted();
++            List<String> scopes = stored != null ? stored.scopes() : API_SIGN_IN_SCOPES;
++            if (hosted) {
++                scopes = scopesStillAllowed(client, scopes);
++            }
++            ClaimsOverride override = authFlowHandler.preTokenGenerationForRefresh(pool, client, user, scopes, clientMetadata);
++            Map<String, Object> auth = new HashMap<>();
++            auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, parts[4], scopes));
++            if (!hosted || scopes.contains("openid")) {
++                auth.put("IdToken", generateSignedJwt(user, pool, "id", client, override, parts[4], scopes));
++            }
++            synchronized (refreshGrantLock) {
++                validateRefreshGrantResources(pool.getId(), user.getUsername(), client.getClientId());
++                if (isRefreshRotationEnabled(client)) {
++                    if (stored != null && stored.retryUntil() == null) {
++                        Object grace = client.getRefreshTokenRotation().get("RetryGracePeriodSeconds");
++                        long graceSeconds = grace instanceof Number number ? number.longValue() : 0L;
++                        long retryUntil = now + Math.clamp(graceSeconds, 0L, 60L) * 1000L;
++                        refreshTokenStore.put(parts[5], stored.consumed(retryUntil));
++                    }
++                    auth.put("RefreshToken", buildRefreshToken(pool, user.getUsername(), client.getClientId(), parts[4],
++                            issuedAt, expiresAt, scopes, hosted));
++                }
++            }
++            auth.put("ExpiresIn", resolveAccessTokenLifetimeSeconds(client));
++            auth.put("TokenType", "Bearer");
++            return auth;
++        }
++    }
+ 
+-        // Use refresh token UUID as origin_jti for derived tokens
+-        Map<String, Object> auth = new HashMap<>();
+-        auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, refreshTokenUuid));
+-        auth.put("IdToken", generateSignedJwt(user, pool, "id", client, override, refreshTokenUuid));
+-        auth.put("ExpiresIn", resolveAccessTokenLifetimeSeconds(client));
+-        auth.put("TokenType", "Bearer");
+-        Map<String, Object> result = new HashMap<>();
+-        result.put("AuthenticationResult", auth);
+-        return result;
++    private AwsException invalidRefreshToken() {
++        return new AwsException("NotAuthorizedException", "Invalid refresh token", 400);
++    }
++
++    private void cleanupExpiredRefreshTokens(long now) {
++        refreshTokenStore.scan(k -> true).stream().filter(t -> now >= t.expiresAt()
++                || (t.retryUntil() != null && now >= t.retryUntil()))
++                .forEach(t -> refreshTokenStore.delete(t.tokenId()));
+     }
+ 
+     public void revokeToken(String clientId, String token, String clientSecret) {
+@@ -3729,7 +3880,7 @@ public class CognitoService implements ResourceProvider {
+         String tokenClientId = parts[2];
+         String familyId = parts.length > 4 && !parts[4].isEmpty() ? parts[4] : null;
+ 
+-        if (!clientId.equals(tokenClientId)) {
++        if (!clientId.equals(tokenClientId) || !client.getUserPoolId().equals(poolId)) {
+             throw new AwsException("UnauthorizedException", "Refresh token was not issued to this client", 403);
+         }
+         if (familyId == null) {
+@@ -3743,8 +3894,12 @@ public class CognitoService implements ResourceProvider {
+                     username, poolId, e.getErrorCode());
+         }
+ 
+-        long nowMs = System.currentTimeMillis();
+-        long expiresAtSeconds = nowMs / 1000L + (365L * 24L * 60L * 60L);
++        long nowMs = clock.millis();
++        long refreshExpiresAt = parts.length == 7 ? Long.parseLong(parts[6]) / 1000L
++                : Long.parseLong(parts[3]) / 1000L + resolveTokenLifetimeSeconds(client, "refresh");
++        long derivedLifetime = Math.max(resolveTokenLifetimeSeconds(client, "access"),
++                resolveTokenLifetimeSeconds(client, "id"));
++        long expiresAtSeconds = Math.max(nowMs / 1000L, refreshExpiresAt) + derivedLifetime;
+         RevokedTokenInfo info = new RevokedTokenInfo(familyId, "refresh", username, poolId, nowMs, expiresAtSeconds);
+         revokedTokenStore.put(revokedTokenKey(poolId, familyId), info);
+         LOG.infov("RevokeToken: revoked refresh token family {0} for user {1} in pool {2}", familyId, username, poolId);
+@@ -3776,7 +3931,7 @@ public class CognitoService implements ResourceProvider {
+         List<String> scopes = scopesStillAllowed(client, grantedScopes);
+         ClaimsOverride trigger = authFlowHandler.preTokenGenerationForHostedAuth(pool, client, user, scopes);
+         return generateAuthResult(user, pool, client, mergeUnderProtocolClaims(trigger, protocolClaims),
+-                UUID.randomUUID().toString(), scopes, scopes.contains("openid"));
++                UUID.randomUUID().toString(), scopes, scopes.contains("openid"), true);
+     }
+ 
+     /**
+@@ -3849,18 +4004,20 @@ public class CognitoService implements ResourceProvider {
+     }
+ 
+     Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client, ClaimsOverride override, String originJti) {
+-        return generateAuthResult(user, pool, client, override, originJti, API_SIGN_IN_SCOPES, true);
++        return generateAuthResult(user, pool, client, override, originJti, API_SIGN_IN_SCOPES, true, false);
+     }
+ 
+     private Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client,
+                                                    ClaimsOverride override, String originJti,
+-                                                   List<String> accessScopes, boolean withIdToken) {
++                                                   List<String> accessScopes, boolean withIdToken, boolean hosted) {
+         Map<String, Object> auth = new HashMap<>();
+         auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, originJti, accessScopes));
+         if (withIdToken) {
+             auth.put("IdToken", generateSignedJwt(user, pool, "id", client, override, originJti, accessScopes));
+         }
+-        auth.put("RefreshToken", buildRefreshToken(pool, user.getUsername(), client.getClientId(), originJti));
++        long issuedAt = clock.millis();
++        auth.put("RefreshToken", buildRefreshToken(pool, user.getUsername(), client.getClientId(), originJti,
++                issuedAt, issuedAt + resolveTokenLifetimeSeconds(client, "refresh") * 1000L, accessScopes, hosted));
+         auth.put("ExpiresIn", resolveAccessTokenLifetimeSeconds(client));
+         auth.put("TokenType", "Bearer");
+         return auth;
+@@ -3881,7 +4038,7 @@ public class CognitoService implements ResourceProvider {
+     private String generateSignedJwt(CognitoUser user, UserPool pool, String type, UserPoolClient client,
+                                      ClaimsOverride override, String originJti, List<String> accessScopes) {
+         String header = encodeJwtHeader(pool);
+-        long now = System.currentTimeMillis() / 1000L;
++        long now = clock.instant().getEpochSecond();
+         long lifetimeSeconds = resolveTokenLifetimeSeconds(client, type);
+ 
+         Map<String, Object> claims = new LinkedHashMap<>();
+@@ -4037,7 +4194,7 @@ public class CognitoService implements ResourceProvider {
+     }
+ 
+     String generateTokenString(String type, String username, UserPool pool, UserPoolClient client) {
+-        long now = System.currentTimeMillis() / 1000L;
++        long now = clock.instant().getEpochSecond();
+         long lifetimeSeconds = resolveTokenLifetimeSeconds(client, type);
+         String headerJson = String.format(
+                 "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
+@@ -4065,7 +4222,7 @@ public class CognitoService implements ResourceProvider {
+         String header = Base64.getUrlEncoder().withoutPadding()
+                 .encodeToString(headerJson.getBytes(StandardCharsets.UTF_8));
+ 
+-        long now = System.currentTimeMillis() / 1000L;
++        long now = clock.instant().getEpochSecond();
+         long lifetimeSeconds = resolveAccessTokenLifetimeSeconds(client);
+         StringBuilder payloadJson = new StringBuilder();
+         payloadJson.append("{")
+@@ -4663,22 +4820,47 @@ public class CognitoService implements ResourceProvider {
+             // is not off by a factor of ~1000 (which made it never fire for real tokens).
+             long issuedAtSeconds = Long.parseLong(parts[3]) / 1000L;
+             long expiresAtSeconds = issuedAtSeconds + resolveTokenLifetimeSeconds(client, "refresh");
+-            return System.currentTimeMillis() / 1000L >= expiresAtSeconds;
++            return clock.instant().getEpochSecond() >= expiresAtSeconds;
+         } catch (NumberFormatException ignored) {
+-            return false;
++            return true;
+         }
+     }
+ 
+     String buildRefreshToken(UserPool pool, String username, String clientId, String originJti) {
+-        if (ensureRefreshTokenSecret(pool)) {
+-            poolStore.put(pool.getId(), pool);
++        UserPoolClient client = findClientById(clientId);
++        long issuedAt = clock.millis();
++        return buildRefreshToken(pool, username, clientId, originJti, issuedAt,
++                issuedAt + resolveTokenLifetimeSeconds(client, "refresh") * 1000L, API_SIGN_IN_SCOPES, false);
++    }
++
++    private String buildRefreshToken(UserPool pool, String username, String clientId, String originJti,
++                                     long issuedAt, long expiresAt, List<String> scopes, boolean hosted) {
++        synchronized (userLock(pool.getId(), username)) {
++            synchronized (refreshGrantLock) {
++                validateRefreshGrantResources(pool.getId(), username, clientId);
++                if (ensureRefreshTokenSecret(pool)) {
++                    poolStore.put(pool.getId(), pool);
++                }
++                cleanupExpiredRefreshTokens(clock.millis());
++                String familyId = originJti != null ? originJti : UUID.randomUUID().toString();
++                String tokenId = UUID.randomUUID().toString();
++                String raw = pool.getId() + "|" + username + "|" + clientId + "|" + issuedAt + "|" + familyId
++                        + "|" + tokenId + "|" + expiresAt;
++                String signature = hmacSha256(refreshTokenSecretBytes(pool), raw);
++                refreshTokenStore.put(tokenId, new CognitoRefreshToken(tokenId, pool.getId(), username, clientId,
++                        familyId, expiresAt, List.copyOf(scopes), hosted, null));
++                return Base64.getEncoder().withoutPadding()
++                        .encodeToString((raw + "|" + signature).getBytes(StandardCharsets.UTF_8));
++            }
++        }
++    }
++
++    private void validateRefreshGrantResources(String poolId, String username, String clientId) {
++        if (poolStore.get(poolId).isEmpty()
++                || clientStore.get(clientId).filter(c -> poolId.equals(c.getUserPoolId())).isEmpty()
++                || userStore.get(userKey(poolId, username)).filter(CognitoUser::isEnabled).isEmpty()) {
++            throw invalidRefreshToken();
+         }
+-        long issuedAt = System.currentTimeMillis();
+-        String familyId = originJti != null ? originJti : UUID.randomUUID().toString();
+-        String raw = pool.getId() + "|" + username + "|" + clientId + "|" + issuedAt + "|" + familyId;
+-        String signature = hmacSha256(refreshTokenSecretBytes(pool), raw);
+-        return Base64.getEncoder().withoutPadding()
+-                .encodeToString((raw + "|" + signature).getBytes(StandardCharsets.UTF_8));
+     }
+ 
+     static byte[] refreshTokenSecretBytes(UserPool pool) {
+@@ -4694,22 +4876,24 @@ public class CognitoService implements ResourceProvider {
+         try {
+             byte[] decoded = Base64.getDecoder().decode(refreshToken);
+             String raw = new String(decoded, StandardCharsets.UTF_8);
+-            String[] parts = raw.split("\\|", 6);
+-            if (parts.length != 6) {
++            String[] parts = raw.split("\\|", -1);
++            if (parts.length != 6 && parts.length != 8) {
+                 return null;
+             }
+             UserPool pool = poolStore.get(parts[0]).orElse(null);
+             if (pool == null || pool.getSigningSecret() == null || pool.getSigningSecret().isBlank()) {
+                 return null;
+             }
+-            String payload = String.join("|", Arrays.copyOf(parts, 5));
++            String payload = String.join("|", Arrays.copyOf(parts, parts.length - 1));
+             byte[] expectedSignature = Base64.getDecoder().decode(hmacSha256(refreshTokenSecretBytes(pool), payload));
+-            byte[] actualSignature = Base64.getDecoder().decode(parts[5]);
++            byte[] actualSignature = Base64.getDecoder().decode(parts[parts.length - 1]);
+             if (!MessageDigest.isEqual(expectedSignature, actualSignature)) {
+                 return null;
+             }
+-            return Arrays.copyOf(parts, 5); // [poolId, username, clientId, issuedAt, nonce]
+-        } catch (Exception ignored) { }
++            return Arrays.copyOf(parts, parts.length - 1);
++        } catch (Exception ignored) {
++            // Invalid base64, signatures and missing token fields all mean an invalid bearer token.
++        }
+         return null;
+     }
+ 
+@@ -4733,7 +4917,7 @@ public class CognitoService implements ResourceProvider {
+             long expiresAt = requiredNumericClaim(claims, "exp");
+             String subject = textClaim(claims, "sub");
+             if (!("access".equals(tokenUse) || "id".equals(tokenUse))
+-                    || subject == null || expiresAt <= System.currentTimeMillis() / 1000L) {
++                    || subject == null || expiresAt <= clock.instant().getEpochSecond()) {
+                 throw new IllegalArgumentException("invalid token claims");
+             }
+             String clientId = "access".equals(tokenUse)
+@@ -4802,7 +4986,7 @@ public class CognitoService implements ResourceProvider {
+             if (username == null || subject == null || jti == null || clientId == null
+                     || !"access".equals(textClaim(claims, "token_use"))
+                     || clientStore.get(clientId).filter(c -> verifiedPoolId.equals(c.getUserPoolId())).isEmpty()
+-                    || expiresAt <= System.currentTimeMillis() / 1000L) {
++                    || expiresAt <= clock.instant().getEpochSecond()) {
+                 throw new IllegalArgumentException("invalid access-token claims");
+             }
+ 
+@@ -4982,7 +5166,7 @@ public class CognitoService implements ResourceProvider {
+             RevokedTokenInfo revokedInfo = revoked.get();
+ 
+             // Clean up expired revocation records
+-            if (revokedInfo.isExpired()) {
++            if (clock.instant().getEpochSecond() > revokedInfo.getExpiresAt()) {
+                 revokedTokenStore.delete(revokedKey);
+                 return;
+             }
+@@ -5009,7 +5193,7 @@ public class CognitoService implements ResourceProvider {
+ 
+         if (globalRevoked.isPresent()) {
+             RevokedTokenInfo globalInfo = globalRevoked.get();
+-            if (!globalInfo.isExpired()) {
++            if (clock.instant().getEpochSecond() <= globalInfo.getExpiresAt()) {
+                 long revokedAtMs = globalInfo.getRevokedAt();
+                 boolean revoked = false;
+ 
+@@ -5042,7 +5226,7 @@ public class CognitoService implements ResourceProvider {
+      * This implements the core logic for AdminUserGlobalSignOut.
+      */
+     private void revokeAllUserTokens(String userPoolId, String username) {
+-        long nowMs = System.currentTimeMillis();
++        long nowMs = clock.millis();
+ 
+         // Note: In a real implementation, we would need to track all active tokens for a user.
+         // Since Floci doesn't currently maintain a token registry, we implement a simpler
+diff --git a/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoWellKnownController.java b/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoWellKnownController.java
+index 1d91b89..343684d 100644
+--- a/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoWellKnownController.java
++++ b/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoWellKnownController.java
+@@ -66,7 +66,7 @@ public class CognitoWellKnownController {
+         String authorizationEndpoint = tokenEndpoint.replace("/token", "/authorize");
+ 
+         String body = """
+-                {"issuer":"%s","jwks_uri":"%s","authorization_endpoint":"%s","token_endpoint":"%s","userinfo_endpoint":"%s","subject_types_supported":["public"],"response_types_supported":["code"],"grant_types_supported":["client_credentials","authorization_code"],"token_endpoint_auth_methods_supported":["client_secret_basic","client_secret_post"],"id_token_signing_alg_values_supported":["RS256"],"code_challenge_methods_supported":["S256"]}
++                {"issuer":"%s","jwks_uri":"%s","authorization_endpoint":"%s","token_endpoint":"%s","userinfo_endpoint":"%s","subject_types_supported":["public"],"response_types_supported":["code"],"grant_types_supported":["client_credentials","authorization_code","refresh_token"],"token_endpoint_auth_methods_supported":["client_secret_basic","client_secret_post"],"id_token_signing_alg_values_supported":["RS256"],"code_challenge_methods_supported":["S256"]}
+                 """.formatted(issuer, jwksUri, authorizationEndpoint, tokenEndpoint, userInfoEndpoint).strip();
+         return Response.ok(body).build();
+     }
+diff --git a/src/main/java/io/github/hectorvent/floci/services/cognito/model/CognitoRefreshToken.java b/src/main/java/io/github/hectorvent/floci/services/cognito/model/CognitoRefreshToken.java
+new file mode 100644
+index 0000000..6fb06db
+--- /dev/null
++++ b/src/main/java/io/github/hectorvent/floci/services/cognito/model/CognitoRefreshToken.java
+@@ -0,0 +1,16 @@
++package io.github.hectorvent.floci.services.cognito.model;
++
++import io.quarkus.runtime.annotations.RegisterForReflection;
++
++import java.util.List;
++
++/** Persisted refresh grant and its immutable rotation retry deadline. Times are epoch milliseconds. */
++@RegisterForReflection
++public record CognitoRefreshToken(String tokenId, String userPoolId, String username, String clientId,
++                                  String familyId, long expiresAt, List<String> scopes, boolean hosted,
++                                  Long retryUntil) {
++    public CognitoRefreshToken consumed(long deadline) {
++        return new CognitoRefreshToken(tokenId, userPoolId, username, clientId, familyId, expiresAt, scopes,
++                hosted, deadline);
++    }
++}
+diff --git a/src/test/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2RouteSelectionTest.java b/src/test/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2RouteSelectionTest.java
+new file mode 100644
+index 0000000..6795752
+--- /dev/null
++++ b/src/test/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2RouteSelectionTest.java
+@@ -0,0 +1,62 @@
++package io.github.hectorvent.floci.services.apigatewayv2;
++
++import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
++import io.quarkus.test.junit.QuarkusTest;
++import jakarta.inject.Inject;
++import org.junit.jupiter.api.Test;
++
++import java.util.HashMap;
++import java.util.Map;
++
++import static org.junit.jupiter.api.Assertions.assertEquals;
++
++@QuarkusTest
++class ApiGatewayV2RouteSelectionTest {
++
++    private static final String REGION = "us-east-1";
++    // Route storage iterates in hash order of random route IDs, so many pairs make an
++    // order-dependent selection fail almost surely instead of by chance.
++    private static final int TEMPLATES = 24;
++
++    @Inject
++    ApiGatewayV2Service apiGatewayV2Service;
++
++    @Test
++    void concreteMethodTemplateRouteWinsOverAnyForTheSameTemplate() {
++        String apiId = apiGatewayV2Service.createApi(REGION,
++                Map.of("name", "route-selection", "protocolType", "HTTP")).getApiId();
++        try {
++            Map<Integer, String> concreteRouteIds = new HashMap<>();
++            for (int i = 0; i < TEMPLATES; i++) {
++                apiGatewayV2Service.createRoute(REGION, apiId, Map.of("routeKey", "ANY /items" + i + "/{id}"));
++                Route concrete = apiGatewayV2Service.createRoute(REGION, apiId,
++                        Map.of("routeKey", "GET /items" + i + "/{id}"));
++                concreteRouteIds.put(i, concrete.getRouteId());
++            }
++
++            for (int i = 0; i < TEMPLATES; i++) {
++                assertEquals(concreteRouteIds.get(i), apiGatewayV2Service
++                        .findMatchingRoute(REGION, apiId, "GET", "/items" + i + "/abc").getRouteId());
++                assertEquals("ANY /items" + i + "/{id}", apiGatewayV2Service
++                        .findMatchingRoute(REGION, apiId, "PATCH", "/items" + i + "/abc").getRouteKey());
++            }
++        } finally {
++            apiGatewayV2Service.deleteApi(REGION, apiId);
++        }
++    }
++
++    @Test
++    void anyTemplateRouteStillMatchesWhenNoConcreteMethodExists() {
++        String apiId = apiGatewayV2Service.createApi(REGION,
++                Map.of("name", "route-selection-any", "protocolType", "HTTP")).getApiId();
++        try {
++            apiGatewayV2Service.createRoute(REGION, apiId, Map.of("routeKey", "ANY /things/{id}"));
++            apiGatewayV2Service.createRoute(REGION, apiId, Map.of("routeKey", "GET /other/{id}"));
++
++            assertEquals("ANY /things/{id}", apiGatewayV2Service
++                    .findMatchingRoute(REGION, apiId, "GET", "/things/1").getRouteKey());
++        } finally {
++            apiGatewayV2Service.deleteApi(REGION, apiId);
++        }
++    }
++}
+diff --git a/src/test/java/io/github/hectorvent/floci/services/cognito/CognitoOAuthTokenIntegrationTest.java b/src/test/java/io/github/hectorvent/floci/services/cognito/CognitoOAuthTokenIntegrationTest.java
+index 5369fcf..9c90944 100644
+--- a/src/test/java/io/github/hectorvent/floci/services/cognito/CognitoOAuthTokenIntegrationTest.java
++++ b/src/test/java/io/github/hectorvent/floci/services/cognito/CognitoOAuthTokenIntegrationTest.java
+@@ -373,7 +373,7 @@ class CognitoOAuthTokenIntegrationTest {
+     @Order(16)
+     void unsupportedGrantTypeReturnsUnsupportedGrantType() {
+         given()
+-                .formParam("grant_type", "refresh_token")
++                .formParam("grant_type", "unsupported")
+                 .formParam("client_id", clientId)
+         .when()
+                 .post("/cognito-idp/oauth2/token")
+diff --git a/src/test/java/io/github/hectorvent/floci/services/cognito/CognitoRefreshTokenServiceTest.java b/src/test/java/io/github/hectorvent/floci/services/cognito/CognitoRefreshTokenServiceTest.java
+new file mode 100644
+index 0000000..0d70854
+--- /dev/null
++++ b/src/test/java/io/github/hectorvent/floci/services/cognito/CognitoRefreshTokenServiceTest.java
+@@ -0,0 +1,577 @@
++package io.github.hectorvent.floci.services.cognito;
++
++import com.fasterxml.jackson.core.type.TypeReference;
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.github.hectorvent.floci.config.EmulatorConfig;
++import io.github.hectorvent.floci.core.common.AwsException;
++import io.github.hectorvent.floci.core.common.RegionResolver;
++import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
++import io.github.hectorvent.floci.core.storage.InMemoryStorage;
++import io.github.hectorvent.floci.core.storage.StorageBackend;
++import io.github.hectorvent.floci.core.storage.StorageFactory;
++import io.github.hectorvent.floci.services.cognito.model.CognitoRefreshToken;
++import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
++import io.github.hectorvent.floci.services.cognito.model.UserPool;
++import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
++import io.github.hectorvent.floci.services.cognito.model.UserPoolClientSecret;
++import io.github.hectorvent.floci.services.lambda.LambdaService;
++import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
++import io.github.hectorvent.floci.services.ses.SesService;
++import io.github.hectorvent.floci.services.sns.SnsService;
++import jakarta.ws.rs.container.ContainerRequestContext;
++import jakarta.ws.rs.core.MultivaluedHashMap;
++import jakarta.ws.rs.core.Response;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.ValueSource;
++
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Path;
++import java.time.Clock;
++import java.time.Instant;
++import java.time.ZoneId;
++import java.time.ZoneOffset;
++import java.util.Base64;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.CountDownLatch;
++import java.util.concurrent.ExecutorService;
++import java.util.concurrent.Executors;
++import java.util.concurrent.Future;
++import java.util.concurrent.FutureTask;
++import java.util.concurrent.TimeUnit;
++
++import static org.junit.jupiter.api.Assertions.*;
++import static org.mockito.Mockito.*;
++
++class CognitoRefreshTokenServiceTest {
++    @TempDir
++    Path tempDir;
++
++    private final ObjectMapper mapper = new ObjectMapper();
++    private final TestClock clock = new TestClock();
++    private CognitoService service;
++    private CognitoOAuthController controller;
++    private UserPool pool;
++    private UserPoolClient client;
++
++    @BeforeEach
++    void setUp() {
++        service = new CognitoService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
++                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
++                new InMemoryStorage<>(), "http://localhost:4566", "cloudfront.net",
++                new RegionResolver("us-east-1", "000000000000"), null, null, null, null, null, clock);
++        initializeResources();
++    }
++
++    private void initializeResources() {
++        pool = service.createUserPool(Map.of("PoolName", "refresh-regression"), "us-east-1");
++        service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.test"), "TempPass1!");
++        service.adminSetUserPassword(pool.getId(), "alice", "Perm1234!", true);
++        ResourceServerScope read = new ResourceServerScope();
++        read.setScopeName("reminders.read");
++        read.setScopeDescription("Read synthetic reminders");
++        ResourceServerScope write = new ResourceServerScope();
++        write.setScopeName("reminders.write");
++        write.setScopeDescription("Write synthetic reminders");
++        service.createResourceServer(pool.getId(), "api", "synthetic-api", List.of(read, write));
++        client = service.createUserPoolClient(pool.getId(), "refresh-client", false, true,
++                List.of("code"), List.of("openid", "api/reminders.read"), null,
++                List.of("http://localhost:3000/callback"), null, List.of(), null, null, List.of(), null,
++                List.of(), null, List.of(), null, List.of(), null, null);
++        client.setAccessTokenValidity(5);
++        client.setIdTokenValidity(5);
++        client.setTokenValidityUnits(Map.of("AccessToken", "minutes", "IdToken", "minutes", "RefreshToken", "seconds"));
++        client.setRefreshTokenValidity(3600);
++        client.setRefreshTokenRotation(Map.of("Feature", "ENABLED", "RetryGracePeriodSeconds", 10));
++        controller = new CognitoOAuthController(service, mapper, null, new CognitoFederationStateStore(clock), null);
++    }
++
++    @Test
++    void oauthRefreshPreservesCustomScopeIdentityAndFiveMinuteExpiry() throws Exception {
++        Map<String, Object> issued = issued(List.of("openid", "api/reminders.read"));
++        client.setAllowedOAuthScopes(List.of("openid", "api/reminders.read", "api/reminders.write"));
++        Response response = oauth((String) issued.get("RefreshToken"), client.getClientId(), null, null);
++        assertEquals(200, response.getStatus());
++        JsonNode result = (JsonNode) response.getEntity();
++        JsonNode access = claims(result.path("access_token").asText());
++        JsonNode original = claims((String) issued.get("AccessToken"));
++        assertEquals("openid api/reminders.read", access.path("scope").asText());
++        for (String claim : List.of("iss", "sub", "client_id", "origin_jti")) {
++            assertEquals(original.path(claim), access.path(claim), claim);
++        }
++        assertEquals(300, result.path("expires_in").asInt());
++        assertEquals(300, access.path("exp").asLong() - access.path("iat").asLong());
++        JsonNode id = claims(result.path("id_token").asText());
++        assertEquals(client.getClientId(), id.path("aud").asText());
++        assertEquals(300, id.path("exp").asLong() - id.path("iat").asLong());
++        assertNotEquals(issued.get("RefreshToken"), result.path("refresh_token").asText());
++        assertEquals("no-store", response.getHeaderString("Cache-Control"));
++    }
++
++    @Test
++    void oauthRefreshWithoutOpenidOmitsIdToken() {
++        Response response = oauth(token(List.of("api/reminders.read")), client.getClientId(), null, null);
++        assertEquals(200, response.getStatus());
++        assertFalse(((JsonNode) response.getEntity()).has("id_token"));
++    }
++
++    @Test
++    void apiRefreshPreservesGrantedScopeInsteadOfGrantingAdminScope() throws Exception {
++        Map<String, Object> auth = refresh(token(List.of("openid", "api/reminders.read")));
++        assertEquals("openid api/reminders.read", claims((String) auth.get("AccessToken")).path("scope").asText());
++    }
++
++    @Test
++    void oauthRefreshPreservesReadAndWriteGrant() throws Exception {
++        client.setAllowedOAuthScopes(List.of("openid", "api/reminders.read", "api/reminders.write"));
++        String original = token(List.of("openid", "api/reminders.read", "api/reminders.write"));
++        Response response = oauth(original, client.getClientId(), null, null);
++        assertEquals(200, response.getStatus());
++        assertEquals("openid api/reminders.read api/reminders.write",
++                claims(((JsonNode) response.getEntity()).path("access_token").asText()).path("scope").asText());
++    }
++
++    @ParameterizedTest
++    @ValueSource(booleans = {true, false})
++    void refreshAcceptsBothActiveClientSecrets(boolean oauth) {
++        createConfidentialClient();
++        String original = token(List.of("openid"));
++        String primary = client.getClientSecret();
++        String replacement = service.addUserPoolClientSecret(client.getClientId(), null, pool.getId())
++                .getClientSecretValue();
++        assertRefreshAccepted(original, primary, oauth);
++        assertRefreshAccepted(original, replacement, oauth);
++    }
++
++    @ParameterizedTest
++    @ValueSource(booleans = {true, false})
++    void refreshRequiresRemainingSecretAfterPrimaryDeletion(boolean oauth) {
++        createConfidentialClient();
++        String original = token(List.of("openid"));
++        UserPoolClientSecret primary = service.listUserPoolClientSecrets(pool.getId(), client.getClientId()).getFirst();
++        // Secret IDs use wall-clock milliseconds; ensure the real add operation has a distinct ID.
++        long primaryCreatedAt = Long.parseLong(primary.getClientSecretId()
++                .substring(primary.getClientSecretId().lastIndexOf("--") + 2));
++        while (System.currentTimeMillis() <= primaryCreatedAt) {
++            Thread.onSpinWait();
++        }
++        String replacement = service.addUserPoolClientSecret(client.getClientId(), null, pool.getId())
++                .getClientSecretValue();
++        service.deleteUserPoolClientSecret(client.getClientId(), primary.getClientSecretId(), pool.getId());
++        assertNull(client.getClientSecret());
++        for (String secret : new String[] {null, "incorrect", primary.getClientSecretValue()}) {
++            if (oauth) {
++                assertOAuthError(oauth(original, client.getClientId(), secret, null), "invalid_client");
++            } else {
++                AwsException error = assertThrows(AwsException.class,
++                        () -> service.getTokensFromRefreshToken(client.getClientId(), original, secret));
++                assertEquals("InvalidClientException", error.getErrorCode());
++            }
++        }
++        assertRefreshAccepted(original, replacement, oauth);
++    }
++
++    @Test
++    void rotationGraceRetriesDoNotExtendTheOriginalDeadline() {
++        String original = token(List.of("openid"));
++        String rotated = (String) refresh(original).get("RefreshToken");
++        assertNotNull(rotated);
++        assertNotEquals(original, rotated);
++        clock.advance(9);
++        String retry = (String) refresh(original).get("RefreshToken");
++        assertNotNull(retry);
++        assertNotEquals(rotated, retry);
++        clock.advance(1);
++        assertInvalidRefresh(original);
++        assertNotNull(refresh(rotated).get("AccessToken"));
++        assertNotNull(refresh(retry).get("AccessToken"));
++    }
++
++    @Test
++    void rotationKeepsTheOriginalAbsoluteExpiration() {
++        client.setRefreshTokenValidity(30);
++        String original = token(List.of("openid"));
++        clock.advance(20);
++        String rotated = (String) refresh(original).get("RefreshToken");
++        assertNotNull(rotated);
++        clock.advance(10);
++        assertInvalidRefresh(rotated);
++    }
++
++    @Test
++    void revocationOfOriginalTokenInvalidatesRotatedDescendants() {
++        String original = token(List.of("openid"));
++        String rotated = (String) refresh(original).get("RefreshToken");
++        assertNotNull(rotated);
++        service.revokeToken(client.getClientId(), original, null);
++        assertInvalidRefresh(rotated);
++    }
++
++    @Test
++    void disabledRotationKeepsOriginalUsableAndOmitsNewRefreshToken() {
++        client.setRefreshTokenRotation(Map.of("Feature", "DISABLED"));
++        String original = token(List.of("openid"));
++        assertFalse(refresh(original).containsKey("RefreshToken"));
++        clock.advance(11);
++        assertNotNull(refresh(original).get("AccessToken"));
++    }
++
++    @Test
++    void rotationRejectsLegacyRefreshAuthFlow() {
++        String original = token(List.of("openid"));
++        AwsException error = assertThrows(AwsException.class, () -> service.initiateAuth(client.getClientId(),
++                "REFRESH_TOKEN_AUTH", Map.of("REFRESH_TOKEN", original)));
++        assertEquals("InvalidParameterException", error.getErrorCode());
++    }
++
++    @Test
++    void apiRejectsTokenForAnotherClientInTheSamePool() {
++        String original = token(List.of("openid"));
++        UserPoolClient other = service.createUserPoolClient(pool.getId(), "other", false, true,
++                List.of("code"), List.of("openid"), null, List.of("http://localhost:3000/callback"), null,
++                List.of(), null, null, List.of(), null, List.of(), null, List.of(), null, List.of(), null, null);
++        AwsException error = assertThrows(AwsException.class,
++                () -> service.getTokensFromRefreshToken(other.getClientId(), original));
++        assertEquals("NotAuthorizedException", error.getErrorCode());
++    }
++
++    @Test
++    void oauthRefreshValidatesClientSecretAndCustomDomainBinding() {
++        String original = token(List.of("openid"));
++        client.setClientSecret("synthetic-secret");
++        assertOAuthError(oauth(original, client.getClientId(), "incorrect", null), "invalid_client");
++        assertOAuthError(oauth(original, client.getClientId(), "synthetic-secret", "us-east-1_other"), "invalid_grant");
++        assertEquals(200, oauth(original, client.getClientId(), "synthetic-secret", pool.getId()).getStatus());
++    }
++
++    @Test
++    void oauthRefreshMapsMissingMalformedForgedAndExpiredTokens() {
++        assertOAuthError(oauth(null, client.getClientId(), null, null), "invalid_request");
++        assertOAuthError(oauth("not-a-token", client.getClientId(), null, null), "invalid_grant");
++        String original = token(List.of("openid"));
++        String raw = new String(Base64.getDecoder().decode(original), StandardCharsets.UTF_8);
++        String forged = Base64.getEncoder().encodeToString(raw.replace("alice", "mallory")
++                .getBytes(StandardCharsets.UTF_8));
++        assertOAuthError(oauth(forged, client.getClientId(), null, null), "invalid_grant");
++        clock.advance(3600);
++        assertOAuthError(oauth(original, client.getClientId(), null, null), "invalid_grant");
++    }
++
++    @Test
++    void oauthRefreshRejectsDisabledAndDeletedUsers() {
++        String original = token(List.of("openid"));
++        service.adminDisableUser(pool.getId(), "alice");
++        assertOAuthError(oauth(original, client.getClientId(), null, null), "invalid_grant");
++        service.adminDeleteUser(pool.getId(), "alice");
++        assertOAuthError(oauth(original, client.getClientId(), null, null), "invalid_grant");
++    }
++
++    @Test
++    void oauthRefreshRejectsClientWithoutAuthorizationCodeFlow() {
++        String original = token(List.of("openid"));
++        client.setAllowedOAuthFlows(List.of("client_credentials"));
++        assertOAuthError(oauth(original, client.getClientId(), null, null), "unauthorized_client");
++    }
++
++    @Test
++    void zeroGraceAllowsOnlyOneConcurrentRotation() throws Exception {
++        client.setRefreshTokenRotation(Map.of("Feature", "ENABLED", "RetryGracePeriodSeconds", 0));
++        String original = token(List.of("openid"));
++        CountDownLatch ready = new CountDownLatch(2);
++        CountDownLatch start = new CountDownLatch(1);
++        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
++            Future<Boolean> first = executor.submit(() -> concurrentRefresh(original, ready, start));
++            Future<Boolean> second = executor.submit(() -> concurrentRefresh(original, ready, start));
++            assertTrue(ready.await(10, TimeUnit.SECONDS));
++            start.countDown();
++            int successes = (first.get(10, TimeUnit.SECONDS) ? 1 : 0) + (second.get(10, TimeUnit.SECONDS) ? 1 : 0);
++            assertEquals(1, successes);
++        }
++    }
++
++    @Test
++    void apiRefreshRequiresTheConfidentialClientSecret() {
++        String original = token(List.of("openid"));
++        client.setClientSecret("synthetic-secret");
++        AwsException error = assertThrows(AwsException.class, () -> refresh(original));
++        assertEquals("InvalidClientException", error.getErrorCode());
++        assertNotNull(service.getTokensFromRefreshToken(client.getClientId(), original, "synthetic-secret")
++                .get("AuthenticationResult"));
++    }
++
++    @Test
++    void apiRefreshNarrowsRemovedScopes() throws Exception {
++        String original = token(List.of("openid", "api/reminders.read"));
++        client.setAllowedOAuthScopes(List.of("openid", "api/reminders.write"));
++        Map<String, Object> auth = refresh(original);
++        assertEquals("openid", claims((String) auth.get("AccessToken")).path("scope").asText());
++    }
++
++    @Test
++    void discoveryAdvertisesRefreshGrant() throws Exception {
++        Response response = new CognitoWellKnownController(service).getOpenIdConfiguration(pool.getId());
++        JsonNode grants = mapper.readTree((String) response.getEntity()).path("grant_types_supported");
++        assertTrue(grants.toString().contains("refresh_token"));
++    }
++
++    @ParameterizedTest
++    @ValueSource(strings = {"persistent", "hybrid", "wal"})
++    void rotationDeadlineAndScopeSurviveStorageRestart(String mode) throws Exception {
++        StorageFactory first = factory(mode);
++        service = persistentService(first);
++        initializeResources();
++        String original = token(List.of("openid", "api/reminders.read"));
++        String rotated = (String) refresh(original).get("RefreshToken");
++        assertNotNull(rotated);
++        first.shutdownAll();
++        clock.advance(11);
++        StorageFactory second = factory(mode);
++        try {
++            service = persistentService(second);
++            assertInvalidRefresh(original);
++            Map<String, Object> auth = refresh(rotated);
++            assertEquals("openid api/reminders.read", claims((String) auth.get("AccessToken")).path("scope").asText());
++        } finally {
++            second.shutdownAll();
++        }
++    }
++
++    @Test
++    void lifecycleResetClearsStoredRefreshGrants() {
++        StorageFactory factory = factory("memory");
++        service = persistentService(factory);
++        initializeResources();
++        token(List.of("openid"));
++        StorageBackend<String, CognitoRefreshToken> store = refreshStore(factory);
++        assertEquals(1, store.keys().size());
++        factory.clearAll();
++        assertTrue(store.keys().isEmpty());
++        factory.shutdownAll();
++    }
++
++    @Test
++    void deletingAClientRemovesOnlyItsRefreshGrants() {
++        StorageFactory factory = factory("memory");
++        service = persistentService(factory);
++        initializeResources();
++        token(List.of("openid"));
++        UserPoolClient other = service.createUserPoolClient(pool.getId(), "other", false, true,
++                List.of("code"), List.of("openid"), null, List.of("http://localhost:3000/callback"), null,
++                List.of(), null, null, List.of(), null, List.of(), null, List.of(), null, List.of(), null, null);
++        String otherToken = (String) service.generateAuthResultForHostedAuth(service.adminGetUser(pool.getId(), "alice"),
++                pool, other, null, List.of("openid")).get("RefreshToken");
++        service.deleteUserPoolClient(client.getClientId());
++        assertEquals(1, refreshStore(factory).keys().size());
++        assertNotNull(service.getTokensFromRefreshToken(other.getClientId(), otherToken).get("AuthenticationResult"));
++        factory.shutdownAll();
++    }
++
++    @Test
++    void deletingAPoolRemovesItsRefreshGrants() {
++        StorageFactory factory = factory("memory");
++        service = persistentService(factory);
++        initializeResources();
++        token(List.of("openid"));
++        service.deleteUserPool(pool.getId());
++        assertTrue(refreshStore(factory).keys().isEmpty());
++        factory.shutdownAll();
++    }
++
++    @Test
++    void deletingAUserRemovesTheirRefreshGrants() {
++        StorageFactory factory = factory("memory");
++        service = persistentService(factory);
++        initializeResources();
++        token(List.of("openid"));
++        service.adminDeleteUser(pool.getId(), "alice");
++        assertTrue(refreshStore(factory).keys().isEmpty());
++        factory.shutdownAll();
++    }
++
++    @ParameterizedTest
++    @ValueSource(strings = {"client-id", "client-pool", "pool"})
++    void deletionDuringRefreshLeavesNoPersistedGrants(String resource) throws Exception {
++        StorageFactory first = factory("persistent");
++        LambdaService lambda = mock(LambdaService.class);
++        service = new CognitoService(first, configuration(), new RegionResolver("us-east-1", "000000000000"),
++                lambda, null, mock(SesService.class), mock(SnsService.class), clock, null);
++        initializeResources();
++        String original = token(List.of("openid"));
++        CountDownLatch inTrigger = new CountDownLatch(1);
++        CountDownLatch releaseTrigger = new CountDownLatch(1);
++        pool.setLambdaConfig(Map.of("PreTokenGeneration", "synthetic-pre-token"));
++        when(lambda.invoke(anyString(), eq("synthetic-pre-token"), any(byte[].class), any())).thenAnswer(call -> {
++            inTrigger.countDown();
++            assertTrue(releaseTrigger.await(10, TimeUnit.SECONDS));
++            return new InvokeResult(200, null, call.getArgument(2, byte[].class), null, "synthetic-request");
++        });
++        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
++            Future<?> refreshing = executor.submit(() -> {
++                try {
++                    refresh(original);
++                } catch (AwsException error) {
++                    assertEquals("NotAuthorizedException", error.getErrorCode());
++                }
++            });
++            assertTrue(inTrigger.await(10, TimeUnit.SECONDS));
++            FutureTask<Void> deletion = new FutureTask<>(() -> {
++                switch (resource) {
++                    case "client-id" -> service.deleteUserPoolClient(client.getClientId());
++                    case "client-pool" -> service.deleteUserPoolClient(pool.getId(), client.getClientId());
++                    case "pool" -> service.deleteUserPool(pool.getId());
++                    default -> throw new AssertionError(resource);
++                }
++                return null;
++            });
++            Thread deleting = Thread.ofPlatform().unstarted(deletion);
++            deleting.start();
++            try {
++                if ("pool".equals(resource)) {
++                    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
++                    while (deleting.getState() != Thread.State.BLOCKED && deleting.isAlive()
++                            && System.nanoTime() < deadline) {
++                        Thread.onSpinWait();
++                    }
++                    assertEquals(Thread.State.BLOCKED, deleting.getState());
++                } else {
++                    deleting.join(10_000);
++                    assertFalse(deleting.isAlive());
++                }
++            } finally {
++                releaseTrigger.countDown();
++            }
++            refreshing.get(10, TimeUnit.SECONDS);
++            deleting.join(10_000);
++            assertFalse(deleting.isAlive());
++            deletion.get(10, TimeUnit.SECONDS);
++        } finally {
++            releaseTrigger.countDown();
++            first.shutdownAll();
++        }
++        StorageFactory restarted = factory("persistent");
++        try {
++            persistentService(restarted);
++            assertTrue(refreshStore(restarted).keys().isEmpty(), "Deletion must remove every persisted descendant");
++        } finally {
++            restarted.shutdownAll();
++        }
++    }
++
++    private void createConfidentialClient() {
++        client = service.createUserPoolClient(pool.getId(), "confidential", true, true,
++                List.of("code"), List.of("openid"), null, List.of("http://localhost:3000/callback"), null,
++                List.of(), null, null, List.of(), null, List.of(), null, List.of(), null, List.of(), null, null);
++        client.setRefreshTokenRotation(Map.of("Feature", "DISABLED"));
++    }
++
++    private void assertRefreshAccepted(String token, String secret, boolean oauth) {
++        if (oauth) {
++            assertEquals(200, oauth(token, client.getClientId(), secret, null).getStatus());
++        } else {
++            assertNotNull(service.getTokensFromRefreshToken(client.getClientId(), token, secret)
++                    .get("AuthenticationResult"));
++        }
++    }
++
++    private boolean concurrentRefresh(String original, CountDownLatch ready, CountDownLatch start) throws Exception {
++        ready.countDown();
++        assertTrue(start.await(10, TimeUnit.SECONDS));
++        try {
++            assertNotNull(refresh(original).get("RefreshToken"));
++            return true;
++        } catch (AwsException error) {
++            assertEquals("NotAuthorizedException", error.getErrorCode());
++            return false;
++        }
++    }
++
++    private EmulatorConfig configuration() {
++        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
++        when(config.defaultAccountId()).thenReturn("000000000000");
++        when(config.storage().persistentPath()).thenReturn(tempDir.toString());
++        when(config.storage().wal().compactionIntervalMs()).thenReturn(60_000L);
++        when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
++        when(config.services().cloudfront().domainSuffix()).thenReturn("cloudfront.net");
++        return config;
++    }
++
++    private StorageFactory factory(String mode) {
++        ServiceConfigAccess access = mock(ServiceConfigAccess.class);
++        when(access.storageMode(anyString())).thenReturn(mode);
++        when(access.storageFlushInterval(anyString())).thenReturn(60_000L);
++        return new StorageFactory(configuration(), access);
++    }
++
++    private CognitoService persistentService(StorageFactory factory) {
++        return new CognitoService(factory, configuration(), new RegionResolver("us-east-1", "000000000000"),
++                null, null, mock(SesService.class), mock(SnsService.class), clock, null);
++    }
++
++    private StorageBackend<String, CognitoRefreshToken> refreshStore(StorageFactory factory) {
++        return factory.create("cognito", "cognito-refresh-tokens.json",
++                new TypeReference<Map<String, CognitoRefreshToken>>() {});
++    }
++
++    private Map<String, Object> issued(List<String> scopes) {
++        return service.generateAuthResultForHostedAuth(service.adminGetUser(pool.getId(), "alice"), pool, client,
++                null, scopes);
++    }
++
++    private String token(List<String> scopes) {
++        return (String) issued(scopes).get("RefreshToken");
++    }
++
++    @SuppressWarnings("unchecked")
++    private Map<String, Object> refresh(String token) {
++        return (Map<String, Object>) service.getTokensFromRefreshToken(client.getClientId(), token).get("AuthenticationResult");
++    }
++
++    private void assertInvalidRefresh(String token) {
++        AwsException error = assertThrows(AwsException.class, () -> refresh(token));
++        assertEquals("NotAuthorizedException", error.getErrorCode());
++    }
++
++    private Response oauth(String token, String clientId, String secret, String domainPool) {
++        MultivaluedHashMap<String, String> form = new MultivaluedHashMap<>();
++        form.putSingle("grant_type", "refresh_token");
++        form.putSingle("client_id", clientId);
++        if (token != null) {
++            form.putSingle("refresh_token", token);
++        }
++        if (secret != null) {
++            form.putSingle("client_secret", secret);
++        }
++        ContainerRequestContext context = mock(ContainerRequestContext.class);
++        when(context.getProperty(CognitoCustomDomainFilter.POOL_PROPERTY)).thenReturn(domainPool);
++        return controller.token(null, context, form);
++    }
++
++    private void assertOAuthError(Response response, String expected) {
++        assertEquals(400, response.getStatus());
++        assertEquals(expected, ((JsonNode) response.getEntity()).path("error").asText());
++    }
++
++    private JsonNode claims(String token) throws Exception {
++        return mapper.readTree(Base64.getUrlDecoder().decode(token.split("\\.")[1]));
++    }
++
++    private static class TestClock extends Clock {
++        private Instant now = Instant.parse("2026-10-01T00:00:00Z");
++        void advance(long seconds) {
++            now = now.plusSeconds(seconds);
++        }
++        public ZoneId getZone() {
++            return ZoneOffset.UTC;
++        }
++        public Clock withZone(ZoneId zone) {
++            return this;
++        }
++        public Instant instant() {
++            return now;
++        }
++    }
++}
