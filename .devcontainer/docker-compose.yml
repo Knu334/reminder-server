@@ -34,7 +34,6 @@ services:
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://proxy.bar504.net}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # Opt into the local emulator explicitly; do not set AWS_ENDPOINT_URL globally.
-      MINISTACK_ENDPOINT_URL: http://ministack:4566
       FLOCI_ENDPOINT_URL: http://floci:4566
 
   floci:
