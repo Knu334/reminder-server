@@ -134,3 +134,26 @@ claimed. Follow [acceptance](operations/acceptance.md) for the
 separately authorized live steps and record actual results/version IDs without
 private data. Cost coefficients remain the existing budget inputs, with no
 invented durations, billing or platform measurements.
+
+## 2026-10-08 F10追補: API結果ログのローカル検証
+
+API Lambdaの成功・拒否・503を1呼び出し1件で記録する変更を、製品commit `95dfcdf`（`feat: record safe API invocation outcomes`）に追加した。[独立API結果ログ計画](superpowers/plans/2026-10-08-reminder-server-api-result-logging.md)に沿った先行実装であり、上記の「未実装」はこのcommitより前の記録として残す。独立taskレビューで仕様適合と品質Approvedの判定を得た。作業を止める指摘はなく、既存のESLint警告がMinorとして記録された。
+
+初期化を含む最外側のhandlerに共通wrapperを置き、成功・早期応答・入力拒否・依存先失敗・初期化失敗を記録するようにした。cold/warm invocationでも各1件で、HTTP応答と、delegateが投げた例外の同一性を保つ。記録するJSONは512bytes以内で、requestId/lambdaRequestId/operation/status/code/durationMsに限定する。IDは安全なASCII文字で各128文字以内とし、不正IDを省く。operation/codeは固定許可値を使い、正常時はcodeを省く。本文・画像・owner/item ID・生path/query・token・署名URL・例外message/stackを記録しない。既存のlogging helper/consoleを使い、APIからPutLogEventsを呼ぶ処理、新SDK依存、alarm、metric、subscriptionは追加していない。ログ保持30日は変更していない。
+
+今回の試験はNode24.21.0/npm11.11.1/Python3.13.16で行った。以下は今回実行した試験の結果であり、過去の成功件数を使い回していない。
+
+| 検証 | 今回の結果 |
+| --- | --- |
+| API結果ログ単独 | 22/22。JSONの項目・512bytes上限・ID上限・秘密canary不在、cold/warmと初期化失敗の一回性、ログ失敗時の応答維持、例外の同一性を確認 |
+| Node全suite | 359/359（runtime188 / operations74 / delivery97） |
+| Python packaging | 3/3 |
+| typecheck / lint | 成功 |
+| build / package / verify:zip | 成功。全suiteの前にZIPを再生成・検証 |
+| runtime / full audit | 両方0 vulnerabilities。今回の時点での結果 |
+
+製品変更前の試験では、既存の未コミットnull-body修正を保持した作業ツリーで337/337（runtime166 / operations74 / delivery97）を確認した。製品変更後の359件には、既存のnull-body回帰6件と今回追加したログ試験22件が含まれる。null-body修正とその既存試験は `95dfcdf` に含めていない。既存API試験では、結果ログの追加によってstdoutにJSON行が増えるため、子process出力を読む2か所で、最終行のJSONを解析するように直した。これらの2か所は同commitに含め、元の未コミット変更を残した。npm ciのESLint9.39.0非推奨・サポート終了警告は残っており、依存更新は行っていない。
+
+今回のinfra:checkはTerraformが見つからず、initを実行できなかった。3rootの検証成功とは数えず、ツール復旧とinfra確認は正式E2E計画Task3に残す。APIログ変更ではTerraformとAWS設定を変更していない。
+
+今回確認したのは合成fixtureとconsole captureによるローカル動作であり、CloudWatchへの実配信は未検証である。API/清掃Lambdaログの実配信は後続の正式E2Eで確認する。Flociリソース作成、実AWS、GHA、デプロイ、移行、Cognito操作、PITR、push/PR/mergeは行っていない。過去の331件などの結果、承認済み設計、保持方針はこの追補で書き換えていない。
