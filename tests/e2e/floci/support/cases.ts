@@ -20,7 +20,9 @@ export const definitions: CaseDefinition[] = [
   entry('SAFE-03/redaction', 'I', 'harness', ['no-secret-evidence', 'no-secret-stderr'], 'isolated-harness'),
   entry('TF-02/driver-isolation', 'I', 'terraform', ['reject-default-endpoint', 'owned-cleanup'], 'isolated-driver'),
   { id: 'TF-01/apply', requirementId: 'TF-01', layer: 'L', required: true, acceptance: 'behavior', suite: 'terraform', source: 'formal-e2e-coverage/TF-01', outputs: [
-    { kind: 'http', assertions: ['gateway-current-zip'] }, { kind: 'dynamodb', assertions: ['owned-tables'] },
-    { kind: 's3', assertions: ['pinned-artifact'] }, { kind: 'logs', assertions: ['result-delivery'] },
+    { kind: 'http', assertions: ['provider-refresh-full-definition', 'routes16-alarms9', 'both-current-zip-aliases'] },
+    { kind: 'dynamodb', assertions: ['three-protected-tables-pitr35'] },
+    { kind: 's3', assertions: ['create-only-pinned-artifact', 'protected-versioned-buckets'] },
+    { kind: 'logs', assertions: ['three-log-groups-retention30'] },
   ] },
 ];

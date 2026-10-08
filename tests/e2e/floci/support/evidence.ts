@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile, open, rename } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import type { CaseDefinition, CaseRecorder, CaseResult, Evidence, LogCheckResult, OutputResult, PendingLogCheck, RunSummary } from './types.ts';
+import type { CaseDefinition, CaseRecorder, CaseResult, Evidence, LogCheckResult, OutputResult, PendingLogCheck, RunSummary, OwnedManifest, OwnedIdentity } from './types.ts';
 
 const kinds = ['http', 'dynamodb', 's3', 'logs'] as const;
 const phases = new Set(['inventory', 'preflight', 'provision', 'input', 'outputs', 'logs', 'complete', 'cleanup']);
@@ -10,8 +10,10 @@ const compatibilityReasons = new Set(['gateway-delivery-unsupported', 'scheduler
 const codes = new Set(['INVALID_JSON', 'INVALID_INPUT', 'UNSUPPORTED_MEDIA_TYPE', 'PAYLOAD_TOO_LARGE', 'LEGACY_API_REMOVED', 'REMINDER_NOT_FOUND', 'THUMBNAIL_NOT_FOUND', 'INVALID_THUMBNAIL', 'THUMBNAIL_TOO_LARGE', 'OWNER_STORAGE_LIMIT_EXCEEDED', 'INVALID_LIMIT', 'INVALID_CURSOR', 'PRECONDITION_REQUIRED', 'PRECONDITION_FAILED', 'METHOD_NOT_ALLOWED', 'RATE_LIMIT_EXCEEDED', 'SERVICE_UNAVAILABLE', 'UNAUTHORIZED', 'FORBIDDEN']);
 const label = /^[a-zA-Z0-9][a-zA-Z0-9/_.-]{0,159}$/;
 type PendingCase = { definition: CaseDefinition; result: CaseResult; checks: PendingLogCheck[] };
-export type ProcessEvidence = { tool: 'node' | 'npm' | 'python3' | 'terraform'; status: 'succeeded' | 'failed' | 'timeout'; durationMs: number; timeoutMs: number; exitCode: number | null; expectedOutputMatched: boolean };
-type State = { directory: string; definitions: CaseDefinition[]; results: Map<string, CaseResult>; pending: Map<string, PendingCase>; active: Set<string>; processes: ProcessEvidence[]; closed: boolean };
+export const blockedEndpointClasses = new Set(['proxy-authentication', 'invalid-url', 'aws-s3', 'aws-s3-regional', 'aws-s3-control', 'aws-sts', 'aws-iam', 'aws-tagging', 'terraform-registry', 'owned-host-https', 'synthetic-account-floci-alias', 'unverified-floci-alias', 'unverified-localstack-alias', 'public-xml-schema', 'aws-other', 'unowned-host', 'redirect']);
+export const terraformActions = new Set(['ListTagsForResource', 'CreateOpenIDConnectProvider', 'GetOpenIDConnectProvider', 'ListOpenIDConnectProviders', 'CreateRole', 'GetRole', 'CreatePolicy', 'GetPolicy', 'PutRolePolicy', 'GetRolePolicy', 'ListRolePolicies', 'ListAttachedRolePolicies', 'CreateBucket', 'GetBucketVersioning', 'GetBucketPolicy', 'GetBucketTagging', 'GetBucketAcl', 'GetBucketCors', 'GetBucketLogging', 'GetBucketRequestPayment', 'GetBucketWebsite', 'GetBucketLifecycleConfiguration', 'GetBucketEncryption', 'GetBucketPolicyStatus', 'GetBucketOwnershipControls', 'PutBucketVersioning', 'PutBucketPolicy', 'PutBucketEncryption', 'PutPublicAccessBlock', 'CreateUserPool', 'DescribeUserPool', 'CreateUserPoolClient', 'CreateUserPoolDomain', 'DescribeUserPoolDomain', 'SetUserPoolMfaConfig', 'CreateTable', 'DescribeTable', 'UpdateContinuousBackups', 'DescribeContinuousBackups', 'CreateLogGroup', 'PutRetentionPolicy', 'CreateApi', 'CreateFunction', 'GetFunction', 'PutMetricAlarm', 'CreateScheduleGroup', 'DeleteOpenIDConnectProvider', 'DeleteBucket', 'DeleteRole']);
+export type ProcessEvidence = { tool: 'node' | 'npm' | 'python3' | 'terraform'; status: 'succeeded' | 'failed' | 'timeout'; durationMs: number; timeoutMs: number; exitCode: number | null; expectedOutputMatched: boolean; failedAction?: string; blockedEndpoints?: string[]; blockedEndpointCounts?: Record<string, number>; forwarded?: number };
+type State = { directory: string; definitions: CaseDefinition[]; results: Map<string, CaseResult>; pending: Map<string, PendingCase>; active: Set<string>; processes: ProcessEvidence[]; resources: OwnedManifest['resources']; finalized: boolean; closed: boolean };
 const states = new WeakMap<Evidence, State>();
 function stateOf(evidence: Evidence): State {
   const state = states.get(evidence);
@@ -73,7 +75,12 @@ async function save(evidence: Evidence, state: State, summary?: RunSummary): Pro
   await writeFile(join(state.directory, 'results.json'), JSON.stringify({ runId: evidence.runId, cases, ...(summary ? { summary } : {}) }, null, 2) + '\n', { mode: 0o600 });
   // In-flight log checks contain sensitive correlation values, so only their safe partial results are persisted.
   await writeFile(join(state.directory, 'pending.json'), JSON.stringify({ cases: [...state.pending.values()].map(pending => safeResult(pending.definition, { ...pending.result, status: 'fail', reason: 'logs-pending' })) }, null, 2) + '\n', { mode: 0o600 });
-  await writeFile(join(state.directory, 'manifest.json'), JSON.stringify({ runId: evidence.runId, resources: [], processes: state.processes }, null, 2) + '\n', { mode: 0o600 });
+  const pending = join(state.directory, 'manifest.pending');
+  const file = await open(pending, 'w', 0o600);
+  try { await file.writeFile(JSON.stringify({ runId: evidence.runId, resources: state.resources, processes: state.processes, resultsFinalized: state.finalized }, null, 2) + '\n'); await file.sync(); } finally { await file.close(); }
+  await rename(pending, join(state.directory, 'manifest.json'));
+  const directory = await open(state.directory, 'r');
+  try { await directory.sync(); } finally { await directory.close(); }
 }
 export async function createEvidence(definitions: CaseDefinition[], runDirectory: string): Promise<Evidence> {
   definitions.forEach(validateDefinition);
@@ -86,11 +93,12 @@ export async function createEvidence(definitions: CaseDefinition[], runDirectory
     outputs: def.outputs.map(output => ({ kind: output.kind, assertions: [...output.assertions], ...(output.notApplicableReason ? { notApplicableReason: output.notApplicableReason } : {}) })),
   }));
   const directoryId = basename(runDirectory);
-  const state: State = { directory: runDirectory, definitions: safeDefinitions, results: new Map(), pending: new Map(), active: new Set(), processes: [], closed: false };
+  const state: State = { directory: runDirectory, definitions: safeDefinitions, results: new Map(), pending: new Map(), active: new Set(), processes: [], resources: [], finalized: false, closed: false };
   const evidence: Evidence = {
     runId: /^e2e-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(directoryId) ? directoryId : `e2e-${randomUUID()}`,
     async record(result) {
       stateOf(evidence);
+      if (state.finalized) throw new Error('RESULTS_FINALIZED');
       const def = state.definitions.find(item => item.id === result.id);
       if (!def || state.active.has(result.id) || state.pending.has(result.id)) throw new Error('INVALID_CASE_TRANSITION');
       const prior = state.results.get(result.id)!;
@@ -125,12 +133,13 @@ export async function createEvidence(definitions: CaseDefinition[], runDirectory
 export async function recordProcess(evidence: Evidence, result: ProcessEvidence): Promise<void> {
   const state = stateOf(evidence);
   if (!['node', 'npm', 'python3', 'terraform'].includes(result.tool) || !['succeeded', 'failed', 'timeout'].includes(result.status)) throw new Error('INVALID_PROCESS_RESULT');
-  state.processes.push({ tool: result.tool, status: result.status, durationMs: Math.max(0, Math.round(result.durationMs)), timeoutMs: result.timeoutMs, exitCode: result.exitCode, expectedOutputMatched: result.expectedOutputMatched === true });
+  state.processes.push({ tool: result.tool, status: result.status, durationMs: Math.max(0, Math.round(result.durationMs)), timeoutMs: result.timeoutMs, exitCode: result.exitCode, expectedOutputMatched: result.expectedOutputMatched === true, ...(result.blockedEndpoints ? { blockedEndpoints: result.blockedEndpoints.filter(item => blockedEndpointClasses.has(item)).slice(0, 128) } : {}), ...(result.blockedEndpointCounts ? { blockedEndpointCounts: Object.fromEntries(Object.entries(result.blockedEndpointCounts).filter(([kind, count]) => blockedEndpointClasses.has(kind) && Number.isSafeInteger(count) && count >= 0)) } : {}), ...(Number.isSafeInteger(result.forwarded) && result.forwarded! >= 0 ? { forwarded: result.forwarded } : {}), ...(result.failedAction && terraformActions.has(result.failedAction) ? { failedAction: result.failedAction } : {}) });
   await save(evidence, state);
 }
 export async function runCase(definition: CaseDefinition, evidence: Evidence, action: (recorder: CaseRecorder) => Promise<void>): Promise<void> {
   const state = stateOf(evidence); const def = state.definitions.find(item => item.id === definition.id);
   if (!def || state.active.has(def.id) || state.pending.has(def.id) || state.results.get(def.id)?.phase !== 'inventory') throw new Error('INVALID_CASE_TRANSITION');
+  if (state.finalized) throw new Error('RESULTS_FINALIZED');
   state.active.add(def.id);
   const started = performance.now(); const outputs: OutputResult[] = []; const checks: PendingLogCheck[] = [];
   const result: CaseResult = { id: def.id, status: 'fail', phase: 'input', durationMs: 0, outputs };
@@ -180,4 +189,37 @@ export async function flushPendingLogs(evidence: Evidence, observe: (checks: Pen
     state.pending.delete(item.definition.id);
     await evidence.record({ ...item.result, outputs, phase: 'logs', ...(passed ? {} : { status: 'fail' as const, reason: observerFailed ? 'observer-failed' : 'logs-missing' }) });
   }
+}
+
+/** Persist intent before a create request; only safe synthetic identities belong here. */
+export async function reserveResource(evidence: Evidence, resource: { kind: string; name: string; id: string }): Promise<void> {
+  const state = stateOf(evidence);
+  if (state.finalized || ![resource.kind, resource.name, resource.id].every(value => label.test(value)) ||
+      !resource.id.startsWith(`${evidence.runId}/`) || state.resources.some(item => item.id === resource.id)) throw new Error('RESOURCE_REJECTED');
+  state.resources.push({ kind: resource.kind, name: resource.name, id: resource.id, created: false, removed: false });
+  await save(evidence, state);
+}
+export async function markResource(evidence: Evidence, id: string, status: 'created' | 'removed'): Promise<void> {
+  const state = stateOf(evidence); const resource = state.resources.find(item => item.id === id);
+  if (!resource || resource.removed || (status === 'created' && state.finalized) || (status === 'removed' && !state.finalized)) throw new Error('RESOURCE_REJECTED');
+  resource[status] = true; await save(evidence, state);
+}
+export function evidenceContext(evidence: Evidence): { directory: string; finalized: boolean; manifest: OwnedManifest } {
+  const state = stateOf(evidence);
+  return { directory: state.directory, finalized: state.finalized, manifest: { runId: evidence.runId, resources: structuredClone(state.resources) } };
+}
+export async function bindResourceIdentities(evidence: Evidence, id: string, identities: OwnedIdentity[]): Promise<void> {
+  const state = stateOf(evidence); const resource = state.resources.find(item => item.id === id);
+  const identifier = /^[a-zA-Z0-9/$][a-zA-Z0-9:/_.@$+-]{0,2047}$/;
+  if (state.finalized || !resource || resource.kind !== 'terraform-address' || resource.removed || identities.some(item => !/^aws_[a-z0-9_]+$/.test(item.type) || !identifier.test(item.identity) || (item.parent !== undefined && !identifier.test(item.parent)))) throw new Error('RESOURCE_REJECTED');
+  const retained = new Map((resource.identities ?? []).map(item => [JSON.stringify(item), item]));
+  for (const item of identities) { const safe = { type: item.type, identity: item.identity, ...(item.parent ? { parent: item.parent } : {}) }; retained.set(JSON.stringify(safe), safe); }
+  resource.identities = [...retained.values()];
+  if (identities.length) resource.created = true;
+  await save(evidence, state);
+}
+export async function finalizeResults(evidence: Evidence): Promise<void> {
+  const state = stateOf(evidence);
+  if (state.active.size) throw new Error('CASE_STILL_ACTIVE');
+  if (!state.finalized) { await flushPendingLogs(evidence, async () => []); state.finalized = true; await save(evidence, state); }
 }

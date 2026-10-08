@@ -26,7 +26,8 @@
     "release:workflow": "tsx scripts/release/workflow.ts",
     "e2e:preflight": "tsx scripts/e2e/preflight.ts",
     "test:integration:e2e": "tsx --test tests/integration/formal-e2e/*.test.ts",
-    "test:e2e:floci": "tsx scripts/e2e/run.ts --layer floci"
+    "test:e2e:floci": "tsx scripts/e2e/run.ts --layer floci",
+    "test:e2e:terraform": "tsx scripts/e2e/run.ts --layer terraform"
   },
   "dependencies": {
     "@aws-sdk/client-cloudwatch": "3.1146.0",

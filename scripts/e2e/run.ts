@@ -3,8 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { createEvidence, recordProcess } from '../../tests/e2e/floci/support/evidence.ts';
+import { createEvidence, recordProcess, terraformActions, finalizeResults, runCase, evidenceContext } from '../../tests/e2e/floci/support/evidence.ts';
 import type { ProcessEvidence } from '../../tests/e2e/floci/support/evidence.ts';
+import type { CaseDefinition, Evidence, ProvisionedStack } from '../../tests/e2e/floci/support/types.ts';
 import { definitions } from '../../tests/e2e/floci/support/cases.ts';
 
 export const deadlines = { run: 75 * 60_000, cleanup: 15 * 60_000, total: 90 * 60_000, http: 30_000, terraform: 10 * 60_000, authExpiry: 330_000, logs: 60_000, scheduler: 90_000, cleanupInvoke: 700_000 } as const;
@@ -26,7 +27,8 @@ export function childEnvironment(): NodeJS.ProcessEnv {
   // Do not copy PATH, NODE_OPTIONS, npm config, credentials, profiles, proxy or
   // endpoint variables from the invoking process. Values below are synthetic.
   return {
-    PATH: '/tmp/aws-sdd-tools/node_modules/.bin:/tmp/aws-sdd-tools/bin:/usr/local/bin:/usr/bin:/bin',
+    PATH: '/workspace/.worktrees/aws-sdd/.superpowers/tools/aws-sdd/node_modules/.bin:/workspace/.worktrees/aws-sdd/.superpowers/tools/aws-sdd/bin:/usr/local/bin:/usr/bin:/bin',
+    CHECKPOINT_DISABLE: '1', TF_IN_AUTOMATION: '1', TF_CLI_CONFIG_FILE: '/dev/null',
     LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TZ: 'UTC',
     AWS_REGION: 'ap-northeast-1', AWS_DEFAULT_REGION: 'ap-northeast-1',
     AWS_ACCESS_KEY_ID: 'local', AWS_SECRET_ACCESS_KEY: 'local', AWS_MAX_ATTEMPTS: '1',
@@ -35,10 +37,12 @@ export function childEnvironment(): NodeJS.ProcessEnv {
     NPM_CONFIG_USERCONFIG: '/dev/null', NPM_CONFIG_GLOBALCONFIG: '/dev/null', PYTHONNOUSERSITE: '1',
   };
 }
-export async function runChild(tool: ProcessEvidence['tool'], args: string[], options: { cwd: string; timeoutMs: number; expectedOutput?: string; signal?: AbortSignal; record?: (result: ProcessEvidence) => Promise<void> }): Promise<ProcessEvidence> {
+export async function runChild(tool: ProcessEvidence['tool'], args: string[], options: { cwd: string; timeoutMs: number; expectedOutput?: string; terraformProxy?: string; signal?: AbortSignal; record?: (result: ProcessEvidence) => Promise<void> }): Promise<ProcessEvidence> {
   if (!['node', 'npm', 'python3', 'terraform'].includes(tool) || !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0 || options.timeoutMs > deadlines.terraform) throw new Error('CHILD_REJECTED');
+  if (options.terraformProxy && (tool !== 'terraform' || !/^http:\/\/e2e:[a-f0-9]{48}@127\.0\.0\.1:[1-9][0-9]{0,4}$/.test(options.terraformProxy))) throw new Error('CHILD_REJECTED');
   const started = performance.now();
   const env = childEnvironment();
+  if (options.terraformProxy) { env.HTTP_PROXY = options.terraformProxy; env.HTTPS_PROXY = options.terraformProxy; env.NO_PROXY = ''; }
   // npm rejects loading the same config filename at two levels. Use distinct
   // empty files owned by this invocation, with no ambient user/global config.
   const configDirectory = tool === 'npm' ? await mkdtemp(join(tmpdir(), 'e2e-child-')) : undefined;
@@ -51,7 +55,7 @@ export async function runChild(tool: ProcessEvidence['tool'], args: string[], op
     env.NPM_CONFIG_LOGS_MAX = '0';
   }
   const result = await new Promise<ProcessEvidence>(resolve => {
-    let timedOut = false; let stdout = ''; let overflow = false; let settled = false;
+    let timedOut = false; let stdout = ''; let overflow = false; let settled = false; let failedAction: string | undefined;
     const child = spawn(tool, args, { cwd: options.cwd, env, stdio: ['ignore', 'pipe', 'pipe'], shell: false, detached: true });
     const kill = () => { timedOut = true; if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } } };
     const timer = setTimeout(kill, options.timeoutMs);
@@ -62,18 +66,35 @@ export async function runChild(tool: ProcessEvidence['tool'], args: string[], op
         if (stdout.length + chunk.length > 4096) { overflow = true; stdout = ''; } else stdout += chunk.toString('utf8');
       }
     });
-    child.stderr.on('data', () => { /* Drain without storing or forwarding raw diagnostics. */ });
+    child.stderr.on('data', (chunk: Buffer) => {
+      // Match only fixed API action names; raw Terraform diagnostics are discarded.
+      const action = /operation error [A-Za-z0-9 ]+: ([A-Za-z0-9]+)/.exec(chunk.toString('utf8'))?.[1];
+      if (action && terraformActions.has(action)) failedAction ??= action;
+    });
     const finish = (exitCode: number | null) => {
       if (settled) return; settled = true; clearTimeout(timer); options.signal?.removeEventListener('abort', kill);
       resolve({ tool, status: timedOut ? 'timeout' : exitCode === 0 ? 'succeeded' : 'failed', exitCode,
         durationMs: Math.round(performance.now() - started), timeoutMs: options.timeoutMs,
-        expectedOutputMatched: options.expectedOutput !== undefined && !overflow && stdout.trim() === options.expectedOutput });
+        ...(failedAction ? { failedAction } : {}), expectedOutputMatched: options.expectedOutput !== undefined && !overflow && stdout.trim() === options.expectedOutput });
     };
     child.on('error', () => finish(null)); child.on('close', finish);
   });
   if (configDirectory) await rm(configDirectory, { recursive: true, force: true });
   await options.record?.(result);
   return result;
+}
+export async function runConstruction(evidence: Evidence, definition: CaseDefinition, construct: () => Promise<ProvisionedStack>): Promise<ProvisionedStack | undefined> {
+  let stack: ProvisionedStack | undefined;
+  await runCase(definition, evidence, async recorder => {
+    try { stack = await construct(); }
+    catch (error) {
+      const { ProvisioningFailure } = await import('./terraform.ts');
+      if (error instanceof ProvisioningFailure) stack = error.ownedStack;
+      throw error;
+    }
+    for (const output of stack.constructionOutputs) recorder.recordOutput(output);
+  });
+  return stack;
 }
 export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
   // Parse before DNS, files, children or any other external side effect.
@@ -85,29 +106,48 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
   }
   const layer = flags.get('--layer') ?? 'floci';
   const suite = flags.get('--suite'); const caseId = flags.get('--case');
-  const selected = definitions.filter(def => (layer !== 'terraform' || def.suite === 'terraform') && (!suite || def.suite === suite) && (!caseId || def.id === caseId));
+  const selected = definitions.filter(def => (layer !== 'terraform' || (def.suite === 'terraform' && def.layer === 'L')) && (!suite || def.suite === suite) && (!caseId || def.id === caseId));
   if (!['floci', 'terraform'].includes(layer) || !selected.length) { console.error('E2E_INVALID_SELECTION'); return 2; }
   const partial = selected.length !== definitions.length || suite !== undefined || caseId !== undefined || layer === 'terraform';
   console.log(partial ? 'E2E_PARTIAL_SELECTION' : 'E2E_FOUNDATION_INVENTORY');
   const budget = new RunBudget();
   let exit: 0 | 1 | 2 = 1;
+  const controller = new AbortController(); const cancel = () => controller.abort();
+  process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
   try {
     const evidence = await createEvidence(selected, join(process.cwd(), 'artifacts', 'formal-e2e', `e2e-${randomUUID()}`));
+    let stack: ProvisionedStack | undefined; let phase = 'preflight';
     try {
       const { preflight } = await import('./preflight.ts');
-      await preflight(result => recordProcess(evidence, result));
-      // Task3 supplies provisioning; Task4 supplies gated sequential execution.
-      // Inventory remains not-run until those actions actually exist.
+      const target = await preflight(result => recordProcess(evidence, result));
+      const definition = selected.find(def => def.id === 'TF-01/apply');
+      if (definition) {
+        phase = 'provision';
+        if (!budget.allow('terraform') || controller.signal.aborted) await evidence.record({ id: definition.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'budget-exhausted' });
+        else stack = await runConstruction(evidence, definition, async () => {
+          const { prepareArtifact } = await import('./prepare-artifact.ts');
+          const artifact = await prepareArtifact(evidenceContext(evidence).directory, { budget, signal: controller.signal, record: result => recordProcess(evidence, result) });
+          const { provisionStack } = await import('./terraform.ts');
+          return provisionStack(target, { publication: false, budget, signal: controller.signal }, artifact, evidence);
+        });
+      }
+      // Task4 attaches sequential fixture/suite execution here. Construction is
+      // shared once per run; unrelated foundation actions remain unimplemented.
+      for (const def of selected.filter(def => def.id !== 'TF-01/apply')) await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: stack ? 'implementation-pending' : 'prerequisite-failed' });
     } catch {
-      exit = 2;
-      for (const def of selected) await evidence.record({ id: def.id, status: 'not-run', phase: 'preflight', durationMs: 0, reason: 'preflight-failed' });
+      exit = phase === 'preflight' ? 2 : 1;
+      for (const def of selected) await evidence.record({ id: def.id, status: 'not-run', phase: phase === 'preflight' ? 'preflight' : 'provision', durationMs: 0, reason: phase === 'preflight' ? 'preflight-failed' : 'prerequisite-failed' });
     } finally {
+      await finalizeResults(evidence);
       budget.beginCleanup();
-      const summary = await evidence.finish({ attempted: 0, succeeded: 0, errors: 0, leaks: 0 });
+      let cleanup = { attempted: 0, succeeded: 0, errors: 0, leaks: 0 };
+      if (stack) { try { cleanup = await stack.destroy(); } catch { cleanup = { attempted: 1, succeeded: 0, errors: 1, leaks: 0 }; } }
+      const summary = await evidence.finish(cleanup);
       if (exit !== 2) exit = summary.exitCode;
-      console.log(JSON.stringify({ partial, foundationOnly: true, ...summary, exitCode: exit }));
+      console.log(JSON.stringify({ runId: evidence.runId, partial, foundationOnly: layer !== 'terraform', ...summary, exitCode: exit }));
     }
   } catch { console.error('E2E_HARNESS_FAILED'); exit = 1; }
+  finally { process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel); }
   return exit;
 }
 if (require.main === module) {

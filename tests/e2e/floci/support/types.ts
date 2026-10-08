@@ -22,9 +22,10 @@ export type RunSummary = { selected: number; passed: number; failed: number; not
 export type LocalTarget = { endpoint: 'http://floci:4566'; region: 'ap-northeast-1'; addresses: ReadonlyMap<string, string> };
 export type HttpResult = { status: number; headers: Headers; bytes: Buffer };
 export type ArtifactSnapshot = { zipPath: string; sha256Hex: string; sha256Base64: string; compressedBytes: number; inputDigest: string; dirtyPaths: string[] };
-export type FixtureOptions = { publication: boolean };
+export type FixtureOptions = { publication: boolean; budget?: { allow(phase: 'terraform'): number; beginCleanup(): void; cleanupRemaining(): number }; signal?: AbortSignal };
 export type SuiteOptions = { suite: string; publication: boolean };
-export type OwnedManifest = { runId: string; resources: { kind: string; name: string; id: string; created: boolean; removed: boolean }[] };
+export type OwnedIdentity = { type: string; identity: string; parent?: string };
+export type OwnedManifest = { runId: string; resources: { kind: string; name: string; id: string; created: boolean; removed: boolean; identities?: OwnedIdentity[] }[] };
 // Task4 replaces this temporary structural port with the pinned CloudWatchLogsClient.
 // No implementation or fallback client is supplied by the Task1 foundation.
 export interface CloudWatchLogsPort { send(command: unknown): Promise<unknown> }
@@ -51,6 +52,9 @@ export type PreparedTerraformRoots = {
 export type ProvisionedStack = {
   target: LocalTarget; artifact: ArtifactSnapshot; manifest: OwnedManifest;
   bindings: Readonly<Record<string, string>>; stateDirectory: string;
+  /** Register before invoking Lambda/enabling Scheduler; verifies tracked work has ended. */
+  setQuiescenceGuard(check: () => Promise<void>): void;
+  constructionOutputs: OutputResult[];
   destroy(): Promise<CleanupSummary>;
 };
 export type LogExpectation = { service: 'api' | 'gateway' | 'cleanup'; requestId?: string; lambdaRequestId?: string; since: number; mode: 'present' | 'absent'; until?: number; status?: number; operation?: string; code?: string };
