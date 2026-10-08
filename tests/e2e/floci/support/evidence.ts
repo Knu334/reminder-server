@@ -143,7 +143,14 @@ export async function runCase(definition: CaseDefinition, evidence: Evidence, ac
       deferLogs(check) {
         assertOpen();
         if (check.caseId !== def.id || !def.outputs.find(output => output.kind === 'logs')!.assertions.includes(check.assertion) || checks.some(item => item.assertion === check.assertion)) throw new Error('INVALID_LOG_CHECK');
-        if (check.expectation.service === 'api' && check.expectation.mode === 'present' && (!check.expectation.requestId || !Number.isInteger(check.expectation.status))) throw new Error('INVALID_LOG_CHECK');
+        const expectations = [check.expectation, ...(check.controls ? [check.controls.before, check.controls.after] : [])];
+        for (const expectation of expectations) {
+          if (expectation.service === 'api' && expectation.mode === 'present' &&
+              (typeof expectation.requestId !== 'string' || !expectation.requestId.trim() ||
+               expectation.status === undefined || !Number.isInteger(expectation.status) || expectation.status < 100 || expectation.status > 599)) {
+            throw new Error('INVALID_LOG_CHECK');
+          }
+        }
         checks.push(structuredClone(check));
       },
     });

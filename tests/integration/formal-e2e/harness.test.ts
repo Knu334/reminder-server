@@ -9,7 +9,7 @@ import { createEvidence, runCase, flushPendingLogs, recordProcess } from '../../
 import { localRequest } from '../../e2e/floci/support/transport.ts';
 import { definitions } from '../../e2e/floci/support/cases.ts';
 import { runMain, runChild, childEnvironment, RunBudget } from '../../../scripts/e2e/run.ts';
-import type { CaseDefinition, Evidence, LocalTarget, OutputResult, PendingLogCheck } from '../../e2e/floci/support/types.ts';
+import type { CaseDefinition, Evidence, LocalTarget, OutputResult, PendingLogCheck, LogExpectation } from '../../e2e/floci/support/types.ts';
 
 const target: LocalTarget = { endpoint: 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map([['floci', '172.18.0.2']]) };
 const cleanup = { attempted: 0, succeeded: 0, errors: 0, leaks: 0 };
@@ -290,3 +290,40 @@ void test('runner_directory_and_manifest_use_the_same_run_id', async t => {
   assert.equal(evidence.runId, 'e2e-00000000-0000-4000-8000-000000000000');
   await evidence.finish(cleanup);
 });
+
+const invalidControls: [string, (control: LogExpectation) => void][] = [
+  ['missing_request_id', control => { delete control.requestId; }],
+  ['empty_request_id', control => { control.requestId = ''; }],
+  ['blank_request_id', control => { control.requestId = '   '; }],
+  ['missing_status', control => { delete control.status; }],
+  ['fractional_status', control => { control.status = 200.5; }],
+  ['status_below_http_range', control => { control.status = 99; }],
+  ['status_above_http_range', control => { control.status = 600; }],
+];
+for (const position of ['before', 'after'] as const) {
+  for (const [label, invalidate] of invalidControls) {
+    void test(`api_absence_rejects_${position}_control_${label}`, async t => {
+      const directory = await temporary(t);
+      const evidence = await createEvidence([definition()], directory);
+      const controls = {
+        before: { ...check.expectation, since: 100, mode: 'present' as const },
+        after: { ...check.expectation, since: 400, mode: 'present' as const },
+      };
+      invalidate(controls[position]);
+      await runCase(definition(), evidence, async recorder => {
+        recorder.recordInput({ httpStatus: 401 });
+        outputs.slice(0, 3).forEach(output => recorder.recordOutput(output));
+        recorder.deferLogs({ ...check, expectation: { service: 'api', since: 200, until: 300, mode: 'absent' }, controls });
+      });
+      await flushPendingLogs(evidence, async () => [{
+        caseId: check.caseId, assertion: check.assertion, matched: true,
+        controlsMatched: { before: true, after: true },
+      }]);
+      const summary = await evidence.finish(cleanup);
+      assert.equal(summary.passed, 0);
+      assert.equal(summary.failed, 1);
+      assert.equal(summary.exitCode, 1);
+      assert.match(await report(directory), /"httpStatus": 401/);
+    });
+  }
+}
