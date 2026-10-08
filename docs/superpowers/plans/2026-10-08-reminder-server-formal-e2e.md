@@ -1,4 +1,4 @@
-# Reminder Server Formal E2E Implementation Plan（未承認案）
+# Reminder Server Formal E2E Implementation Plan（承認済み）
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,9 +8,9 @@
 
 **Tech Stack:** Node24.21.0/npm11.11.1、Python3.13.16、TypeScript/CommonJS/tsx/node:test/node:assert、既存固定AWS SDK v3。Terraform1.16.5/AWS provider6.67.0（本番3rootを再利用、stateはlocal）。
 
-**Spec:** [正式E2E設計案](../specs/2026-10-08-reminder-server-formal-e2e-design.md)、[要件対応表](../../operations/formal-e2e-coverage.md)、[調査記録](../../operations/formal-e2e-research.md)。製品契約は[承認済みAWS設計](../specs/2026-10-02-reminder-server-aws-design.md)と現行API/運用文書。
+**Spec:** [正式E2E設計](../specs/2026-10-08-reminder-server-formal-e2e-design.md)、[要件対応表](../../operations/formal-e2e-coverage.md)、[調査記録](../../operations/formal-e2e-research.md)。製品契約は[承認済みAWS設計](../specs/2026-10-02-reminder-server-aws-design.md)と現行API/運用文書。
 
-**Status:** 2026-10-08レビュー待ち。E2E実装は独立APIログ計画の承認・完了commitを前提とする。設計/対応表/本計画の承認前は、実装・Flociリソース作成・applyを開始しない。
+**Status:** 2026-10-08承認済み・実装未着手。6指摘への改訂（commit 2d275c0）提示後、ユーザーが設計/対応表/本計画と独立API結果ログ計画を承認した。E2E実装は先行APIログ変更の完了commitを前提とする。[承認記録と実装引き継ぎ](../handoffs/2026-10-08-reminder-server-formal-e2e-implementation.md)に従い、別セッションで実装を開始する。同じ範囲の承認を再確認しない。
 ハンドオフが許可した文書作成の範囲で、設計案と計画案を同時に提示した。SDD方式は選択済みのため、再確認は不要。
 
 ## 作る順序と、テストを実行する順序
@@ -300,6 +300,6 @@ Task4で既存SDK固定versionに合わせた `@aws-sdk/client-cloudwatch-logs` 
 AUTH→Task5、API→Task6/7、STORE→Task7/10、IMG→Task8/10、CLEAN→Task9、
 OPS→Task3/10/11、TF→Task3/4、OBS→Task2/4/11、SAFE→Task1/3/4/12。
 既存null-body修正を保持し、本計画に製品コード変更やprivate入力の参照は含めない。API結果ログは独立計画を先に完了させる。
-承認待ちの対象は設計/対応表、本計画、2validationの一時コピー変換を含む接続・隔離・後片付けの限定差分。API結果ログは独立計画で承認する。本番Terraformの変更は計画に含めない。S3旧version60日保持とログ保持30日は維持する案。
+承認済みの対象は設計/対応表、本計画、2validationの一時コピー変換を含む接続・隔離・後片付けの限定差分。API結果ログも独立計画として承認済み。先行変更として完了させる。本番Terraformの変更は計画に含めない。S3旧version60日保持とログ保持30日は維持する案。
 費用判断は[費用・ログ方針](../../operations/formal-e2e-cost-and-logging.md)に記載する。
 SDD方式は選択済み。旧taskは再開せず、新計画専用台帳を承認後に作成する。

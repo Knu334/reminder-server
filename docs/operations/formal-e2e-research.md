@@ -2,6 +2,8 @@
 
 2026-10-08。設計/計画レビュー用。Floci resource作成・E2E実行・Terraform applyは未実施。
 
+2026-10-08承認追補: 6指摘への改訂（commit 2d275c0）提示後、ユーザーが正式E2E設計・対応表・両計画を承認した。実装は未着手。[実装引き継ぎ](../superpowers/handoffs/2026-10-08-reminder-server-formal-e2e-implementation.md)から別セッションで開始する。以下の「承認後」「レビュー中」は調査・レビュー時点の記録として保持する。
+
 ## 実際に確認した状態
 
 | 対象 | 今回の確認 | 解釈 |

@@ -1,7 +1,7 @@
-# 正式E2E 要件別検証対応表（未承認案）
+# 正式E2E 要件別検証対応表（承認済み）
 
-作成日: 2026-10-08。[設計案](../superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)、
-[計画案](../superpowers/plans/2026-10-08-reminder-server-formal-e2e.md)。全追加ケースは**未実装・未実施**。
+作成日: 2026-10-08。[設計](../superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)、
+[実装計画](../superpowers/plans/2026-10-08-reminder-server-formal-e2e.md)。2026-10-08に両計画とともに承認済み。全追加ケースは**未実装・未実施**。[実装引き継ぎ](../superpowers/handoffs/2026-10-08-reminder-server-formal-e2e-implementation.md)に従う。
 
 出典略記: S=[承認済みAWS設計](../superpowers/specs/2026-10-02-reminder-server-aws-design.md)、
 V=[API v2](../api-v2.md)、C=[Chrome認証](../chrome-extension-cognito-auth.md)、

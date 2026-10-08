@@ -15,7 +15,7 @@ now points here instead of directing a future session to restart R02.
 
 2026-10-08追補: F10のログに関する記録は、安全なHTTPエラー、共通logging helper、清掃ログ、Gateway設定の証拠である。
 現行APIには、操作の成功・失敗を1呼び出し1件で記録する結果ログがない。
-この追加は[独立API結果ログ計画](superpowers/plans/2026-10-08-reminder-server-api-result-logging.md)、正式E2Eは[別の設計・計画](superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)としてレビュー中で、未実装・未実施である。ログ変更を独立承認・検証・コミットしてからE2Eを実装する。Gatewayアクセスログの設定保持とFloci HTTP API v2の実配信は区別し、後者は互換性調査へ移した。
+この追加は[独立API結果ログ計画](superpowers/plans/2026-10-08-reminder-server-api-result-logging.md)、正式E2Eは[別の設計・計画](superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)として2026-10-08に承認済みで、未実装・未実施である。[実装引き継ぎ](superpowers/handoffs/2026-10-08-reminder-server-formal-e2e-implementation.md)に従い、ログ変更を先に独立実装・検証・レビュー・コミットしてからE2Eを実装する。Gatewayアクセスログの設定保持とFloci HTTP API v2の実配信は区別し、後者は互換性調査へ移した。
 以下の過去の成功件数やF10の記録を、新しいAPI結果ログと正式E2Eの検証成功には用いない。
 
 R01–R08 deliver validated contracts/config, authentication and rate/ownership,

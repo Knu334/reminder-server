@@ -1,10 +1,10 @@
-# Reminder Server API Result Logging Implementation Plan（未承認案）
+# Reminder Server API Result Logging Implementation Plan（承認済み）
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task.
 
 **Goal:** API Lambdaの成功・失敗を1呼び出し1件で記録する。HTTP応答、秘密の扱い、既存保持期間を維持する。
 
-**Status:** 2026-10-08レビュー待ち・未承認・実装未着手。製品コードの変更として、本計画を独立して承認・実装・レビュー・コミットする。その完了commitを確認してから[正式E2E計画](2026-10-08-reminder-server-formal-e2e.md)を実装する。E2E計画の承認だけでは、この変更の実行許可とみなさない。SDD方式は選択済みであり、再確認しない。
+**Status:** 2026-10-08承認済み・実装未着手。ユーザーが本計画と正式E2Eの設計・対応表・計画を承認した。[承認記録と実装引き継ぎ](../handoffs/2026-10-08-reminder-server-formal-e2e-implementation.md)に従い、別セッションで本計画を先に実装する。製品コードの独立した変更として、検証・レビュー・コミットする。その完了commitを確認してから[正式E2E計画](2026-10-08-reminder-server-formal-e2e.md)を実装する。今回の承認は本計画の製品変更を含むため、同じ範囲の承認を取り直さない。SDD方式は選択済みであり、再確認しない。
 
 **Design:** [正式E2E設計§8](../specs/2026-10-08-reminder-server-formal-e2e-design.md#api結果ログと観測方法)のログ契約を適用する。外側のhandlerを包み、初期化失敗、cold/warm、通常応答、入力拒否、503を覆う。JSON本体は512bytes以内、IDは各128文字以内。記録項目はrequestId/lambdaRequestId/operation/status/code/durationMs。operation/codeは固定許可値、正常時のcodeと不正IDは省略する。本文・画像・owner/item ID・生path/query・token・署名URL・例外message/stackを出さない。console経由で既存log groupへ配信し、保持30日を維持する。SDK呼び出し、新依存、alarm、metric、subscription、常時クエリを追加しない。
 
