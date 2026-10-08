@@ -131,3 +131,5 @@ Chrome/PITRを実行していないため実測duration・転送・請求値へ�
 [実装結果](implementation-results.md)のZIPサイズ/hashはローカル成果物の測定で、
 実S3保存量・monthly release回数・Lambda起動時間を証明しません。9 alarm/2 custom
 metricにSNS通知先はなく、alarmを作ることと通知deliveryを確認することは別です。
+
+2026-10-08追加追補: API結果ログの製品変更は[独立計画](superpowers/plans/2026-10-08-reminder-server-api-result-logging.md)で先行承認・検証する。E2Eのrun共通基盤・ログ一括観測への改訂は、本番の保持設定や上記費用前提を変更しない。

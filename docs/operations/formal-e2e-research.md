@@ -71,11 +71,11 @@ read-onlyで確認した。コピーのsourceの存在は稼働native binaryの�
 | S3 buckets/version/checksum/CORS/Put/Get/HEAD/marker/ListVersions | old readiness、旧L画像/cleanup | Terraform管理で必須。署名URLDNS/CORS/TF付随read APIは未確認 |
 | S3署名強制 | PreSignedUrlFilter.java:期限を検査し、signature検証はenforceAuth/validateSignatures/登録credentialに依存。EmulatorConfig両flag既定false | 有効URL200だけで証明不可。改ざん/期限の実controlを必須調査にする。host設定変更は提案だけ |
 | IAM role/policy/PassRole/trust | old role/policy作成成功 | Terraform管理でlocal作成。production IAM等価を主張しない。TF Tag/List/Get API不足は未確認 |
-| Logs/CloudWatch | 既存cleanup mockと過去L metric、health running | 3log group設定とowned結果ログ実配信を必須採用。互換性未確認。9alarm運用/通知はA |
+| Logs/CloudWatch | 既存cleanup mockと過去L metric、health running | 3log group設定とAPI/清掃結果ログ実配信を必須採用。Gateway v2配信は下記source調査により互換性probeへ変更。9alarm運用/通知はA |
 | Scheduler schedule/group/Get/Update/Delete/at/cron/target | ScheduleDispatcherはenabled/invocationEnabledを確認、at/rate/cron処理。ScheduleInvokerはLambdaをInvocationType.Eventでinvoke | 設定read-backとowned one-time probeを採用。実起動未確認。SourceArn/IAM/async retry同等性は証明しない |
 | STS | 移行/復旧はexplicit account照合に使用 | 明示endpointのlocal GetCallerIdentityを確認してから運用adapter結合。実credential chainは使用しない |
 | Terraform1.16.5 / provider6.67.0 | 既存infra mockとlock。Context7でcustom endpoints設定を確認 | 本番3rootの公開ソース再利用・構築・設定read-backを必須基盤として計画へ採用。未対応APIは現在確定していない。全apply成功/不可能を断定しない |
-| OIDC provider/role/subject、9alarmのローカル設定 | 本番3rootの公開定義 | 全定義のapplyとread-backに含める。Flociの必要API互換性は未確認。OIDC実認証やalarm通知の本番同等性は証明しない |
+| OIDC provider/role/subject、9alarmのローカル設定 | 本番3rootの公開定義 | run共通の一組で全定義をapply/read-backする。GitHub providerはaccount+URLの単独所有。未知既存providerは拒否。必要API/live互換性は未確認。OIDC実認証やalarm通知の本番同等性は証明しない |
 | S3 remote backend/GHA、本番Cognito domain/TLS/PITR/実Chrome受け入れ | 本番受け入れ資料に未実施 | 実AWSの操作・受け入れは対象外。本番定義は再利用し、backendはlocal、接続・隔離差分だけを追加する |
 
 承認後は必要APIを「成功実測 / sourceのみ / 未対応action / 未実施」の四区分で更新し、
@@ -120,7 +120,7 @@ DDB/S3/CloudWatch確認→destroyへ改訂した。必要APIが不足する場�
 
 公開ソースを確認すると、APIは安全なHTTPエラー応答を作るが結果ログを出していない。
 shared loggingと清掃Lambdaには構造化ログがある。Gateway access logはrequestId/routeKey/status/responseLengthで、
-アプリケーションerror codeは含まない。API結果ログ追加を改訂設計の承認対象に含めた。
+アプリケーションerror codeは含まない。この時点ではAPI結果ログ追加をE2E設計の承認対象に含めたが、後述の改訂で独立した先行計画へ分離した。
 画像清掃はDeleteObjectにVersionIdを渡さずmarkerを作る。storage.tfはS3旧version60日、DDB PITR35日、
 logs.tfは3log group30日。これらを維持する案とし、構築設定の読み戻しへ追加した。
 
@@ -169,7 +169,7 @@ prevent_destroy維持中の通常destroyを成功前提にしない。mockのove
 設計§3以降を、冒頭の「構築→設定確認→入力→HTTP/DDB/S3/CloudWatch→回収」と計画に照らして確認した。
 §3/6/8には改訂内容が入っていたが、実行順と節・Taskの対応、suiteごとの構築、最終結果の判定が追いにくかった。
 §3に実行順と条件の表、§6に出力ごとの正常/異常判定、計画に実装順と実行順の区別を追加した。
-現案はsuiteごとに独立したstackで構築以降を繰り返す。ケースごとのapplyや本番定義の変更はしない。
+この改訂時点ではsuiteごとに独立したstackを想定した。後述の6指摘への改訂でrun共通の一組へ変更した。ケースごとのapplyや本番定義の変更はしない。
 
 §4の「TFを別layer」という記述は共通型U/I/E/L/Aと不一致だったため、実構築・設定確認はLに揃えた。driver/source負例は対応表どおりIとする。
 また、基盤初期化前のnot-runと、入力後の保存/ログ不一致のfailを区別し、実施済み証拠をnot-runへ戻さない規則を明記した。
@@ -180,7 +180,7 @@ Iの故障注入/captureを実HTTP・CloudWatch配信の証拠にしない境界
 設計・計画・対応表のほか、ハンドオフ、README、費用資料、実装結果、受け入れ記録、API/認証/清掃/移行/復旧/配布手順と公開infra READMEを確認した。
 波及先と更新時期は[関連文書の確認結果](formal-e2e-document-impact.md)へ記録した。
 
-- 各caseのHTTP/DDB/S3/ログの期待assert・照合結果・対象外理由を共通契約へ反映した。Task4がrunnerの構築→設定確認→case→回収をつなぎ、Task5〜10が各case内でログまで照合する。
+- 各caseのHTTP/DDB/S3/ログの期待assert・照合結果・対象外理由を共通契約へ反映した。Task4がrunnerの構築→設定確認→case→回収をつなぎ、Task5〜10が各caseの期待を登録する。後述の改訂でログ確定はsuite末尾の一括照合へ変更した。
 - サービス表でOIDCを一括して対象外にしていた記述を修正した。ローカル定義のapply/read-backは必須、本番OIDC/GHA/監視の受け入れは対象外である。
 - 清掃の開始ログはlambdaRequestId、終了ログはserviceが生成するrequestIdであり、同じIDで一致させることはできない。現行コードの形式を保ち、stream/観測区間で対応づける案へ修正した。
 - 未公開清掃は開始ログを出してskipする。不正eventは開始ログより前に拒否する。通常の成功終了ログを全ケースに要求しない。
@@ -189,3 +189,45 @@ Iの故障注入/captureを実HTTP・CloudWatch配信の証拠にしない境界
 - 費用資料に東京/月100回未満の前提への参照を追加した。旧米国東部モデルの総額や未取得単価は変更していない。
 
 今回も変更は文書のみ。実装・Flociリソース作成・apply・実AWS操作は行っていない。
+
+## 6指摘を受けた再調査と改訂（2026-10-08）
+
+この節が、上記のsuite別stack・APIログ変更を含むE2E計画・Gateway配信必須という旧案を更新する。変更は文書のみで、正式E2E・Floci資源作成・applyは未実施である。
+
+### Gateway配信とTLSの証拠
+
+Floci作業コピーのservices/apigatewayv2/ApiGatewayV2Service.javaはstageのaccessLogSettingsを保存・読み戻すが、v2 HTTP APIからLogsへ配信する処理は確認できなかった。services/lambda/ApiGatewayController.javaのPutLogEventsはv1 `/_api/{functionName}` の直接proxyであり、v2 JWT経路の代用にはならない。services/配下のLogs出力はiotにも存在するため、「Lambda以外には一切ない」とは記録しない。
+OBS-02はAPI/清掃配信を必須に保ち、Gateway配信だけを互換性調査へ移した。Flociパッチは別件である。APIログ不在だけでは未到達を断定せず、HTTP拒否・RATE/保存不変・前後正常対照の実配信と合わせる。正常対照が欠けた場合は不在観測をpassにしない。
+
+FlociはIAM enforcementが既定無効で、今回確認したS3経路にaws:SecureTransportの評価は見当たらない。Deny policyを保持してHTTP成功した結果はpolicy-presentとenforcement-unverifiedを分けて記録する。TLS強制の証拠は別承認の実AWSへ残す。
+
+### Terraform overrideの例外と許可差分
+
+公開application variables.tfのcognito_issuer/cognito_auth_base_urlはAWS HTTPS形式だけを許可する。platform outputs.tfもAWS URLを組み立てる。Floci CognitoService.getIssuerはbaseUrl + `/` + poolIdであり、Hosted UI経路は `/cognito-idp/oauth2/authorize` と `/cognito-idp/oauth2/token` である。
+一時コピー内の2validation条件と安全なerror_messageを、discoveryで確認したFloci origin/4566/owned poolまたはauth baseとの完全一致（host文字列は維持し、DNSで同一private IPv4を確認）へ変換する。platformの同名2output.valueも接続overrideで置き換える。他のvalidation・type/nullability・resource条件を保持する。変換前source digest、変換後digest、構造差分と生成設定の許可リストを設計§8/TF-04へ記載した。元の本番ファイルは変更しない。
+
+Context7はsandbox外でlibrary→docsの2commandを実行した。quotaエラーはなかった。
+
+```sh
+npx ctx7@latest library Terraform 'Override file merging rules for lifecycle blocks and postcondition nested blocks when overriding prevent_destroy only'
+npx ctx7@latest docs /websites/developer_hashicorp_terraform 'Override files: lifecycle special merging rule for arguments prevent_destroy and nested postcondition blocks when overriding prevent_destroy=false only; variable validation override merging'
+```
+
+[公式override資料](https://developer.hashicorp.com/terraform/language/files/override)の一般nested block全置換には例外がある。
+[checks.go](https://raw.githubusercontent.com/hashicorp/terraform/main/internal/configs/checks.go)のdecodeCheckRuleBlockはoverrideでのvalidation/precondition/postconditionを拒否する。
+[named_values.go](https://raw.githubusercontent.com/hashicorp/terraform/main/internal/configs/named_values.go)と[resource.go](https://raw.githubusercontent.com/hashicorp/terraform/main/internal/configs/resource.go)は各conditionをこの関数で処理する。
+[module_merge.go](https://github.com/hashicorp/terraform/blob/main/internal/configs/module_merge.go)のResource.mergeはprevent_destroy引数をmergeし、既存postconditionは保持する。
+そのためvalidationはoverride fileで置き換えず、限定した一時コピー変換にする。回収時のprevent_destroy scalar overrideではGatewayのAPI ID保持postconditionを残し、再定義しない。
+ここで確認した公式ソースはmainであり、固定版1.16.5の実測証拠ではない。provider不要のoffline確認を試みたが、最初のterraform version実行でFileNotFoundErrorになった。現在のPATHにTerraformがなく、validateも実行されていない。指定版の準備とoffline確認は承認後のTask3で行う。
+
+### run共通の所有関係と復旧経路
+
+bootstrap/oidc.tfはGitHub provider URLを固定する。ARNはaccount+URLで決まるため、suite別・追加stack別の所有をやめた。Floci作業コピーIamServiceのCreateOpenIDConnectProviderにはsynchronized lockとEntityAlreadyExistsの重複拒否があり、「重複チェックがない」という指摘はこのコピーには当てはまらない。ただし、稼働native imageに収録されているかは未確認である。重複が拒否されるかにかかわらず設計上の衝突は避ける必要がある。
+基盤/ZIPはrun一組、suiteは逐次、OIDCは一所有者とする。同一account runをロックし、未知の既存providerは採用しない。suite間はowned合成データを回収し、公開状態/checkpoint等を復元・読み戻す。別issuerの負例には最小のSDK Cognito control資源だけを作る。
+合成復旧3tableは本番schema/protection/TTL/PITR設定でSDK作成し、既存restored_tables/data sourceへ渡す。追加3rootは作らず、同じ3root/stateでmapを切り替え・読み戻し・{}へ戻す。API入力とSchedulerを停止した区間だけで行い、source row/version不変と復元後の設定を確認する。実PITR/AWS切替の証拠とはしない。
+
+### 時間と先行製品変更
+
+ログobserverはowned Lambda groupごとに一つとし、全caseの期待を登録後、suite末尾に最終対象入力から最大60秒でまとめて確定する。ログ不在の負例ごとに60秒待たない。未確定caseをpassにせず、observer障害は入力済みcaseのfailへ反映する。
+設計§3に工程別見積もり22〜65分、run本体75分と回収15分、全体90分、各poll/processの期限を記載した。実測前の見積もりであり、実装後に工程別時間で更新する。
+旧Task2のAPI結果ログ変更は[独立先行計画](../superpowers/plans/2026-10-08-reminder-server-api-result-logging.md)へ切り出した。独立承認・検証・commit後にE2Eを実装する。E2E Task2は前提確認だけで、製品コードを変更しない。費用・保持の前提は維持する。

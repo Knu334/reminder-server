@@ -21,7 +21,8 @@ scoped独立re-reviewも完了し、5件すべての修正を確認しました�
 [実装計画](docs/superpowers/plans/2026-10-08-reminder-server-formal-e2e.md)、
 [要件対応表](docs/operations/formal-e2e-coverage.md)、
 [関連文書の確認結果](docs/operations/formal-e2e-document-impact.md)を参照してください。
-本番Terraformの3rootを再利用したFloci構築・設定確認後に、入力に対するHTTP・DDB・S3・ログを照合する案です。
+本番Terraformの3rootをrunにつき一組だけ構築・設定確認し、入力に対するHTTP・DDB・S3・API/清掃ログを照合する案です。Gatewayログ配信は互換性調査として制限を記録します。
+API結果ログは[独立した先行計画](docs/superpowers/plans/2026-10-08-reminder-server-api-result-logging.md)で承認・検証・コミット後に、E2Eの前提とします。
 正式E2E用のnpm入口とAPI操作の結果ログは未実装です。上記の過去の成功件数には含めません。
 
 ## ローカル検証

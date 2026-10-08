@@ -21,14 +21,14 @@ HTTP拒否の不変はSTORAGE/reminder/job/S3を指す。認証済み入力拒�
 ## 実行順と最終結果の見方
 
 TF-01/03でTerraform構築と設定を確認してから、E/Lケースを実行する。
-TF実構築・設定確認のlayerはL、driver/sourceの負例はIであり、実行入口のterraform選択値とは区別する。suiteごとに構築・設定確認後、各ケースを実行する。
+TF実構築・設定確認のlayerはL、driver/sourceの負例はIであり、実行入口のterraform選択値とは区別する。runにつき一組の基盤を構築・設定確認後、suiteを逐次実行する。suite間は合成データ回収・公開状態/checkpoint等の復元と読み戻しを行う。
 正常系はHTTP応答に加え、DDBレコード・S3元bytes/job・OBSのCloudWatch結果ログを確認する。
 削除直後はtombstone/retired、保護期間後の清掃はmarker/done、旧versionは60日保持という段階を分ける。
-異常系もHTTP・ログと保存状態を照合する。認証拒否はGateway、APIに到達した拒否はAPI Lambdaのログを使う。
+異常系もHTTP・ログと保存状態を照合する。認証拒否はHTTP401/403・保存不変・前後の正常対照ログ付きAPIログ不在、API到達時の拒否はAPI Lambdaのstatus/codeを使う。Gateway配信は互換性調査とする。
 具体的な入力→出力の表は[設計案の冒頭](../superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)にある。
 以下の各行をcaseへ展開するときは、HTTP/DDB/S3/ログの4種類の期待assertと照合結果を持たせる。
 画像のないAPI操作でもS3の追加保存なしを確認する。API/Gateway応答元、CLI、Iのcapture等により対象外となる出力には理由を付ける。
-OBS専用suiteの成功だけで、他caseのログ確認を完了扱いにしない。
+各caseの期待を単一observerへ登録し、suite末尾に最終対象入力から最大60秒で一括照合する。OBS専用suiteの成功だけで、他caseのログ確認を完了扱いにしない。配送の正常対照が欠けたログ不在はpassにしない。
 
 ## 認証
 
@@ -112,29 +112,29 @@ OBS専用suiteの成功だけで、他caseのログ確認を完了扱いにし�
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | OPS-01 / S§8, M / B03 | 合成JSON、特殊key/空owner、import/verify/publish | unpublished API503、全field/bytes/counter照合後publish→ready200、created保持/r1 | 正常/遷移 | op legacy/migration | real local adapters、明示client注入 / 必須 | L | 未確認 | 本番JSON/CLI default credentials chainを使用しない |
 | OPS-02 / S§8, M | 中断/再開、入力hash変更、checksum不一致 | gatefalse、変更run拒否、二重items/versions/counterなし、corruptでpublish不可 | 異常/障害 | op migration transport回帰 | exact input rerun + deterministic fault / 必須 | L+I | 見込 | 実源ファイルhash禁止。合成生成物だけ |
-| OPS-03 / S§8, R | 合成復旧3table、read-only検証、非current画像保全・rerun | source不変、target未公開、新unique current key元bytes、revision/created/counter維持 | 正常/遷移 | op recovery | 実local adapters / 必須 | L | 未確認 | PITR実行/APIや本番切替ではない |
+| OPS-03 / S§8, R | 同schemaのSDK合成復旧3table、read-only検証、非current画像保全・rerun、restored_tables入力 | source不変、target未公開、新unique current key元bytes、revision/created/counter維持 | 正常/遷移 | op recovery | 実local adapters / 必須 | L | 未確認 | 既存3rootの同じstateでrestored_tables/data source検証・入力切替と戻し。API入力停止中のみ実施。実PITR/AWS切替ではない |
 | OPS-04 / S§8, R | recreated sub、explicit remap、target collision/bad counter | 自動対応なし、明示mapのみ、bad stateでreadyToSwitch=false、Cognito復元false | 異常 | op recovery | local単独ケース / 必須 | L+I | 見込 | Cognito password/sessionや35日PITRはA |
 | OPS-05 / S§10, D / F19,B06 | current build/package→S3 ZIP→API/cleanup | local digest=manifest=S3 pinned checksum=両Lambda CodeSha256/alias選択version | 正常/異常 | dl bundle/artifact/release、旧L報告 | stale/tampered control + actual register / 必須 | L+E | 一部過去成功 | ZIP古い固定hash禁止、dirty build入力digestを併記 |
 | OPS-06 / S§6, J | daily configとowned one-time起動 | cron03UTC/OFF/DISABLED/retry2/age3600/cleanup alias read-back。at→job変化 | 正常/遷移 | application mock | 設定はTF-03必須、起動実probeは互換性調査必須 | L+A | sourceにEvent invokeあり、live未確認 | source記載は稼働binary証明ではない。日次運転/配信保証はA |
 | TF-01 / S§9〜11, handoff§8 | 本番3root再利用→current ZIP/Gateway/save→結果確定→回収 | Terraform1.16.5/provider6.67.0、同route/scope/schema/hash、動作assert、owned資源のみ回収 | 正常/互換性 | dl infra-check/plan-guardはmock | 構築成功・destroy / 必須 | L | 未確認、必要APIごと判定 | 全resource定義を再利用。remote backend/実AWS/GHAは対象外。Floci不足APIを省略しない |
 | TF-02 / handoff安全境界 | apply途中失敗、destroy失敗、endpoint漏れ | default AWS送信前拒否、ローカルstateだけ、partial owned inventory回収、cleanup別報告 | 障害/異常 | old transport、dl private-command | isolated driver負例 / 必須 | I+L | driverを新規実装 | 本番state/plan/inputsは存在確認以上の対象にしない |
-| TF-03 / S§4〜6,9〜13 | apply後の構築設定read-back、差異control | 3table/GSI/TTL/PITR35日、S3 versioning/暗号化/公開防止/CORS/旧version60日、認証/16route/alias/同一ZIP、Lambda実行設定、3log group30日、daily Scheduler一致 | 正常/異常 | dl infra mock | 実read-back gate / 必須 | L | 必要API未確認 | 削除防止/TLS必須policy・9alarm/OIDC設定も維持。不足設定を省略してpassにしない |
-| TF-04 / user最小変更方針 | 本番ソース配置と追加差分、回収段階の分離 | 本番.tf/lock/address変更0、元bytes/digest一致、接続/隔離差分だけ許可、検証中は保護/上限維持、後片付け変更で再試験禁止 | 異常/整合 | 未実装 | source/override/回収phase負例 / 必須 | I+L | 未確認 | overrideのnested block置換でvalidation/policyを落とさない |
-| OBS-01 / S§13 / F10 | APIの成功/拒否/503/初期化失敗、cold/warm | 1 invocation 1件、operation/status/code/IDs/duration、安全なJSON512bytes以内、HTTP契約不変 | 正常/異常 | shared loggingのみ、API結果ログなし | 製品結果ログ追加・handler境界capture / 必須 | U+I | APIコード追加後に確認 | captureはCloudWatch配信証拠ではない |
-| OBS-02 / S§13 | CRUD成功、入力拒否、Gateway認証拒否 | APIとGatewayのrequestId/status照合、API error codeはHTTPと一致。認証拒否はGatewayのみ | 正常/異常 | Gateway access log設定のみ | owned Logs実読取、60秒poll / 必須 | E | 配信未確認 | raw console/手動PutLogEventsで代用しない |
+| TF-03 / S§4〜6,9〜13 | apply後の構築設定read-back、差異control | 3table/GSI/TTL/PITR35日、S3 versioning/暗号化/公開防止/CORS/旧version60日、認証/16route/alias/同一ZIP、Lambda実行設定、3log group30日、daily Scheduler一致 | 正常/異常 | dl infra mock | 実read-back gate / 必須 | L | 必要API未確認 | 削除防止/TLS必須policy・9alarm/OIDC設定も維持。OIDCはrun内単独所有、未知の既存providerは採用しない。不足設定を省略してpassにしない |
+| TF-04 / user最小変更方針 | 本番ソース配置、限定変換・生成設定、回収phase | 本番.tf/lock/address変更0、配置直後digest一致、変換後digest/構造差分一致。2validationと2output.value以外の変換拒否、保護/上限維持、回収後再試験禁止 | 異常/整合 | 未実装 | source/変換/override/回収phase負例 / 必須 | I+L | 未確認 | validation/postconditionのoverride禁止。prevent_destroy scalarのみのoverrideで既存postcondition保持。詳細は設計§8 |
+| OBS-01 / S§13 / F10 | APIの成功/拒否/503/初期化失敗、cold/warm | 1 invocation 1件、operation/status/code/IDs/duration、安全なJSON512bytes以内、HTTP契約不変 | 正常/異常 | shared loggingのみ、API結果ログなし | 独立APIログ計画で先行実装・handler境界capture / 必須 | U+I | API変更は未実装 | 独立承認・検証・commit後にE2E。captureはCloudWatch配信証拠ではない |
+| OBS-02 / S§13 | CRUD成功・入力拒否・認証拒否、Gateway配信probe | API requestId/status/codeがHTTPと一致。認証拒否はHTTP/保存不変と正常対照付きAPIログ不在。Gateway設定保持、実配信probeの制限記録 | 正常/異常/互換性 | Gateway access log設定のみ | API配信・拒否観測は必須、Gateway実配信は互換性調査必須 | E+L+A | v2配信はsourceに実装なし、live未確認 | suite末尾に60秒一括観測。正常対照欠落で不在pass禁止。Gateway相関IDがあると仮定しない。raw console/手動PutLogEventsで代用しない |
 | OBS-03 / S§6,13, J | 清掃Lambda成功/不完全結果、件数照合 | cleanup_startのlambdaRequestIdと終了のservice runIdを同一stream/観測区間で対応づけ、cleanup/status/処理件数と実保存状態一致 | 正常/障害 | cleanup構造化ログ既存 | 実成功配信 + 故障時境界capture / 必須 | L+I | 配信未確認 | 2つのIDを同一と扱わない。別invokeログを採用しない。決定的故障Iのcaptureを実配信扱いにしない |
 | OBS-04 / S§13,15 | logs reader/page/poll、canary、長いID | 別run/別serviceは不一致、poll有期限、秘密と生ログの保存なし、追加1KiB/呼び出しの予算 | 異常/費用 | rt logging安全化 | logger/observer負例 / 必須 | U+I | 実装可能 | 1KiBは費用仮定、AWS請求量の上限保証ではない |
 | SAFE-01 / S§13, handoff | 未認証外host/redirect/DNS drift、ambient AWS設定 | local pinned IPv4以外拒否、profile/metadata/default endpoint参照0、Host保持 | 異常 | old local-transport2件 | transport/harness単独回帰 / 必須 | I | 実装可能 | 権限/FW変更をテスト成功条件にしない |
 | SAFE-02 / S§13, handoff | fixture各段階失敗、cleanup一action失敗/割込 | 未開始dependent not-run、入力後の不一致fail、独立case継続、全cleanup試行、errors/leaks別、exit非0 | 障害 | old transport/CRUD finally | resource manifestと結果registry / 必須 | I+E+L | 実装可能 | SIGKILLはfinally保証不能、owned手動回収手順 |
 | SAFE-03 / S§13 / F10 | assertion diff/SDK例外/子process/TF診断にcanary | token/code/cookie/password/URL/credential/body/envを保存/表示しない、固定assert名とcounts | 異常 | rt never_logs_secrets、dl private-command | harness failure canary / 必須 | I | 実装可能 | owned Logs読取・配信はOBS必須。本番ログ全体/IAMはA |
-| SAFE-04 / S§15 / F18,F23〜24 | IAM/TLS/timeout/freeze/concurrency、AWS alarm/GHA/PITR/Chrome | 実受け入れ未実施を維持。mock/Flociから同等性/性能を推定しない | 対象外 | dl infra/workflows、op recovery | 既存回帰と未検証記録 | U+A | 本番同等性不可 | 別承認、拡張ソースなし、GHA起動禁止 |
+| SAFE-04 / S§15 / F18,F23〜24 | IAM/TLS/timeout/freeze/concurrency、AWS alarm/GHA/PITR/Chrome | 実受け入れ未実施を維持。S3 policy-presentとenforcement-unverifiedを別記。HTTP成功からTLS強制を推定しない | 対象外 | dl infra/workflows、op recovery | 既存回帰と未検証記録 | U+A | 本番同等性不可 | 別承認、拡張ソースなし、GHA起動禁止 |
 
 ## 受け入れ集計規則
 
 行数やold CRUD内チェック数を新case件数に足さない。実装registryの各caseに上記ID・層・必須度・
-source・期待assertを持たせ、日本語結果の全case inventoryと一対一で照合する。
-Uだけの成功でE/L未実施を埋めない。互換性調査必須のIMG-09/OPS-06起動経路は、
-実際の採否・失敗probe・制限が記録されれば調査完了、未確認のまま除外しない。
-TF-01/03/04・OBS実配信・E/L必須をFlociが阻害する場合は正式E2E未完了とする。Terraform構築失敗時は依存E/Lをnot-runとし、SDK構築を成功の代替にしない。
+動作検証/互換性調査のacceptance区分・source・期待assertを持たせ、日本語結果の全case inventoryと一対一で照合する。
+Uだけの成功でE/L未実施を埋めない。互換性調査必須のIMG-09/OPS-06起動経路/OBS-02 Gateway配信probeは、
+required=true/acceptance=compatibilityとして実際の採否・失敗probe・制限が記録されれば調査完了、not-run/harness failは未完了。未確認のまま除外しない。
+TF-01/03/04・OBSのAPI/清掃実配信・E/L必須をFlociが阻害する場合は正式E2E未完了とする。Terraform構築失敗時は依存E/Lをnot-runとし、SDK構築を成功の代替にしない。
 入力後の保存/ログ不一致は実施したケースのfailとして残し、not-runへ戻さない。HTTPだけ、ログだけの成功でケース全体をpassにしない。
 E/Lは本番の上限を維持する。合成rate状態、規定容量境界I、清掃合成日時、既存lowered-cap U/Iを区別して記録する。

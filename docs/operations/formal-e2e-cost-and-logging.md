@@ -10,9 +10,9 @@
 APIには成功・失敗の結果ログを1呼び出し1件追加する。本文や画像を含めず、既存の30日保持を使う。
 
 追加件数はAPI Lambdaの実呼び出し数を基準とする。Gatewayで拒否された要求やS3への直接取得では、API結果ログを追加しない。
-正常・異常ケースのログは各ケース内で照合し、既存のGateway/清掃ログの項目や保持期間を増やさない。
+正常・異常ケースのログ期待は各ケースで登録し、suite末尾にまとめて照合する。既存のGateway/清掃ログの項目や保持期間を増やさない。Floci HTTP API v2のGateway配信は互換性調査であり、API/清掃Lambdaの実配信は必須とする。
 [設計案](../superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)と
-[計画案](../superpowers/plans/2026-10-08-reminder-server-formal-e2e.md)に実装範囲を定義する。
+[E2E計画案](../superpowers/plans/2026-10-08-reminder-server-formal-e2e.md)、[独立APIログ計画案](../superpowers/plans/2026-10-08-reminder-server-api-result-logging.md)に実装範囲と順序を定義する。
 
 ## S3の保存費
 
@@ -78,4 +78,4 @@ APIからCloudWatch SDKで送信せず、既存の安全なlogging helperとLamb
 
 E2E用にはCloudWatch Logs読取clientをdevDependencyへ追加する。これはローカル検証用で、
 APIの本番ZIPに新しいLogs clientや課金処理を加えるものではない。
-正式E2Eの設計・計画とこのログ追加範囲の承認後、SDDで実装・実行・レビューする。
+API結果ログは独立計画として承認・実装・検証・コミットする。正式E2Eは、その完了とE2E設計・計画の承認後にSDDで実装・実行・レビューする。費用仮定と保持方針は今回の構成変更でも変えない。
