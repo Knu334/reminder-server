@@ -21,11 +21,14 @@ HTTP拒否の不変はSTORAGE/reminder/job/S3を指す。認証済み入力拒�
 ## 実行順と最終結果の見方
 
 TF-01/03でTerraform構築と設定を確認してから、E/Lケースを実行する。
-TFケースのlayerはLであり、実行入口のterraform選択値とは区別する。suiteごとに構築・設定確認後、各ケースを実行する。
+TF実構築・設定確認のlayerはL、driver/sourceの負例はIであり、実行入口のterraform選択値とは区別する。suiteごとに構築・設定確認後、各ケースを実行する。
 正常系はHTTP応答に加え、DDBレコード・S3元bytes/job・OBSのCloudWatch結果ログを確認する。
 削除直後はtombstone/retired、保護期間後の清掃はmarker/done、旧versionは60日保持という段階を分ける。
 異常系もHTTP・ログと保存状態を照合する。認証拒否はGateway、APIに到達した拒否はAPI Lambdaのログを使う。
 具体的な入力→出力の表は[設計案の冒頭](../superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)にある。
+以下の各行をcaseへ展開するときは、HTTP/DDB/S3/ログの4種類の期待assertと照合結果を持たせる。
+画像のないAPI操作でもS3の追加保存なしを確認する。API/Gateway応答元、CLI、Iのcapture等により対象外となる出力には理由を付ける。
+OBS専用suiteの成功だけで、他caseのログ確認を完了扱いにしない。
 
 ## 認証
 
@@ -40,7 +43,7 @@ TFケースのlayerはLであり、実行入口のterraform選択値とは区別
 | AUTH-07 / S§4, V認証 | read-only→write、write-only→read、ID token | 不足scope403、保存不変。handler token_use=id単独401はIで確認 | 異常 | old CRUD, rt boundaries/api | 各scope / ID負例 / 必須 | E+I | read-only/IDは過去成功 | IDにはscopeもない。403だけでtoken_use単独証明にしない |
 | AUTH-08 / S§4 | aud優先/client_id fallback、iat/nbf/sub/API/stage/claims不足 | 単独条件の401/400、rate消費なし、別issuer同subのowner hash相違 | 異常/境界 | rt boundaries、contracts | 実tokenで作れない条件は既存回帰を保持 | U+A | 単独JWT発行制御は未確認 | Gateway/JWKS cacheと実nbf等はA。偽claimsをEへ算入しない |
 | AUTH-09 / S§4, C§3 | refresh rotation、read/write維持、owner不変 | OAuth200、new refresh相違、300秒、署名/系列/scope一致、renewed API200 | 正常/遷移 | old refresh9件、CRUD | production client設定で独立case / 必須 | E | 過去成功 | old refreshのSRP設定を正式fixtureへ流用しない |
-| AUTH-10 / S§4, C§3 | grace内再利用・10秒後旧token拒否、期限延長なし | 内側200、外側400 invalid_grant、descendant200。retryで元deadline延長なし | 境界/異常 | old refresh、Floci Java回帰（履歴） | 実10秒 + 元deadline独立I / 必須 | E+I | 過去grace成功 | 絶対30日を実sleepで証明しない |
+| AUTH-10 / S§4, C§3 | grace内再利用・10秒後旧token拒否、grace起点延長なし | 内側200、外側400 invalid_grant、descendant200。旧token再利用で10秒の起点を延長しない | 境界/異常 | old refresh、Floci Java回帰（履歴） | 実10秒 / 必須、30日絶対期限・更新時の不延長はA | E+A | 過去grace成功 | 30日を実sleepで証明しない。Floci Java回帰は補助資料で、新Iの証拠にはしない |
 | AUTH-11 / S§4 | 失効、disable後の発行/refresh拒否、既存JWT | 原/descendant refresh400、disable後login/refresh拒否。既発行accessは期限まで通り得る | 異常/遷移 | old refresh失効 | 合成user・独立token family / 必須 | E | revoke過去成功、disable未確認 | 本人の本番userを操作しない。即時API失効を要求しない |
 | AUTH-12 / S§4, C§3〜5 | refresh別client/欠落/不正、scope拡大なし、30日絶対期限、worker restart/single-flight/logout | OAuthinvalid_request/invalid_grant。token保存世代と期限。Chromeなしは未実施 | 異常/境界 | old refresh、Floci Java履歴 | 実OAuth負例必須、長期/拡張は層分離 | E+U+A | OAuth負例過去成功、長期・拡張不可 | 非rotation/openidなしはFloci補助回帰で製品必須から分離 |
 
@@ -93,7 +96,7 @@ TFケースのlayerはLであり、実行入口のterraform選択値とは区別
 
 | 要件ID / 出典 | ケース | HTTP・保存状態・副作用の期待 | 分類 | 既存test | 追加E2E / 必須度 | 層 | Floci対応可否 | 未検証理由・境界 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| CLEAN-01 / S§6, J | 未公開、公開、eventへのkey/owner injection | unpublished skipped/no mutation/no heartbeat、公開は実handler、任意event拒否 | 正常/異常 | rt cleanup/api | same ZIP cleanup alias invoke / 必須 | L | 旧L一部成功 | HTTP APIの認証検証ではない |
+| CLEAN-01 / S§6, J | 未公開、公開、eventへのkey/owner injection | unpublishedはcleanup_start/skippedUnpublished/no mutation/no heartbeat、公開はcleanup終了ログと件数、任意eventはFunctionError/保存不変 | 正常/異常 | rt cleanup/api | same ZIP cleanup alias invoke / 必須 | L | 旧L一部成功 | 未公開では終了ログなし。不正eventは開始ログ前の拒否なのでログ対象外理由を記録。HTTP API認証検証ではない |
 | CLEAN-02 / S§5,6 | pending/retiredの24h前/後、retired時刻起点 | 前側保持、後側deleting→done、markerだけ追加、元version保持 | 境界/遷移 | rt jobs/cleanup | 合成時刻・索引全属性一致 / 必須 | L+I | 見込 | 実24h待ちなし。exact等号はI |
 | CLEAN-03 / S§5,6 | active/expired deleting lease20分、version記録前pending | active保持/expired再claim→done、lease owner条件、未記録key照合 | 境界/遷移 | rt jobs/cleanup | 合成lease seed / 必須 | L+I | 見込 | exact20分境界/claim raceはI |
 | CLEAN-04 / S§5,6 | committed/done索引除外、stale GSI/commit競合 | 参照中committed画像保持、古いGSI候補のstrong conditionでskip | 異常/競合 | rt jobs gsi_stale、cleanup stale_index | 実committed保護 + deterministic stale / 必須 | L+I | 実GSI遅延制御不可 | 壊れたjobを正規API状態遷移として扱わない |
@@ -119,10 +122,10 @@ TFケースのlayerはLであり、実行入口のterraform選択値とは区別
 | TF-04 / user最小変更方針 | 本番ソース配置と追加差分、回収段階の分離 | 本番.tf/lock/address変更0、元bytes/digest一致、接続/隔離差分だけ許可、検証中は保護/上限維持、後片付け変更で再試験禁止 | 異常/整合 | 未実装 | source/override/回収phase負例 / 必須 | I+L | 未確認 | overrideのnested block置換でvalidation/policyを落とさない |
 | OBS-01 / S§13 / F10 | APIの成功/拒否/503/初期化失敗、cold/warm | 1 invocation 1件、operation/status/code/IDs/duration、安全なJSON512bytes以内、HTTP契約不変 | 正常/異常 | shared loggingのみ、API結果ログなし | 製品結果ログ追加・handler境界capture / 必須 | U+I | APIコード追加後に確認 | captureはCloudWatch配信証拠ではない |
 | OBS-02 / S§13 | CRUD成功、入力拒否、Gateway認証拒否 | APIとGatewayのrequestId/status照合、API error codeはHTTPと一致。認証拒否はGatewayのみ | 正常/異常 | Gateway access log設定のみ | owned Logs実読取、60秒poll / 必須 | E | 配信未確認 | raw console/手動PutLogEventsで代用しない |
-| OBS-03 / S§6,13, J | 清掃Lambda成功/不完全結果、件数照合 | Lambda request ID、cleanup/status/処理件数と実保存状態一致 | 正常/障害 | cleanup構造化ログ既存 | 実成功配信 + 故障時境界capture / 必須 | L+I | 配信未確認 | 決定的故障Iのcaptureを実配信扱いにしない |
+| OBS-03 / S§6,13, J | 清掃Lambda成功/不完全結果、件数照合 | cleanup_startのlambdaRequestIdと終了のservice runIdを同一stream/観測区間で対応づけ、cleanup/status/処理件数と実保存状態一致 | 正常/障害 | cleanup構造化ログ既存 | 実成功配信 + 故障時境界capture / 必須 | L+I | 配信未確認 | 2つのIDを同一と扱わない。別invokeログを採用しない。決定的故障Iのcaptureを実配信扱いにしない |
 | OBS-04 / S§13,15 | logs reader/page/poll、canary、長いID | 別run/別serviceは不一致、poll有期限、秘密と生ログの保存なし、追加1KiB/呼び出しの予算 | 異常/費用 | rt logging安全化 | logger/observer負例 / 必須 | U+I | 実装可能 | 1KiBは費用仮定、AWS請求量の上限保証ではない |
 | SAFE-01 / S§13, handoff | 未認証外host/redirect/DNS drift、ambient AWS設定 | local pinned IPv4以外拒否、profile/metadata/default endpoint参照0、Host保持 | 異常 | old local-transport2件 | transport/harness単独回帰 / 必須 | I | 実装可能 | 権限/FW変更をテスト成功条件にしない |
-| SAFE-02 / S§13, handoff | fixture各段階失敗、cleanup一action失敗/割込 | 後続dependent not-run、独立case継続、全cleanup試行、errors/leaks別、exit非0 | 障害 | old transport/CRUD finally | resource manifestと結果registry / 必須 | I+E+L | 実装可能 | SIGKILLはfinally保証不能、owned手動回収手順 |
+| SAFE-02 / S§13, handoff | fixture各段階失敗、cleanup一action失敗/割込 | 未開始dependent not-run、入力後の不一致fail、独立case継続、全cleanup試行、errors/leaks別、exit非0 | 障害 | old transport/CRUD finally | resource manifestと結果registry / 必須 | I+E+L | 実装可能 | SIGKILLはfinally保証不能、owned手動回収手順 |
 | SAFE-03 / S§13 / F10 | assertion diff/SDK例外/子process/TF診断にcanary | token/code/cookie/password/URL/credential/body/envを保存/表示しない、固定assert名とcounts | 異常 | rt never_logs_secrets、dl private-command | harness failure canary / 必須 | I | 実装可能 | owned Logs読取・配信はOBS必須。本番ログ全体/IAMはA |
 | SAFE-04 / S§15 / F18,F23〜24 | IAM/TLS/timeout/freeze/concurrency、AWS alarm/GHA/PITR/Chrome | 実受け入れ未実施を維持。mock/Flociから同等性/性能を推定しない | 対象外 | dl infra/workflows、op recovery | 既存回帰と未検証記録 | U+A | 本番同等性不可 | 別承認、拡張ソースなし、GHA起動禁止 |
 

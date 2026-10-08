@@ -2,7 +2,12 @@
 
 確認日: 2026-10-03。対象: [AWS設計書](superpowers/specs/2026-10-02-reminder-server-aws-design.md)の**productionのみ・本人1人**の構成。Cognito、HTTP APIの標準JWT Authorizer、API/清掃Lambda、DynamoDBの3表と清掃GSI、画像/配布ZIP用S3、CloudWatch、Terraform state、EventBridge Schedulerを含める。ZIPでLambdaへ配布するためECRを作らない。常設dev環境、認証Lambda、GHAでの定期清掃も設けない。
 
-これは入力条件を置いた参考モデルで、実請求・費用上限の保証ではない。リージョン未指定のため、公式資料の料金例を確認できた**US East (N. Virginia)、us-east-1**を参考にする。東京リージョンの試算ではない。地域別Price Listの直接取得は通信制限で実行できなかったため、構築先リージョン決定後にAWS Pricing CalculatorまたはPrice Listと実測で更新する。
+これは入力条件を置いた参考モデルで、実請求・費用上限の保証ではない。作成時はリージョン未指定だったため、公式資料の料金例を確認できた**US East (N. Virginia)、us-east-1**を参考にしている。東京リージョンの試算ではない。地域別Price Listの直接取得は通信制限で実行できなかったため、AWS Pricing CalculatorまたはPrice Listで構築先リージョンの単価を確認し、実測と合わせて更新する。
+
+2026-10-08に、利用見込みは東京リージョン・月100リクエスト未満と確認した。
+[画像保持・APIログの費用判断](operations/formal-e2e-cost-and-logging.md)で、この利用量における旧versionと追加ログの費用を比較した。
+本書の全サービスの単価・内訳は米国東部の参考モデルのままであり、東京の総額へ更新したとは扱わない。
+既存のログ予算に追加ログの概算をそのまま重ねて加算しない。
 
 円換算は説明用に1 USD = 150円、税別とする。Cognito MAUとSchedulerは利用可能な共有無料枠内という条件で0とし、他サービスの無料枠・割引・期間限定クレジットは基本表から差し引かない。転送100 GB/月の無料枠だけを追加反映した列も示す。他のシステムと共有する無料枠に余裕がなければ該当分を加算する。
 

@@ -9,6 +9,11 @@
 復旧した参照先画像を確保するためで、想定利用量では保持短縮による節約は小さい。
 APIには成功・失敗の結果ログを1呼び出し1件追加する。本文や画像を含めず、既存の30日保持を使う。
 
+追加件数はAPI Lambdaの実呼び出し数を基準とする。Gatewayで拒否された要求やS3への直接取得では、API結果ログを追加しない。
+正常・異常ケースのログは各ケース内で照合し、既存のGateway/清掃ログの項目や保持期間を増やさない。
+[設計案](../superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)と
+[計画案](../superpowers/plans/2026-10-08-reminder-server-formal-e2e.md)に実装範囲を定義する。
+
 ## S3の保存費
 
 S3は各versionの全bytesを課金対象とする。清掃時のDeleteObjectはdelete markerを作るため、

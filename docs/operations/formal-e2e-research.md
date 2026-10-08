@@ -75,7 +75,8 @@ read-onlyで確認した。コピーのsourceの存在は稼働native binaryの�
 | Scheduler schedule/group/Get/Update/Delete/at/cron/target | ScheduleDispatcherはenabled/invocationEnabledを確認、at/rate/cron処理。ScheduleInvokerはLambdaをInvocationType.Eventでinvoke | 設定read-backとowned one-time probeを採用。実起動未確認。SourceArn/IAM/async retry同等性は証明しない |
 | STS | 移行/復旧はexplicit account照合に使用 | 明示endpointのlocal GetCallerIdentityを確認してから運用adapter結合。実credential chainは使用しない |
 | Terraform1.16.5 / provider6.67.0 | 既存infra mockとlock。Context7でcustom endpoints設定を確認 | 本番3rootの公開ソース再利用・構築・設定read-backを必須基盤として計画へ採用。未対応APIは現在確定していない。全apply成功/不可能を断定しない |
-| OIDC/S3 remote backend/GHA/Cognito domain本番/TLS/PITR/実Chrome | 本番受け入れ資料に未実施 | 今回は対象外。production rootをローカル用へ改変しない |
+| OIDC provider/role/subject、9alarmのローカル設定 | 本番3rootの公開定義 | 全定義のapplyとread-backに含める。Flociの必要API互換性は未確認。OIDC実認証やalarm通知の本番同等性は証明しない |
+| S3 remote backend/GHA、本番Cognito domain/TLS/PITR/実Chrome受け入れ | 本番受け入れ資料に未実施 | 実AWSの操作・受け入れは対象外。本番定義は再利用し、backendはlocal、接続・隔離差分だけを追加する |
 
 承認後は必要APIを「成功実測 / sourceのみ / 未対応action / 未実施」の四区分で更新し、
 TFの最小applyで付随read/waiterの不足も調べる。healthのrunningだけで採用可否を閉じない。
@@ -113,8 +114,8 @@ WWW-Authenticateのraw値は秘密を含まない保証がないためpublic証�
 ## 入力から最終結果を見る方針への改訂
 
 ユーザーの指摘を受け、SDK構築と補足Terraform probeという初稿から、Terraform構築→設定確認→実HTTP→
-DDB/S3/CloudWatch確認→destroyへ改訂した。必要APIが不足する場合、TF/Logsをunsupported、
-依存ケースをnot-runとして記録し、正式E2E未完了とする。独立U/Iは継続できる。
+DDB/S3/CloudWatch確認→destroyへ改訂した。必要APIが不足する場合、基盤側のTF/Logsをunsupported、
+未開始の依存ケースをnot-runとして記録する。入力後の保存/ログ不一致は当該ケースのfailとして残し、正式E2E未完了とする。独立U/Iは継続できる。
 この時点の案は独立ローカルrootだったが、下記の最小変更方針への改訂で本番3rootの公開定義を再利用する。Floci成功は実AWSの本番apply成功の証拠にはならない。
 
 公開ソースを確認すると、APIは安全なHTTPエラー応答を作るが結果ログを出していない。
@@ -170,6 +171,21 @@ prevent_destroy維持中の通常destroyを成功前提にしない。mockのove
 §3に実行順と条件の表、§6に出力ごとの正常/異常判定、計画に実装順と実行順の区別を追加した。
 現案はsuiteごとに独立したstackで構築以降を繰り返す。ケースごとのapplyや本番定義の変更はしない。
 
-§4の「TFを別layer」という記述は共通型U/I/E/L/Aと不一致だったため、TFケースはLに統一した。
+§4の「TFを別layer」という記述は共通型U/I/E/L/Aと不一致だったため、実構築・設定確認はLに揃えた。driver/source負例は対応表どおりIとする。
 また、基盤初期化前のnot-runと、入力後の保存/ログ不一致のfailを区別し、実施済み証拠をnot-runへ戻さない規則を明記した。
 Iの故障注入/captureを実HTTP・CloudWatch配信の証拠にしない境界は維持した。コード変更・applyは未実施。
+
+## 関連文書まで含めた整合確認
+
+設計・計画・対応表のほか、ハンドオフ、README、費用資料、実装結果、受け入れ記録、API/認証/清掃/移行/復旧/配布手順と公開infra READMEを確認した。
+波及先と更新時期は[関連文書の確認結果](formal-e2e-document-impact.md)へ記録した。
+
+- 各caseのHTTP/DDB/S3/ログの期待assert・照合結果・対象外理由を共通契約へ反映した。Task4がrunnerの構築→設定確認→case→回収をつなぎ、Task5〜10が各case内でログまで照合する。
+- サービス表でOIDCを一括して対象外にしていた記述を修正した。ローカル定義のapply/read-backは必須、本番OIDC/GHA/監視の受け入れは対象外である。
+- 清掃の開始ログはlambdaRequestId、終了ログはserviceが生成するrequestIdであり、同じIDで一致させることはできない。現行コードの形式を保ち、stream/観測区間で対応づける案へ修正した。
+- 未公開清掃は開始ログを出してskipする。不正eventは開始ログより前に拒否する。通常の成功終了ログを全ケースに要求しない。
+- refreshの実10秒graceと30日絶対期限を分けた。対応表にあった「元deadline独立I」には本計画内の実装担当と検証経路がなかったため、30日と更新時の不延長はAへ統一し、既存Floci回帰を補助資料とした。
+- READMEに未実装・レビュー中の入口を追加した。旧F10結果にはAPI操作結果ログの不足を追記し、過去の成功件数を正式E2Eへ流用しないことを明記した。
+- 費用資料に東京/月100回未満の前提への参照を追加した。旧米国東部モデルの総額や未取得単価は変更していない。
+
+今回も変更は文書のみ。実装・Flociリソース作成・apply・実AWS操作は行っていない。

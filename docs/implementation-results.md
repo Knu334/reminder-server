@@ -13,6 +13,11 @@ The [historical audit](repository-audit-2026-10-02.md), design and original appr
 handoff have not been rewritten. The [resume handoff](superpowers/handoffs/2026-10-03-reminder-server-aws-sdd-resume.md)
 now points here instead of directing a future session to restart R02.
 
+2026-10-08追補: F10のログに関する記録は、安全なHTTPエラー、共通logging helper、清掃ログ、Gateway設定の証拠である。
+現行APIには、操作の成功・失敗を1呼び出し1件で記録する結果ログがない。
+この追加と正式E2Eは[別の設計・計画](superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)としてレビュー中で、未実装・未実施である。
+以下の過去の成功件数やF10の記録を、新しいAPI結果ログと正式E2Eの検証成功には用いない。
+
 R01–R08 deliver validated contracts/config, authentication and rate/ownership,
 item transactions and ETags, image jobs, bounded cleanup and lazy Lambda handlers.
 O01–O03 deliver explicit dry-run/import/verify/publish and restored-only verification,

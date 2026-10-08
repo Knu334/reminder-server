@@ -16,6 +16,14 @@ scoped独立re-reviewも完了し、5件すべての修正を確認しました�
 [最終レビューと制限](docs/implementation-final-review.md)、[全52件の判断](docs/implementation-rulings.md)
 を参照してください。ZIP/SBOMの実測値は上記受け入れ記録にあります。
 
+正式ローカルE2Eは別の設計・計画としてレビュー中です。
+[設計案](docs/superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)、
+[実装計画](docs/superpowers/plans/2026-10-08-reminder-server-formal-e2e.md)、
+[要件対応表](docs/operations/formal-e2e-coverage.md)、
+[関連文書の確認結果](docs/operations/formal-e2e-document-impact.md)を参照してください。
+本番Terraformの3rootを再利用したFloci構築・設定確認後に、入力に対するHTTP・DDB・S3・ログを照合する案です。
+正式E2E用のnpm入口とAPI操作の結果ログは未実装です。上記の過去の成功件数には含めません。
+
 ## ローカル検証
 
 Node **24.21.0**、npm **11.11.1**、Python **3.13.16**、Terraform **1.16.5**、

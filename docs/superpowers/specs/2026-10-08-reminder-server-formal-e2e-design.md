@@ -47,7 +47,7 @@ API Lambdaに1呼び出し1件の結果ログを追加する案を採る。費�
 
 2026-10-08の調査で、rootは `/workspace` / `feature/aws-modernization`、アプリは
 リンクされたworktree `/workspace/.worktrees/aws-sdd` / `feature/aws-sdd-implementation`、
-HEADは `c13272424a3bcb65b6a4613682889be02335c978` と確認した。
+調査開始時のHEADは `c13272424a3bcb65b6a4613682889be02335c978` と確認した。再開時は実際のHEADと変更状態を確認する。
 アプリの `src/api/event.ts`、`tests/runtime/api.test.ts`、`tests/runtime/boundaries.test.ts` の
 未コミットのnull-body修正と、未追跡の過去報告書・ハンドオフ・計画は保持する。
 rootのFWとFloci READMEのユーザー変更も保持する。旧19タスクを再実行しない。
@@ -144,7 +144,7 @@ Schedulerのone-time起動とS3署名強制は互換性調査を必須とし、�
 `test:e2e:floci` の既定は構築・設定確認と必須E/L/loggingの全群。Scheduler起動probeも実行して互換性結果を残す。
 `--suite auth|api|storage|images|cleanup|operations|logging|scheduler` は
 単独診断用で、部分実行を全体成功にしない。suite内のケースIDで選択できる。
-layerはU/I/E/L/Aだけとする。TFは構築・設定確認のケース群で、layer=Lとして保存する。
+layerはU/I/E/L/Aだけとする。TFは要件IDの区分であり、実apply・設定確認はL、driver/sourceの決定的な負例はIとして保存する。
 `--layer floci|terraform` は既存案の実行入口の選択値であり、結果のlayerへそのまま転記しない。
 構築・設定確認、通常API、清掃/合成運用、故障注入の件数をそれぞれ示し、合計成功件数だけで完了を判断しない。
 
@@ -199,6 +199,7 @@ SDK retriesで失敗を隠さず、readiness/GSI/Schedulerの観測pollのみ期
 各ケースでは「構築・設定確認済みの前提→入力→HTTP/headers→DDBの強い整合性のある読み取り→S3/job/counter→CloudWatchログ」の順に確認する。
 ケース定義にはHTTP・DDB・S3・ログの期待をそれぞれ記載する。画像のない操作でもS3への書き込みがないことを確認し、
 条件に当てはまらない出力は理由を示す。ログだけ、またはHTTPだけの成功で、保存状態の確認を省略しない。
+期待するassert名と実際の照合結果も出力ごとに残す。必須assertが未確認なら、その出力とケースをpassにしない。
 
 | 出力 | 正常系で確認すること | 異常系で確認すること |
 | --- | --- | --- |
@@ -212,8 +213,9 @@ SDK retriesで失敗を隠さず、readiness/GSI/Schedulerの観測pollのみ期
 
 ### 境界・競合・認証の判定
 
-拒否されたリクエストでは、項目/counter/job/画像が変わらないことをassertする。ただし認証済みの入力不正は
+認証・入力検証で拒否されたリクエストでは、項目/counter/job/画像が変わらないことをassertする。ただし認証済みの入力不正は
 rateを消費するので、RATE行とSTORAGE行を分けて期待値を指定する。
+画像Put後の重複登録409や依存先故障は、期待する孤児pending jobと画像保持を確認する。すべてのエラーを保存不変として扱わない。
 同時競合は共通ETag取得後のbarrier releaseとPromise.allSettledで2要求を送る。
 逐次stale ETagは別ケース。クライアントで同時に送ったことを、AWS内部処理の同時実行保証とは説明しない。
 PATCH同士では、競合に負けた要求は412となる。DELETEが先に完了し、後発の強い整合性のある読み取りがtombstoneを読む場合は404となる現行契約を保持する。
@@ -226,7 +228,8 @@ signature改ざんではsignatureだけを変更する。別clientの検証に�
 別issuerの負例は期待JWKSで署名検証可能かも確認し、鍵が別ならissuer単独拒否の証明には使わない。
 `token_use=id`はscopeも欠けるためGateway403をtoken_use単独証明としない。
 token_useの条件やiat/nbf、30日絶対期限は、条件を単独で検証するU/Iと実AWS受け入れへ割り当てる。
-refresh graceは実10秒を跨ぐ限定waitを許可し、再利用で期限が延びないことをI/Floci回帰でも確認する。
+refresh graceは実10秒を跨ぐ限定waitを許可し、旧tokenの再利用で10秒の起点が延びないことをEで確認する。
+refreshの30日絶対期限と、更新してもその期限が延びないことはAへ残す。既存Floci回帰は補助資料として区別する。
 Chromeのsingle-flight/worker停止/cookie/実ブラウザ認証はこのリポジトリで実施済みにしない。
 
 画像はPNG/JPEG/GIF/WebPの合成bytesをBASE64/data URL入力し、DDB参照/jobと
@@ -258,6 +261,8 @@ created/transition/updated/due/cleanupPartition/cleanupSortKeyを一致させる
 deletingのactive/expired lease20分、done/committedのsparse GSI除外、version/checksum不一致保護、
 50候補を跨ぐ同shard51件、次回巡回のcursor reset、二回invokeの収束をLで検証する。
 delete marker作成後も元versionが残ることをGETで確認する。
+未公開の清掃はcleanup_start、skippedUnpublishedの応答、保存不変を確認し、通常のcleanup終了ログを要求しない。
+不正eventは開始ログより前に拒否されるため、FunctionErrorと保存不変を確認し、アプリケーションログ照合の対象外理由を残す。
 GSI反映のpollでbase itemの条件検証を代替しない。pollがtimeoutした場合はskipせず、当該ケースの失敗とする。
 
 10,000候補/5,000削除/600秒/残り60秒/並行4とページ途中中断は、既存Iを根拠に
@@ -301,7 +306,8 @@ Flociが設定を受け付けることと、IAM/TLS/alarm等をAWSと同様に�
 
 接続先以外の差分も上表のとおり存在するため「完全に同一」とは記録しない。
 接続・隔離に必要な差分だけで構築できるかは未実測。必要APIが非対応なら、設定を省略・緩和せず
-failedActionと独立probeを保存し、TFをunsupported/partial、依存E/Lをnot-run、正式E2Eを未完了とする。
+failedActionと独立probeを保存し、該当TFケースをunsupportedまたはfail、未開始の依存E/Lをnot-run、正式E2Eを未完了とする。
+partial applyはphaseとowned manifestへ記録する。共通型にないpartialというcase statusは追加しない。
 S3のHTTP接続がTLS必須policyで拒否される場合も、policyを削って成功にしない。
 接続先の変更に伴うURL検証の追加は、discoveryで確認したowned Floci URLだけに限定する。
 API ID形式等の接続と無関係な検証を緩めない。必要な差分が上表を超える場合は原因と具体的差分を提示する。
@@ -345,8 +351,11 @@ consoleの出力を既存Lambda log groupへ配信し、APIからPutLogEventsを
 ログ用の新しいalarm・custom metric・subscription・常時クエリは追加しない。
 
 E2Eではrunの開始時刻とrequestIdを使い、owned log groupのLogs APIから期限60秒・短いpollで結果を取得する。
-API LambdaはHTTPのstatus/codeとの一致と1件であること、Gatewayは同じrequestId/status、清掃はLambda request IDと
-cleanup/status/処理件数を照合する。配送の再取得による同一eventの重複はevent IDで除外する。
+API LambdaはHTTPのstatus/codeとの一致と1件であること、Gatewayは同じrequestId/statusを照合する。
+清掃の開始ログはlambdaRequestIdを持ち、終了ログのrequestIdはservice内で作る別のrunIdである。同じIDとして照合しない。
+手動清掃は同一fixtureで逐次実行し、Scheduler停止と前回処理終了を確認する。同じlog stream内の開始・終了を当該invokeの観測区間で対応づけ、status/処理件数と保存状態を照合する。
+Scheduler probeで対応関係を特定できない場合も、別invokeの終了ログを採用せず失敗・制限として残す。
+配送の再取得による同一eventの重複はevent IDで除外する。
 Gateway認証拒否はGatewayログを確認する。現行access logにはアプリケーションerror codeがないため、その値を要求しない。
 故障注入Iでも同じwrapperでcreateApiHandlerを包み、ログをcaptureして契約を検証する。CloudWatch配信の証拠とは数えない。
 FlociでLogs配送ができない場合、raw consoleや手動PutLogEventsを代替の成功証拠にせず、必須ケースの未完了を記録する。
@@ -356,7 +365,7 @@ rawログはメモリ内で照合し、公開結果へは許可項目とassert�
 
 run固有のGit追跡対象外の `artifacts/formal-e2e/<runId>/` に、0700 directory/0600 manifest・JSON結果を保存する。
 証拠はcaseId、requirementId、layer、pass/fail/not-run/unsupported/out-of-scope、
-phase、許可されたstatus/code、assert名、件数、duration、cleanupとleak件数、非秘密のtool/ZIP/本番公開ソースdigest、差分区分と件数だけ。
+phase、許可されたstatus/code、HTTP/DDB/S3/ログごとのassert名・照合結果・対象外理由、件数、duration、cleanupとleak件数、非秘密のtool/ZIP/本番公開ソースdigest、差分区分と件数だけ。
 fixtureの前提が満たせない場合は依存ケースをnot-runとし、独立したsuiteは継続する。必須ケースは自動skipにしない。
 全ケースを列挙してから実行し、fixture初期化に失敗しても集計対象からケースを除外しない。
 全assertはbody/token/URL等を含まない固定メッセージに包み、node:testの差分・stack、SDK例外、
