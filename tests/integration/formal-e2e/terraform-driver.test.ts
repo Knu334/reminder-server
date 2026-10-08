@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import { mkdtemp, readFile, rm, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import fsPromises from 'node:fs/promises';
 import * as store from '../../e2e/floci/support/evidence.ts';
 import { definitions } from '../../e2e/floci/support/cases.ts';
 
@@ -63,6 +64,69 @@ void test('default endpoint is rejected before public-source preparation', async
   const source = await import('../../../scripts/e2e/terraform-source.ts').catch(() => undefined);
   assert.equal(typeof source?.prepareProductionRoots, 'function');
   await assert.rejects(source!.prepareProductionRoots({ endpoint: 'https://amazonaws.com' as 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map([['floci', '8.8.8.8']]) }, join(directory, 'roots')));
+});
+
+void test('unknown automatically loaded variable names are rejected before their contents are read', async t => {
+  const source = await import('../../../scripts/e2e/terraform-source.ts');
+  const directory = await mkdtemp(join(tmpdir(), 'tf-autovars-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  const roots = await source.prepareProductionRoots({ endpoint: 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map([['floci', '172.18.0.2']]) }, join(directory, 'roots'));
+  const originalRead = fsPromises.readFile; let forbiddenReads = 0; let forbidden = '';
+  t.mock.method(fsPromises, 'readFile', (...args: Parameters<typeof fsPromises.readFile>) => { if (String(args[0]) === forbidden) { forbiddenReads++; throw new Error('PRIVATE_INPUT_CANARY'); } return originalRead(...args); });
+  for (const name of ['terraform.tfvars', 'terraform.tfvars.json', 'extra.auto.tfvars', 'extra.auto.tfvars.json', 'owned.auto.tfvars.json']) {
+    forbidden = join(roots.bootstrap, name); await fsPromises.writeFile(forbidden, 'private-input-canary');
+    await assert.rejects(source.verifyProductionRoots(roots), /UNKNOWN_OVERRIDE_REJECTED/);
+    await unlink(forbidden);
+  }
+  assert.equal(forbiddenReads, 0);
+});
+
+void test('expected synthetic variable bytes remain exact across commands and cleanup', async t => {
+  const source = await import('../../../scripts/e2e/terraform-source.ts');
+  const directory = await mkdtemp(join(tmpdir(), 'tf-inputs-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  const roots = await source.prepareProductionRoots({ endpoint: 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map([['floci', '172.18.0.2']]) }, join(directory, 'roots'));
+  assert.equal(typeof source.writeProductionInputs, 'function');
+  await source.writeProductionInputs(roots, 'bootstrap', { account_id: '123456789012', production_api_id: null });
+  const path = join(roots.bootstrap, 'owned.auto.tfvars.json'); const original = await readFile(path, 'utf8');
+  await source.verifyProductionRoots(roots);
+  await fsPromises.writeFile(path, original.replace('123456789012', '999999999999'));
+  await assert.rejects(source.verifyProductionRoots(roots), /SOURCE_REJECTED/);
+  await assert.rejects(source.writeProductionInputs(roots, 'bootstrap', { account_id: '123456789012' }), /SOURCE_REJECTED/);
+  await fsPromises.writeFile(path, original);
+  await source.writeProductionInputs(roots, 'bootstrap', { account_id: '123456789012', production_api_id: 'synthetic0' });
+  await source.cleanupOverrides(roots, true); await source.verifyProductionRoots(roots, true);
+  await fsPromises.writeFile(path, original);
+  await assert.rejects(source.verifyProductionRoots(roots, true), /SOURCE_REJECTED/);
+});
+
+void test('obsolete recovery entrypoints cannot request services or spawn against foreign-account state', async t => {
+  const driver = await import('../../../scripts/e2e/terraform.ts');
+  const runId = 'e2e-deadbeef-1111-4111-8111-111111111111'; const directory = join(process.cwd(), 'artifacts/formal-e2e', runId);
+  const originalRead = fsPromises.readFile;
+  const state = JSON.stringify({ resources: [{ mode: 'managed', type: 'aws_iam_policy', name: 'foreign_address', instances: [{ attributes: { arn: 'arn:aws:iam::999999999999:policy/e2e-deadbeef-production-api-ceiling' } }] }] });
+  t.mock.method(fsPromises, 'readFile', (path: string, ...args: unknown[]) => {
+    if (path.endsWith('/manifest.json')) return Promise.resolve(JSON.stringify({ runId, resultsFinalized: true, resources: [{ id: `${runId}/bootstrap` }] }));
+    if (path.endsWith('/owned.tfstate')) return Promise.resolve(state);
+    if (path.startsWith(directory + '/terraform/bootstrap/')) return originalRead(join(process.cwd(), 'infra/bootstrap', path.split('/').at(-1)!), 'utf8');
+    if (path.endsWith('.lock')) return Promise.resolve(runId);
+    return Reflect.apply(originalRead, fsPromises, [path, ...args]);
+  });
+  t.mock.method(fsPromises, 'lstat', async () => ({ isSymbolicLink: () => false, isFile: () => true }));
+  t.mock.method(fsPromises, 'realpath', async (path: string) => path);
+  t.mock.method(fsPromises, 'writeFile', async () => undefined); t.mock.method(fsPromises, 'unlink', async () => undefined);
+  let requests = 0; let spawns = 0;
+  t.mock.method(http, 'request', (_url: URL, _options: unknown, callback: (response: http.IncomingMessage) => void) => {
+    requests++; const response = Readable.from([Buffer.from('<Code>NoSuchEntity</Code>')]) as http.IncomingMessage; response.statusCode = 404; response.rawHeaders = [];
+    const outgoing = new PassThrough(); process.nextTick(() => callback(response)); return outgoing;
+  });
+  t.mock.method(childProcess, 'spawn', () => { spawns++; const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), kill() {} }); process.nextTick(() => child.emit('close', 0)); return child; });
+  for (const name of ['diagnoseOwnedBootstrap', 'recoverOwnedBootstrap', 'verifyBootstrapNamespaceAbsent']) {
+    await assert.rejects(async () => {
+      const method = Reflect.get(driver, name);
+      if (typeof method !== 'function') throw new Error('DRIVER_ENTRYPOINT_REMOVED');
+      await method(name === 'verifyBootstrapNamespaceAbsent' ? runId : directory, { endpoint: 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map([['floci', '172.18.0.2']]) });
+    });
+  }
+  assert.equal(spawns, 0); assert.equal(requests, 0);
 });
 
 void test('artifact registration rejects tampered ZIP and changed source before any request', async t => {
@@ -234,6 +298,104 @@ void test('construction action failure is recorded before finalization and retai
   await store.finalizeResults(evidence);
   const cleanup = await retained!.destroy(); const summary = await evidence.finish(cleanup);
   assert.equal(cleaned, true); assert.equal(summary.failed, 1); assert.equal(summary.cleanup.errors, 1); assert.equal(summary.exitCode, 1);
+});
+
+void test('independent owned API non-support remains unsupported with dependent not-run and owned cleanup', async t => {
+  const runner = await import('../../../scripts/e2e/run.ts'); const driver = await import('../../../scripts/e2e/terraform.ts');
+  assert.equal(typeof store.measureRequiredApiUnsupported, 'function');
+  const directory = await mkdtemp(join(tmpdir(), 'tf-unsupported-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  const definition = definitions.find(def => def.id === 'TF-01/apply')!; const dependent = definitions[0]!;
+  const evidence = await store.createEvidence([definition, dependent], join(directory, 'run')); let requests = 0;
+  t.mock.method(http, 'request', (_url: URL, options: http.RequestOptions, callback: (response: http.IncomingMessage) => void) => {
+    requests++; assert.equal((options.headers as Record<string, string>)['x-amz-target'], 'DynamoDB_20120810.DescribeTable');
+    const response = Readable.from([Buffer.from('{"__type":"NotImplementedException","message":"SECRET_UNSUPPORTED_CANARY"}')]) as http.IncomingMessage; response.statusCode = 501; response.rawHeaders = [];
+    const outgoing = new PassThrough(); process.nextTick(() => callback(response)); return outgoing;
+  });
+  const unsupported = await store.measureRequiredApiUnsupported({ endpoint: 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map([['floci', '172.18.0.2']]) }, { action: 'DescribeTable', identity: 'e2e-deadbeef-production-reminders', prefix: 'e2e-deadbeef', account: '123456789012' });
+  assert.ok(unsupported); assert.equal(requests, 1); let cleaned = false;
+  const stack = { constructionOutputs: [], async destroy() { assert.ok(store.evidenceContext(evidence).finalized); cleaned = true; return { attempted: 1, succeeded: 1, errors: 0, leaks: 0 }; } } as unknown as import('../../e2e/floci/support/types.ts').ProvisionedStack;
+  const retained = await runner.runConstruction(evidence, definition, async () => { throw new driver.ProvisioningFailure('platform-apply', stack, 'terraform-construction-failed', unsupported); });
+  await runner.recordConstructionDependents(evidence, [definition, dependent], retained);
+  await store.finalizeResults(evidence); const summary = await evidence.finish(await retained!.destroy());
+  const report = await readFile(join(directory, 'run/results.json'), 'utf8'); const saved = JSON.parse(report);
+  assert.equal(saved.cases[0].result.status, 'unsupported'); assert.equal(saved.cases[0].result.reason, 'required-api-unsupported');
+  assert.deepEqual(saved.cases[0].result.requiredApiNonSupport, { action: 'DescribeTable', httpStatus: 501, errorCode: 'NotImplementedException', basis: 'independent-owned-read-only-probe' });
+  assert.equal(saved.cases[1].result.status, 'not-run'); assert.equal(saved.cases[1].result.reason, 'prerequisite-failed');
+  assert.equal(cleaned, true); assert.equal(summary.unsupported, 1); assert.equal(summary.exitCode, 1); assert.doesNotMatch(report, /SECRET_UNSUPPORTED_CANARY/);
+});
+
+void test('arbitrary errors, timeout and unmeasured unsupported metadata remain failures', async t => {
+  assert.equal(typeof store.measureRequiredApiUnsupported, 'function');
+  const target = { endpoint: 'http://floci:4566' as const, region: 'ap-northeast-1' as const, addresses: new Map([['floci', '172.18.0.2']]) };
+  let status = 501; let body = '{"message":"NotImplementedException CANARY"}';
+  t.mock.method(http, 'request', (_url: URL, _options: unknown, callback: (response: http.IncomingMessage) => void) => { const response = Readable.from([Buffer.from(body)]) as http.IncomingMessage; response.statusCode = status; response.rawHeaders = []; const outgoing = new PassThrough(); process.nextTick(() => callback(response)); return outgoing; });
+  const probe = { action: 'DescribeTable' as const, identity: 'e2e-deadbeef-production-reminders', prefix: 'e2e-deadbeef', account: '123456789012' };
+  assert.equal(await store.measureRequiredApiUnsupported(target, probe), undefined);
+  status = 503; body = '{"__type":"NotImplementedException"}'; assert.equal(await store.measureRequiredApiUnsupported(target, probe), undefined);
+  await assert.rejects(store.measureRequiredApiUnsupported(target, { ...probe, identity: 'foreign-reminders' }));
+  const runner = await import('../../../scripts/e2e/run.ts'); const definition = definitions.find(def => def.id === 'TF-01/apply')!;
+  for (const error of [new Error('NotImplementedException'), new Error('timeout')]) {
+    const directory = await mkdtemp(join(tmpdir(), 'tf-unmeasured-')); t.after(() => rm(directory, { recursive: true, force: true })); const evidence = await store.createEvidence([definition], join(directory, 'run'));
+    await runner.runConstruction(evidence, definition, async () => { throw error; }); const summary = await evidence.finish({ attempted: 0, succeeded: 0, errors: 0, leaks: 0 }); assert.equal(summary.failed, 1); assert.equal(summary.unsupported, 0);
+  }
+  const directory = await mkdtemp(join(tmpdir(), 'tf-forged-')); t.after(() => rm(directory, { recursive: true, force: true })); const evidence = await store.createEvidence([definition], join(directory, 'run'));
+  await evidence.record({ id: definition.id, status: 'unsupported', phase: 'provision', durationMs: 1, reason: 'required-api-unsupported', requiredApiNonSupport: { action: 'DescribeTable', httpStatus: 501, errorCode: 'NotImplementedException', basis: 'independent-owned-read-only-probe' } });
+  assert.equal((await evidence.finish({ attempted: 0, succeeded: 0, errors: 0, leaks: 0 })).failed, 1);
+});
+
+void test('failed Terraform read action independently probes API support and retains mapped identities for cleanup', async t => {
+  const runner = await import('../../../scripts/e2e/run.ts'); const driver = await import('../../../scripts/e2e/terraform.ts'); const { inputSnapshot } = await import('../../../scripts/e2e/prepare-artifact.ts');
+  const { createHash } = await import('node:crypto'); const { writeFileSync } = await import('node:fs');
+  const directory = await mkdtemp(join(tmpdir(), 'tf-measured-command-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  const definition = definitions.find(def => def.id === 'TF-01/apply')!; const evidence = await store.createEvidence([definition], join(directory, 'run')); const prefix = `e2e-${evidence.runId.slice(4, 12)}`;
+  t.after(async () => { const lock = join(process.cwd(), '.superpowers/locks/123456789014.lock'); try { if (await readFile(lock, 'utf8') === evidence.runId) await unlink(lock); } catch { /* no lock */ } });
+  const bytes = Buffer.from('synthetic current source'); const zipPath = join(directory, 'zip'); await fsPromises.writeFile(zipPath, bytes);
+  const artifact = { zipPath, compressedBytes: bytes.length, sha256Hex: createHash('sha256').update(bytes).digest('hex'), sha256Base64: createHash('sha256').update(bytes).digest('base64'), ...await inputSnapshot() };
+  let requests = 0; let probeRequests = 0; let destroyed = false;
+  t.mock.method(http, 'request', (_url: URL, _options: unknown, callback: (response: http.IncomingMessage) => void) => {
+    const index = requests++; const xml = index === 0 ? '<Account>123456789014</Account>' : index === 1 ? '<ListOpenIDConnectProvidersResponse/>' : destroyed ? '<Code>NoSuchEntity</Code>' : '<Code>NotImplemented</Code><Message>RAW_CANARY</Message>';
+    if (index > 1 && !destroyed) probeRequests++;
+    const response = Readable.from([Buffer.from(xml)]) as http.IncomingMessage; response.statusCode = index < 2 ? 200 : destroyed ? 404 : 501; response.rawHeaders = [];
+    const outgoing = new PassThrough(); process.nextTick(() => callback(response)); return outgoing;
+  });
+  t.mock.method(childProcess, 'spawn', (_tool: string, args: string[], options: { cwd: string }) => {
+    const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), kill() {} });
+    if (args[0] === 'apply') writeFileSync(join(options.cwd, 'owned.tfstate'), JSON.stringify({ resources: [{ mode: 'managed', type: 'aws_iam_role', name: 'runtime', instances: [{ attributes: { name: `${prefix}-production-api` } }] }] }));
+    if (args[0] === 'destroy') { destroyed = true; writeFileSync(join(options.cwd, 'owned.tfstate'), '{}'); }
+    process.nextTick(() => { if (args[0] === 'apply') child.stderr.emit('data', Buffer.from('operation error IAM: GetRole, raw driver canary')); child.emit('close', args[0] === 'apply' ? 1 : 0); }); return child;
+  });
+  const stack = await runner.runConstruction(evidence, definition, () => driver.provisionStack({ endpoint: 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map([['floci', '172.18.0.2']]) }, { publication: false }, artifact, evidence));
+  assert.ok(stack); assert.equal(probeRequests, 1); assert.equal(store.evidenceContext(evidence).manifest.resources.flatMap(item => item.identities ?? []).length, 1);
+  await store.finalizeResults(evidence); const cleanup = await stack.destroy(); const summary = await evidence.finish(cleanup);
+  assert.equal(summary.unsupported, 1); assert.equal(summary.exitCode, 1); assert.equal(cleanup.errors, 0); assert.equal(cleanup.leaks, 0); assert.equal(destroyed, true);
+  assert.deepEqual(JSON.parse(await readFile(join(directory, 'run/independent-absence.json'), 'utf8')), { checked: 1, absent: 1, exists: 0, unverified: 0 });
+  assert.doesNotMatch(await readFile(join(directory, 'run/results.json'), 'utf8'), /RAW_CANARY|raw driver canary/);
+});
+
+void test('normal command rejects foreign account, unknown address, override and changed input before another spawn', async t => {
+  const driver = await import('../../../scripts/e2e/terraform.ts'); const { inputSnapshot } = await import('../../../scripts/e2e/prepare-artifact.ts'); const { createHash } = await import('node:crypto'); const { writeFileSync } = await import('node:fs');
+  for (const mutation of ['foreign-account', 'unknown-address', 'unknown-override', 'auto-vars', 'changed-input']) {
+    const directory = await mkdtemp(join(tmpdir(), 'tf-boundary-')); t.after(() => rm(directory, { recursive: true, force: true }));
+    const evidence = await store.createEvidence([definitions[0]!], join(directory, 'run')); const prefix = `e2e-${evidence.runId.slice(4, 12)}`;
+    t.after(async () => { const lock = join(process.cwd(), '.superpowers/locks/123456789015.lock'); try { if (await readFile(lock, 'utf8') === evidence.runId) await unlink(lock); } catch { /* no lock */ } });
+    const bytes = Buffer.from('synthetic boundary source'); const zipPath = join(directory, 'zip'); await fsPromises.writeFile(zipPath, bytes);
+    const artifact = { zipPath, compressedBytes: bytes.length, sha256Hex: createHash('sha256').update(bytes).digest('hex'), sha256Base64: createHash('sha256').update(bytes).digest('base64'), ...await inputSnapshot() };
+    let requests = 0; const calls: string[] = [];
+    t.mock.method(http, 'request', (_url: URL, _options: unknown, callback: (response: http.IncomingMessage) => void) => { const response = Readable.from([Buffer.from(requests++ === 0 ? '<Account>123456789015</Account>' : '<ListOpenIDConnectProvidersResponse/>')]) as http.IncomingMessage; response.statusCode = 200; response.rawHeaders = []; const outgoing = new PassThrough(); process.nextTick(() => callback(response)); return outgoing; });
+    t.mock.method(childProcess, 'spawn', (_tool: string, args: string[], options: { cwd: string }) => {
+      calls.push(args[0]!);
+      if (mutation === 'foreign-account' || mutation === 'unknown-address') writeFileSync(join(options.cwd, 'owned.tfstate'), JSON.stringify({ resources: [{ mode: 'managed', type: 'aws_iam_policy', name: mutation === 'unknown-address' ? 'unknown' : 'runtime_ceiling', instances: [{ attributes: { arn: `arn:aws:iam::${mutation === 'foreign-account' ? '999999999999' : '123456789015'}:policy/${prefix}-production-api-ceiling` } }] }] }));
+      else if (mutation === 'changed-input') writeFileSync(join(options.cwd, 'owned.auto.tfvars.json'), '{}');
+      else writeFileSync(join(options.cwd, mutation === 'auto-vars' ? 'extra.auto.tfvars.json' : 'extra_override.tf'), 'PRIVATE_INPUT_CANARY');
+      const child = Object.assign(new EventEmitter(), { stdout: new PassThrough(), stderr: new PassThrough(), kill() {} }); process.nextTick(() => child.emit('close', 0)); return child;
+    });
+    let failure: InstanceType<typeof driver.ProvisioningFailure> | undefined;
+    try { await driver.provisionStack({ endpoint: 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map([['floci', '172.18.0.2']]) }, { publication: false }, artifact, evidence); } catch (error) { if (error instanceof driver.ProvisioningFailure) failure = error; else throw error; }
+    assert.ok(failure); assert.equal(failure.unsupported, undefined); assert.deepEqual(calls, ['init']);
+    await store.finalizeResults(evidence); const cleanup = await failure.ownedStack.destroy(); assert.ok(cleanup.errors > 0); assert.deepEqual(calls, ['init']); assert.equal(requests, 2);
+    await evidence.finish(cleanup); assert.doesNotMatch(await readFile(join(directory, 'run/manifest.json'), 'utf8'), /PRIVATE_INPUT_CANARY/);
+    try { await unlink(join(process.cwd(), '.superpowers/locks/123456789015.lock')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; } t.mock.restoreAll();
+  }
 });
 
 void test('DynamoDB absence probe uses its actual JSON protocol and rejects unverified responses', async t => {

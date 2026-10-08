@@ -4,11 +4,11 @@ import { mkdir, readFile, writeFile, unlink, lstat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { S3Client, ListObjectVersionsCommand, DeleteObjectsCommand, DeleteBucketPolicyCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
-import type { ArtifactSnapshot, CleanupSummary, Evidence, FixtureOptions, LocalTarget, PreparedTerraformRoots, ProvisionedStack } from '../../tests/e2e/floci/support/types.ts';
+import type { ArtifactSnapshot, CleanupSummary, Evidence, FixtureOptions, LocalTarget, PreparedTerraformRoots, ProvisionedStack, RequiredReadApi } from '../../tests/e2e/floci/support/types.ts';
 import { localRequest } from '../../tests/e2e/floci/support/transport.ts';
-import { evidenceContext, markResource, reserveResource, recordProcess, bindResourceIdentities } from '../../tests/e2e/floci/support/evidence.ts';
+import { evidenceContext, markResource, reserveResource, recordProcess, bindResourceIdentities, measureRequiredApiUnsupported, MeasuredRequiredApiUnsupported } from '../../tests/e2e/floci/support/evidence.ts';
 import { registerArtifact, verifyArtifactSnapshot } from '../../tests/e2e/floci/support/artifact.ts';
-import { assertLocalTarget, assertRegular, bindCognitoIdentity, discoveredCognitoIdentity, cleanupOverrides, ownsRoot, prepareProductionRoots, productionResourceAddresses, verifyProductionRoots, type RootName } from './terraform-source.ts';
+import { assertLocalTarget, assertRegular, bindCognitoIdentity, discoveredCognitoIdentity, cleanupOverrides, ownsRoot, prepareProductionRoots, productionResourceAddresses, verifyProductionRoots, writeProductionInputs, type RootName } from './terraform-source.ts';
 import { RunBudget, runChild } from './run.ts';
 
 const repository = resolve(__dirname, '../..');
@@ -176,7 +176,7 @@ export async function probeOwnedResource(target: LocalTarget, resource: OwnedRes
   } catch { return 'unverified'; }
 }
 export class ProvisioningFailure extends Error {
-  constructor(readonly phase: string, readonly ownedStack: ProvisionedStack, readonly reason = 'terraform-construction-failed') { super('E2E_PROVISION_FAILED'); }
+  constructor(readonly phase: string, readonly ownedStack: ProvisionedStack, readonly reason = 'terraform-construction-failed', readonly unsupported?: MeasuredRequiredApiUnsupported) { super('E2E_PROVISION_FAILED'); }
 }
 export async function provisionStack(target: LocalTarget, options: FixtureOptions, artifact: ArtifactSnapshot, evidence: Evidence): Promise<ProvisionedStack> {
   assertLocalTarget(target); await verifyArtifactSnapshot(artifact);
@@ -213,13 +213,24 @@ export async function provisionStack(target: LocalTarget, options: FixtureOption
     if (!timeoutMs || (!cleanup && signal?.aborted)) throw new Error('BUDGET_EXHAUSTED');
     const transport = await withTerraformTransport(target, terraformProxy => runChild('terraform', args, { cwd: roots![root], timeoutMs, terraformProxy, ...(!cleanup && signal ? { signal } : {}) }), { accountId: account, buckets: ['state', 'artifacts', 'images'].map(suffix => `${prefix}-${account}-${target.region}-${suffix}`) });
     await recordProcess(evidence, { ...transport.value, blockedEndpoints: transport.denied, blockedEndpointCounts: transport.blockedEndpointCounts, forwarded: transport.forwarded });
+    if (!cleanup && !transport.denied.length && transport.value.status === 'failed' && budget.allow('terraform')) {
+      const types: Partial<Record<string, string>> = { DescribeTable: 'aws_dynamodb_table', GetRole: 'aws_iam_role', GetPolicy: 'aws_iam_policy', GetFunction: 'aws_lambda_function', GetOpenIDConnectProvider: 'aws_iam_openid_connect_provider', ListTagsForResource: 'aws_s3_bucket', GetBucketVersioning: 'aws_s3_bucket', GetBucketPolicy: 'aws_s3_bucket' };
+      const action = transport.value.failedAction;
+      const type = action ? types[action] : undefined;
+      if (type) {
+        for (const resource of captureOwnedResources(await ownedState(root), { prefix, account }).filter(resource => resource.type === type)) {
+          const unsupported = await measureRequiredApiUnsupported(target, { action: action as RequiredReadApi, identity: resource.identity, prefix, account });
+          if (unsupported) throw unsupported;
+        }
+      }
+    }
     if (transport.denied.length || transport.value.status !== 'succeeded') throw new Error('TERRAFORM_COMMAND_FAILED');
   }
   async function apply(root: RootName, seed = false): Promise<void> {
     if (!roots) throw new Error('FOREIGN_ROOT_REJECTED');
     phase = `${root}-${seed ? 'seed' : 'apply'}`;
     attempted.add(root);
-    await writeFile(join(roots[root], 'owned.auto.tfvars.json'), JSON.stringify(inputs[root]), { mode: 0o600 });
+    await writeProductionInputs(roots, root, inputs[root]!);
     if (!initialized.has(root)) {
       await command(root, ['init', '-input=false', '-no-color', '-lockfile=readonly', `-plugin-dir=${join(toolRoot, 'provider-probe/.terraform/providers')}`]);
       initialized.add(root); await command(root, ['validate', '-no-color']);
@@ -417,104 +428,10 @@ export async function provisionStack(target: LocalTarget, options: FixtureOption
     stack.manifest = evidenceContext(evidence).manifest;
     return stack;
   } catch (error) {
-    const causes = new Set(['RESOURCE_REJECTED', 'OUTPUT_REJECTED', 'DISCOVERY_REJECTED', 'IDENTITY_REJECTED', 'API_ID_REJECTED', 'CODE_SHA_REJECTED', 'READBACK_REJECTED', 'SOURCE_REJECTED', 'FOREIGN_STATE_REJECTED', 'BUDGET_EXHAUSTED', 'TERRAFORM_COMMAND_FAILED', 'OIDC_OWNERSHIP_REJECTED', 'ARTIFACT_REJECTED', 'ARTIFACT_REGISTRATION_FAILED']);
+    const causes = new Set(['RESOURCE_REJECTED', 'OUTPUT_REJECTED', 'DISCOVERY_REJECTED', 'IDENTITY_REJECTED', 'API_ID_REJECTED', 'CODE_SHA_REJECTED', 'READBACK_REJECTED', 'SOURCE_REJECTED', 'FOREIGN_STATE_REJECTED', 'BUDGET_EXHAUSTED', 'TERRAFORM_COMMAND_FAILED', 'OIDC_OWNERSHIP_REJECTED', 'ARTIFACT_REJECTED', 'ARTIFACT_REGISTRATION_FAILED', 'REQUIRED_API_UNSUPPORTED']);
     const cause = error instanceof Error && causes.has(error.message) ? error.message : 'DRIVER_FAILED';
-    await writeFile(join(context.directory, 'provision-failure.json'), JSON.stringify({ phase, cause }) + '\n', { mode: 0o600 });
-    throw new ProvisioningFailure(phase, stack);
+    const unsupported = error instanceof MeasuredRequiredApiUnsupported ? error : undefined;
+    await writeFile(join(context.directory, 'provision-failure.json'), JSON.stringify({ phase, cause, ...(unsupported ? { requiredApiNonSupport: unsupported.basis } : {}) }) + '\n', { mode: 0o600 });
+    throw new ProvisioningFailure(phase, stack, 'terraform-construction-failed', unsupported);
   }
-}
-
-/** Read only this task's finalized, run-generated bootstrap state for recovery. */
-export async function diagnoseOwnedBootstrap(directory: string, target: LocalTarget): Promise<Record<string, unknown>> {
-  assertLocalTarget(target);
-  const absolute = resolve(directory); const runId = absolute.split('/').at(-1)!;
-  if (absolute !== join(repository, 'artifacts/formal-e2e', runId) || !/^e2e-[a-f0-9-]{36}$/.test(runId)) throw new Error('FOREIGN_STATE_REJECTED');
-  const manifest = JSON.parse(await readFile(join(absolute, 'manifest.json'), 'utf8')) as { runId: string; resources: { id: string }[]; resultsFinalized: boolean };
-  if (manifest.runId !== runId || !manifest.resultsFinalized || !manifest.resources.some(item => item.id === `${runId}/bootstrap`)) throw new Error('FOREIGN_STATE_REJECTED');
-  const root = join(absolute, 'terraform/bootstrap'); await assertRegular(join(root, 'owned.tfstate'));
-  const state = JSON.parse(await readFile(join(root, 'owned.tfstate'), 'utf8')) as OwnedState;
-  const counts: Record<string, number> = {};
-  for (const resource of state.resources ?? []) counts[resource.type] = (counts[resource.type] ?? 0) + resource.instances.length;
-  const transport = await withTerraformTransport(target, terraformProxy => runChild('terraform', ['plan', '-destroy', '-input=false', '-no-color'], { cwd: root, timeoutMs:120_000, terraformProxy }));
-  const probes: { kind: string; status: number; exists: boolean | null }[] = [];
-  const s3 = localS3(target);
-  for (const resource of state.resources ?? []) for (const instance of resource.instances) {
-    if (resource.type === 'aws_s3_bucket') {
-      const bucket = instance.attributes.bucket;
-      if (typeof bucket !== 'string' || !bucket.startsWith(`e2e-${runId.slice(4,12)}-`)) throw new Error('FOREIGN_STATE_REJECTED');
-      for (const action of ['website','logging','requestPayment','accelerate','object-lock','replication','versioning','lifecycle','policy','cors','tagging','encryption','ownershipControls','publicAccessBlock']) {
-        try { const response=await localRequest(target,new URL(`/${bucket}?${action}`,target.endpoint),{headers:{authorization:authorization('s3')}}); probes.push({kind:action,status:response.status,exists:response.status===200}); } catch {probes.push({kind:action,status:0,exists:null});}
-      }
-      try { const response = await s3.send(new HeadBucketCommand({Bucket:bucket})); probes.push({kind:'s3-bucket',status:response.$metadata.httpStatusCode ?? 0,exists:true}); }
-      catch(error) { const status = (error as {$metadata?:{httpStatusCode?:number}}).$metadata?.httpStatusCode ?? 0; probes.push({kind:'s3-bucket',status,exists:status === 404 ? false : null}); }
-    }
-  }
-  s3.destroy();
-  return { stateInstanceCounts: counts, process: transport.value, denied: transport.denied, forwarded: transport.forwarded, probes };
-}
-
-/** Recovery only: no refresh or create, and every prior identity is checked after destroy. */
-export async function recoverOwnedBootstrap(directory: string, target: LocalTarget): Promise<Record<string, unknown>> {
-  assertLocalTarget(target);
-  const absolute=resolve(directory);const runId=absolute.split('/').at(-1)!;
-  if(absolute!==join(repository,'artifacts/formal-e2e',runId)||!/^e2e-[a-f0-9-]{36}$/.test(runId))throw new Error('FOREIGN_STATE_REJECTED');
-  const manifest=JSON.parse(await readFile(join(absolute,'manifest.json'),'utf8')) as {runId:string;resultsFinalized:boolean;resources:{id:string}[]};
-  if(manifest.runId!==runId||!manifest.resultsFinalized||manifest.resources.length!==1||manifest.resources[0]?.id!==`${runId}/bootstrap`)throw new Error('FOREIGN_STATE_REJECTED');
-  const root=join(absolute,'terraform/bootstrap');await assertRegular(join(root,'owned.tfstate'));
-  const {publicFiles}=await import('./terraform-source.ts');
-  for(const name of publicFiles.bootstrap){await assertRegular(join(root,name));if(await readFile(join(root,name),'utf8')!==await readFile(join(repository,'infra/bootstrap',name),'utf8'))throw new Error('SOURCE_REJECTED');}
-  const state=JSON.parse(await readFile(join(root,'owned.tfstate'),'utf8')) as OwnedState;
-  const prefix=`e2e-${runId.slice(4,12)}`;const resources=(state.resources??[]).flatMap(resource=>resource.instances.map(instance=>({type:resource.type,attributes:instance.attributes})));
-  const s3=localS3(target);
-  async function exists(resource:typeof resources[number]):Promise<boolean|null>{
-    const a=resource.attributes;
-    if(resource.type==='aws_s3_bucket'){
-      if(typeof a.bucket!=='string'||!a.bucket.startsWith(prefix+'-'))throw new Error('FOREIGN_STATE_REJECTED');
-      try{await s3.send(new HeadBucketCommand({Bucket:a.bucket}));return true;}catch(error){return (error as {$metadata?:{httpStatusCode?:number}}).$metadata?.httpStatusCode===404?false:null;}
-    }
-    const commands:Record<string,{action:string;params:Record<string,string>}>= {
-      aws_iam_openid_connect_provider:{action:'GetOpenIDConnectProvider',params:{OpenIDConnectProviderArn:String(a.arn??a.id)}},
-      aws_iam_policy:{action:'GetPolicy',params:{PolicyArn:String(a.arn)}},
-      aws_iam_role:{action:'GetRole',params:{RoleName:String(a.name)}},
-      aws_iam_role_policy:{action:'GetRolePolicy',params:{RoleName:String(a.role),PolicyName:String(a.name)}},
-      aws_iam_role_policy_attachment:{action:'ListAttachedRolePolicies',params:{RoleName:String(a.role)}},
-    };
-    const command=commands[resource.type];if(!command)throw new Error('FOREIGN_STATE_REJECTED');
-    if(resource.type==='aws_iam_openid_connect_provider'){
-      if(command.params.OpenIDConnectProviderArn!=='arn:aws:iam::000000000000:oidc-provider/token.actions.githubusercontent.com')throw new Error('FOREIGN_STATE_REJECTED');
-    }else if(!Object.values(command.params).some(value=>value.includes(prefix+'-')))throw new Error('FOREIGN_STATE_REJECTED');
-    const result=await localRequest(target,new URL(target.endpoint),{method:'POST',headers:{authorization:authorization('iam'),'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({Action:command.action,Version:'2010-05-08',...command.params}).toString()});
-    const xml=result.bytes.toString('utf8');
-    if(result.status===404&&xml.includes('NoSuchEntity'))return false;
-    if(result.status!==200)return null;
-    return resource.type==='aws_iam_role_policy_attachment'?xml.includes(String(a.policy_arn)):true;
-  }
-  try{
-    const before=await Promise.all(resources.map(exists));
-    const transport=await withTerraformTransport(target,terraformProxy=>runChild('terraform',['destroy','-refresh=false','-auto-approve','-input=false','-no-color','-parallelism=1'],{cwd:root,timeoutMs:600000,terraformProxy}));
-    const after=await Promise.all(resources.map(exists));
-    const result={phase:'same-owned-run-cleanup',before:{exists:before.filter(x=>x===true).length,absent:before.filter(x=>x===false).length,unverified:before.filter(x=>x===null).length},process:transport.value,denied:transport.denied,forwarded:transport.forwarded,after:{exists:after.filter(x=>x===true).length,absent:after.filter(x=>x===false).length,unverified:after.filter(x=>x===null).length}};
-    await writeFile(join(absolute,'cleanup-recovery.json'),JSON.stringify(result,null,2)+'\n',{mode:0o600});
-    if(result.after.exists===0&&result.after.unverified===0){const lock=join(repository,'.superpowers/locks/000000000000.lock');if(await readFile(lock,'utf8')===runId)await unlink(lock);}
-    return result;
-  }finally{s3.destroy();}
-}
-
-/** Verify the fixed bootstrap identity set from public definitions, never list foreign data. */
-export async function verifyBootstrapNamespaceAbsent(runId: string, target: LocalTarget): Promise<{ checked: number; absent: number; exists: number; unverified: number }> {
-  assertLocalTarget(target);
-  if(!/^e2e-[a-f0-9-]{36}$/.test(runId))throw new Error('FOREIGN_STATE_REJECTED');
-  const directory=join(repository,'artifacts/formal-e2e',runId);
-  const manifest=JSON.parse(await readFile(join(directory,'manifest.json'),'utf8')) as {runId:string;resultsFinalized:boolean;resources:{id:string}[]};
-  if(manifest.runId!==runId||!manifest.resultsFinalized||!manifest.resources.some(item=>item.id===`${runId}/bootstrap`))throw new Error('FOREIGN_STATE_REJECTED');
-  const prefix=`e2e-${runId.slice(4,12)}`;const account='000000000000';
-  const checks:{action:string;params:Record<string,string>;attachment?:string}[]=[{action:'GetOpenIDConnectProvider',params:{OpenIDConnectProviderArn:`arn:aws:iam::${account}:oidc-provider/token.actions.githubusercontent.com`}}];
-  const policyArn=`arn:aws:iam::${account}:policy/${prefix}-github-production-read`;
-  checks.push({action:'GetPolicy',params:{PolicyArn:policyArn}});
-  for(const name of ['api','cleanup','scheduler']){checks.push({action:'GetRole',params:{RoleName:`${prefix}-production-${name}`}});checks.push({action:'GetPolicy',params:{PolicyArn:`arn:aws:iam::${account}:policy/${prefix}-production-${name}-ceiling`}});}
-  for(const name of ['artifact','plan','apply']){checks.push({action:'GetRole',params:{RoleName:`${prefix}-github-${name}`}});checks.push({action:'GetRolePolicy',params:{RoleName:`${prefix}-github-${name}`,PolicyName:`production-${name}`}});if(name!=='artifact')checks.push({action:'ListAttachedRolePolicies',params:{RoleName:`${prefix}-github-${name}`},attachment:policyArn});}
-  const result={checked:0,absent:0,exists:0,unverified:0};
-  for(const check of checks){const response=await localRequest(target,new URL(target.endpoint),{method:'POST',headers:{authorization:authorization('iam'),'content-type':'application/x-www-form-urlencoded'},body:new URLSearchParams({Action:check.action,Version:'2010-05-08',...check.params}).toString()});const xml=response.bytes.toString('utf8');result.checked++;if(response.status===404&&xml.includes('NoSuchEntity'))result.absent++;else if(response.status===200){if(check.attachment&&!xml.includes(check.attachment))result.absent++;else result.exists++;}else result.unverified++;}
-  const client=localS3(target);try{for(const suffix of ['state','artifacts']){result.checked++;try{await client.send(new HeadBucketCommand({Bucket:`${prefix}-${account}-ap-northeast-1-${suffix}`}));result.exists++;}catch(error){if((error as {$metadata?:{httpStatusCode?:number}}).$metadata?.httpStatusCode===404)result.absent++;else result.unverified++;}}}finally{client.destroy();}
-  await writeFile(join(directory,'independent-bootstrap-absence.json'),JSON.stringify(result,null,2)+'\n',{mode:0o600});return result;
 }

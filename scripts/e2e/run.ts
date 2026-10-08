@@ -89,12 +89,15 @@ export async function runConstruction(evidence: Evidence, definition: CaseDefini
     try { stack = await construct(); }
     catch (error) {
       const { ProvisioningFailure } = await import('./terraform.ts');
-      if (error instanceof ProvisioningFailure) stack = error.ownedStack;
+      if (error instanceof ProvisioningFailure) { stack = error.ownedStack; throw error.unsupported ?? error; }
       throw error;
     }
     for (const output of stack.constructionOutputs) recorder.recordOutput(output);
   });
   return stack;
+}
+export async function recordConstructionDependents(evidence: Evidence, selected: CaseDefinition[], stack?: ProvisionedStack): Promise<void> {
+  for (const def of selected.filter(def => def.id !== 'TF-01/apply')) await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: stack?.constructionOutputs.length ? 'implementation-pending' : 'prerequisite-failed' });
 }
 export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
   // Parse before DNS, files, children or any other external side effect.
@@ -133,7 +136,7 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
       }
       // Task4 attaches sequential fixture/suite execution here. Construction is
       // shared once per run; unrelated foundation actions remain unimplemented.
-      for (const def of selected.filter(def => def.id !== 'TF-01/apply')) await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: stack ? 'implementation-pending' : 'prerequisite-failed' });
+      await recordConstructionDependents(evidence, selected, stack);
     } catch {
       exit = phase === 'preflight' ? 2 : 1;
       for (const def of selected) await evidence.record({ id: def.id, status: 'not-run', phase: phase === 'preflight' ? 'preflight' : 'provision', durationMs: 0, reason: phase === 'preflight' ? 'preflight-failed' : 'prerequisite-failed' });

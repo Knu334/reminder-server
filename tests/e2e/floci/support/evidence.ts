@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile, open, rename } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import type { CaseDefinition, CaseRecorder, CaseResult, Evidence, LogCheckResult, OutputResult, PendingLogCheck, RunSummary, OwnedManifest, OwnedIdentity } from './types.ts';
+import type { CaseDefinition, CaseRecorder, CaseResult, Evidence, LogCheckResult, OutputResult, PendingLogCheck, RunSummary, OwnedManifest, OwnedIdentity, LocalTarget, RequiredReadApi, RequiredApiNonSupport } from './types.ts';
+import { localRequest } from './transport.ts';
 
 const kinds = ['http', 'dynamodb', 's3', 'logs'] as const;
 const phases = new Set(['inventory', 'preflight', 'provision', 'input', 'outputs', 'logs', 'complete', 'cleanup']);
-const reasons = new Set(['implementation-pending', 'preflight-failed', 'prerequisite-failed', 'budget-exhausted', 'action-failed', 'output-mismatch', 'logs-pending', 'logs-missing', 'observer-failed', 'out-of-scope', 'gateway-delivery-unsupported', 'scheduler-trigger-unsupported', 'signature-enforcement-unsupported']);
+const reasons = new Set(['implementation-pending', 'preflight-failed', 'prerequisite-failed', 'budget-exhausted', 'action-failed', 'output-mismatch', 'logs-pending', 'logs-missing', 'observer-failed', 'out-of-scope', 'gateway-delivery-unsupported', 'scheduler-trigger-unsupported', 'signature-enforcement-unsupported', 'required-api-unsupported']);
 const compatibilityReasons = new Set(['gateway-delivery-unsupported', 'scheduler-trigger-unsupported', 'signature-enforcement-unsupported']);
 const codes = new Set(['INVALID_JSON', 'INVALID_INPUT', 'UNSUPPORTED_MEDIA_TYPE', 'PAYLOAD_TOO_LARGE', 'LEGACY_API_REMOVED', 'REMINDER_NOT_FOUND', 'THUMBNAIL_NOT_FOUND', 'INVALID_THUMBNAIL', 'THUMBNAIL_TOO_LARGE', 'OWNER_STORAGE_LIMIT_EXCEEDED', 'INVALID_LIMIT', 'INVALID_CURSOR', 'PRECONDITION_REQUIRED', 'PRECONDITION_FAILED', 'METHOD_NOT_ALLOWED', 'RATE_LIMIT_EXCEEDED', 'SERVICE_UNAVAILABLE', 'UNAUTHORIZED', 'FORBIDDEN']);
 const label = /^[a-zA-Z0-9][a-zA-Z0-9/_.-]{0,159}$/;
@@ -15,6 +16,55 @@ export const terraformActions = new Set(['ListTagsForResource', 'CreateOpenIDCon
 export type ProcessEvidence = { tool: 'node' | 'npm' | 'python3' | 'terraform'; status: 'succeeded' | 'failed' | 'timeout'; durationMs: number; timeoutMs: number; exitCode: number | null; expectedOutputMatched: boolean; failedAction?: string; blockedEndpoints?: string[]; blockedEndpointCounts?: Record<string, number>; forwarded?: number };
 type State = { directory: string; definitions: CaseDefinition[]; results: Map<string, CaseResult>; pending: Map<string, PendingCase>; active: Set<string>; processes: ProcessEvidence[]; resources: OwnedManifest['resources']; finalized: boolean; closed: boolean };
 const states = new WeakMap<Evidence, State>();
+const measuredNonSupport = new WeakSet<RequiredApiNonSupport>();
+export class MeasuredRequiredApiUnsupported extends Error {
+  constructor(readonly basis: RequiredApiNonSupport) {
+    super('REQUIRED_API_UNSUPPORTED');
+    if (!measuredNonSupport.has(basis)) throw new Error('UNMEASURED_API_NON_SUPPORT');
+  }
+}
+/** Independently query a required read-only API; arbitrary diagnostic text is insufficient. */
+export async function measureRequiredApiUnsupported(target: LocalTarget, probe: { action: RequiredReadApi; identity: string; prefix: string; account: string }): Promise<MeasuredRequiredApiUnsupported | undefined> {
+  const { action, identity, prefix, account } = probe;
+  if (!/^e2e-[a-f0-9]{8}$/.test(prefix) || !/^\d{12}$/.test(account)) throw new Error('API_PROBE_OWNERSHIP_REJECTED');
+  let service: string; let path: string | undefined; let headers: Record<string, string>; let body: string | undefined;
+  const query = (operation: string, params: Record<string, string>) => new URLSearchParams({ Action: operation, Version: '2010-05-08', ...params }).toString();
+  if (action === 'DescribeTable') {
+    if (!['reminders', 'owner-state', 'image-jobs'].some(name => identity === `${prefix}-production-${name}`)) throw new Error('API_PROBE_OWNERSHIP_REJECTED');
+    service = 'dynamodb'; headers = { 'content-type': 'application/x-amz-json-1.0', 'x-amz-target': 'DynamoDB_20120810.DescribeTable' }; body = JSON.stringify({ TableName: identity });
+  } else if (action === 'GetFunction') {
+    if (!['api', 'cleanup'].some(name => identity === `${prefix}-production-${name}`)) throw new Error('API_PROBE_OWNERSHIP_REJECTED');
+    service = 'lambda'; headers = {}; path = `/2015-03-31/functions/${encodeURIComponent(identity)}`;
+  } else if (['GetRole', 'GetPolicy', 'GetOpenIDConnectProvider'].includes(action)) {
+    service = 'iam'; headers = { 'content-type': 'application/x-www-form-urlencoded' };
+    if (action === 'GetRole') {
+      if (!['github-artifact', 'github-plan', 'github-apply', 'production-api', 'production-cleanup', 'production-scheduler'].some(name => identity === `${prefix}-${name}`)) throw new Error('API_PROBE_OWNERSHIP_REJECTED');
+      body = query(action, { RoleName: identity });
+    } else if (action === 'GetPolicy') {
+      if (!['github-production-read', 'production-api-ceiling', 'production-cleanup-ceiling', 'production-scheduler-ceiling'].some(name => identity === `arn:aws:iam::${account}:policy/${prefix}-${name}`)) throw new Error('API_PROBE_OWNERSHIP_REJECTED');
+      body = query(action, { PolicyArn: identity });
+    } else {
+      if (identity !== `arn:aws:iam::${account}:oidc-provider/token.actions.githubusercontent.com`) throw new Error('API_PROBE_OWNERSHIP_REJECTED');
+      body = query(action, { OpenIDConnectProviderArn: identity });
+    }
+  } else {
+    if (!['state', 'artifacts', 'images'].some(name => identity === `${prefix}-${account}-ap-northeast-1-${name}`) || !['ListTagsForResource', 'GetBucketVersioning', 'GetBucketPolicy'].includes(action)) throw new Error('API_PROBE_OWNERSHIP_REJECTED');
+    service = action === 'ListTagsForResource' ? 's3-control' : 's3'; headers = action === 'ListTagsForResource' ? { 'x-amz-account-id': account } : {};
+    path = action === 'ListTagsForResource' ? `/v20180820/tags/${encodeURIComponent(`arn:aws:s3:::${identity}`)}?x-id=ListTagsForResource` : `/${identity}?${action === 'GetBucketVersioning' ? 'versioning' : 'policy'}`;
+  }
+  headers.authorization = `AWS4-HMAC-SHA256 Credential=local/20261008/ap-northeast-1/${service}/aws4_request, SignedHeaders=host, Signature=${'0'.repeat(64)}`;
+  try {
+    const response = await localRequest(target, new URL(path ?? target.endpoint, target.endpoint), { method: path ? 'GET' : 'POST', headers, ...(body ? { body } : {}) });
+    if (response.status !== 501) return undefined;
+    const text = response.bytes.toString('utf8'); let code: unknown;
+    if (text.trimStart().startsWith('{')) { const doc = JSON.parse(text) as { __type?: unknown; code?: unknown }; code = doc.__type ?? doc.code; }
+    else code = /<Code>([A-Za-z]+)<\/Code>/.exec(text)?.[1];
+    if (typeof code === 'string') code = code.split('#').at(-1);
+    if (!['NotImplemented', 'NotImplementedException', 'UnknownOperationException'].includes(String(code))) return undefined;
+    const basis: RequiredApiNonSupport = Object.freeze({ action, httpStatus: 501, errorCode: code as RequiredApiNonSupport['errorCode'], basis: 'independent-owned-read-only-probe' });
+    measuredNonSupport.add(basis); return new MeasuredRequiredApiUnsupported(basis);
+  } catch { return undefined; }
+}
 function stateOf(evidence: Evidence): State {
   const state = states.get(evidence);
   if (!state || state.closed) throw new Error('EVIDENCE_CLOSED');
@@ -62,9 +112,11 @@ function safeResult(def: CaseDefinition, result: CaseResult): CaseResult {
   if (result.code && codes.has(result.code)) safe.code = result.code;
   if (result.reason && reasons.has(result.reason)) safe.reason = result.reason;
   if (result.outputs) safe.outputs = projection.outputs;
+  const requiredApiUnsupported = def.id === 'TF-01/apply' && def.suite === 'terraform' && def.layer === 'L' && result.reason === 'required-api-unsupported' && result.requiredApiNonSupport !== undefined && measuredNonSupport.has(result.requiredApiNonSupport);
+  if (requiredApiUnsupported) safe.requiredApiNonSupport = result.requiredApiNonSupport!;
   if (status === 'not-run' && (result.httpStatus !== undefined || (result.outputs?.length ?? 0) > 0 || ['input', 'outputs', 'logs', 'complete'].includes(result.phase))) { safe.status = 'fail'; safe.reason = 'output-mismatch'; }
   if (status === 'pass' && !projection.complete) { safe.status = 'fail'; safe.reason = 'output-mismatch'; }
-  if (status === 'unsupported' && (def.acceptance !== 'compatibility' || !projection.complete || !compatibilityReasons.has(safe.reason ?? ''))) {
+  if (status === 'unsupported' && !requiredApiUnsupported && (def.acceptance !== 'compatibility' || !projection.complete || !compatibilityReasons.has(safe.reason ?? ''))) {
     safe.status = 'fail'; safe.reason = 'output-mismatch';
   }
   if (status === 'out-of-scope' && def.layer !== 'A' && def.layer !== 'U') { safe.status = 'fail'; safe.reason = 'output-mismatch'; }
@@ -164,7 +216,10 @@ export async function runCase(definition: CaseDefinition, evidence: Evidence, ac
       },
     });
     result.status = 'pass'; result.phase = checks.length ? 'logs' : 'complete';
-  } catch { result.status = 'fail'; result.reason = 'action-failed'; }
+  } catch (error) {
+    if (error instanceof MeasuredRequiredApiUnsupported) { result.status = 'unsupported'; result.phase = 'provision'; result.reason = 'required-api-unsupported'; result.requiredApiNonSupport = error.basis; }
+    else { result.status = 'fail'; result.reason = 'action-failed'; }
+  }
   finally { open = false; result.durationMs = Math.round(performance.now() - started); state.active.delete(def.id); }
   if (checks.length) { state.pending.set(def.id, { definition: def, result, checks }); await save(evidence, state); }
   else await evidence.record(result);

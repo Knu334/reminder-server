@@ -122,7 +122,7 @@ export async function verifyProductionRoots(roots: PreparedTerraformRoots, allow
   if (!snapshot || (snapshot.cleanup && !allowCleanup) || roots.sourceDigest !== digest(snapshot.originals) || roots.transformedDigest !== digest(snapshot.expected)) throw new Error('SOURCE_REJECTED');
   for (const root of Object.keys(publicFiles) as RootName[]) {
     if (resolve(roots[root]) !== join(snapshot.directory, root)) throw new Error('FOREIGN_ROOT_REJECTED');
-    const names = (await readdir(roots[root])).filter(name => name.endsWith('.tf') || name.endsWith('.tf.json') || name === '.terraform.lock.hcl');
+    const names = (await readdir(roots[root])).filter(name => name.endsWith('.tf') || name.endsWith('.tf.json') || name === '.terraform.lock.hcl' || name === 'terraform.tfvars' || name === 'terraform.tfvars.json' || name.endsWith('.auto.tfvars') || name.endsWith('.auto.tfvars.json'));
     const expectedNames = [...snapshot.expected.keys()].filter(name => name.startsWith(`${root}/`)).map(name => name.slice(root.length + 1));
     if (JSON.stringify(names.sort()) !== JSON.stringify(expectedNames.sort())) throw new Error('UNKNOWN_OVERRIDE_REJECTED');
     for (const name of names) {
@@ -130,6 +130,16 @@ export async function verifyProductionRoots(roots: PreparedTerraformRoots, allow
       if (await readFile(path, 'utf8') !== snapshot.expected.get(`${root}/${name}`)) throw new Error('SOURCE_REJECTED');
     }
   }
+}
+/** Only the driver's synthetic input writer can change expected auto-loaded bytes. */
+export async function writeProductionInputs(roots: PreparedTerraformRoots, root: RootName, inputs: Record<string, unknown>): Promise<void> {
+  await verifyProductionRoots(roots);
+  const snapshot = snapshots.get(roots)!;
+  if (!Object.hasOwn(publicFiles, root)) throw new Error('FOREIGN_ROOT_REJECTED');
+  const text = JSON.stringify(inputs, null, 2) + '\n';
+  await writeFile(join(roots[root], 'owned.auto.tfvars.json'), text, { mode: 0o600 });
+  snapshot.expected.set(`${root}/owned.auto.tfvars.json`, text);
+  roots.transformedDigest = digest(snapshot.expected);
 }
 export async function cleanupOverrides(roots: PreparedTerraformRoots, finalized: boolean): Promise<void> {
   if (!finalized) throw new Error('RESULTS_NOT_FINALIZED');

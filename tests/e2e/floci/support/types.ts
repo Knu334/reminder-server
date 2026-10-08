@@ -11,7 +11,9 @@ export type OutputKind = 'http' | 'dynamodb' | 's3' | 'logs';
 export type OutputExpectation = { kind: OutputKind; assertions: string[]; notApplicableReason?: string };
 export type OutputResult = { kind: OutputKind; status: 'pass' | 'fail' | 'not-applicable'; assertions: { name: string; status: 'pass' | 'fail' }[]; reason?: string };
 export type CaseDefinition = { id: string; requirementId: string; layer: Layer; required: boolean; acceptance: 'behavior' | 'compatibility'; suite: string; source: string; outputs: OutputExpectation[] };
-export type CaseResult = { id: string; status: CaseStatus; phase: string; httpStatus?: number; code?: string; durationMs: number; outputs?: OutputResult[]; reason?: string };
+export type RequiredReadApi = 'DescribeTable' | 'GetRole' | 'GetPolicy' | 'GetFunction' | 'GetOpenIDConnectProvider' | 'ListTagsForResource' | 'GetBucketVersioning' | 'GetBucketPolicy';
+export type RequiredApiNonSupport = { action: RequiredReadApi; httpStatus: 501; errorCode: 'NotImplemented' | 'NotImplementedException' | 'UnknownOperationException'; basis: 'independent-owned-read-only-probe' };
+export type CaseResult = { id: string; status: CaseStatus; phase: string; httpStatus?: number; code?: string; durationMs: number; outputs?: OutputResult[]; reason?: string; requiredApiNonSupport?: RequiredApiNonSupport };
 export interface Evidence {
   runId: string;
   record(result: CaseResult): Promise<void>;
