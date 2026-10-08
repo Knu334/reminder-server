@@ -104,7 +104,7 @@ void test("health_ready_and_unpublished_behavior", async () => {
 void test("lazy_production_import_and_config_failure_without_environment_or_aws_access", () => {
   const script = `let configReads=0; process.env=new Proxy({}, {get(_target,key){if(key==='AWS_REGION'){configReads++;throw Error('forbidden environment read');} return undefined;}}); require('./src/cleanup'); const {handler}=require('./src/api'); if(configReads!==0)process.exit(2); const e=${JSON.stringify(event("GET", "/healthz"))}; const ctx={awsRequestId:'synthetic',getRemainingTimeInMillis:()=>10000}; (async()=>{ const health=await handler(e,ctx); e.routeKey='GET /readyz'; e.rawPath='/readyz'; e.requestContext.routeKey=e.routeKey; e.requestContext.http.path='/readyz'; const ready=await handler(e,ctx); e.routeKey='GET /v2/reminders'; e.rawPath='/v2/reminders'; e.requestContext.routeKey=e.routeKey; e.requestContext.http.path='/v2/reminders'; const v2=await handler(e,ctx); console.log(JSON.stringify({health,ready,v2})); })().catch(()=>process.exit(1));`;
   const result = spawnSync(process.execPath, ["--import", "tsx", "-e", script], { cwd: process.cwd(), env: {}, encoding: "utf8" });
-  assert.equal(result.status, 0, result.stderr); const value = JSON.parse(result.stdout) as { health: APIGatewayProxyStructuredResultV2; ready: APIGatewayProxyStructuredResultV2; v2: APIGatewayProxyStructuredResultV2 };
+  assert.equal(result.status, 0, result.stderr); const value = JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "") as { health: APIGatewayProxyStructuredResultV2; ready: APIGatewayProxyStructuredResultV2; v2: APIGatewayProxyStructuredResultV2 };
   assert.equal(value.health.statusCode, 200); assert.equal(value.ready.statusCode, 503); assert.equal(json(value.ready).code, "SERVICE_UNAVAILABLE"); assert.equal(value.ready.body?.includes("forbidden"), false); assert.equal(value.v2.statusCode, 503); assert.equal(json(value.v2).code, "SERVICE_UNAVAILABLE");
 });
 
@@ -212,7 +212,7 @@ void test("configured_production_health_enforces_boundary_without_client_constru
   const env = { AWS_REGION: "ap-northeast-1", REMINDERS_TABLE: "reminders", OWNER_STATE_TABLE: "owners", IMAGE_JOBS_TABLE: "jobs", IMAGES_BUCKET: "images", EXPECTED_API_ID: "api123", EXPECTED_API_STAGE: "$default", COGNITO_ISSUER: "https://cognito-idp.ap-northeast-1.amazonaws.com/test", COGNITO_CLIENT_ID: "client123" };
   const result = spawnSync(process.execPath, ["--import", "tsx", "-e", script], { cwd: process.cwd(), env, encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
-  const value = JSON.parse(result.stdout) as { health: APIGatewayProxyStructuredResultV2; wrong: APIGatewayProxyStructuredResultV2; constructions: number };
+  const value = JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "") as { health: APIGatewayProxyStructuredResultV2; wrong: APIGatewayProxyStructuredResultV2; constructions: number };
   assert.equal(value.health.statusCode, 200); assert.equal(value.wrong.statusCode, 400); assert.equal(value.constructions, 0);
 });
 
