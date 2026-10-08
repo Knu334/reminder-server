@@ -74,7 +74,7 @@ read-onlyで確認した。コピーのsourceの存在は稼働native binaryの�
 | Logs/CloudWatch | 既存cleanup mockと過去L metric、health running | 3log group設定とowned結果ログ実配信を必須採用。互換性未確認。9alarm運用/通知はA |
 | Scheduler schedule/group/Get/Update/Delete/at/cron/target | ScheduleDispatcherはenabled/invocationEnabledを確認、at/rate/cron処理。ScheduleInvokerはLambdaをInvocationType.Eventでinvoke | 設定read-backとowned one-time probeを採用。実起動未確認。SourceArn/IAM/async retry同等性は証明しない |
 | STS | 移行/復旧はexplicit account照合に使用 | 明示endpointのlocal GetCallerIdentityを確認してから運用adapter結合。実credential chainは使用しない |
-| Terraform1.16.5 / provider6.67.0 | 既存infra mockとlock。Context7でcustom endpoints設定を確認 | 独立E2E rootの構築・設定read-backを必須基盤として計画へ採用。未対応APIは現在確定していない。全apply成功/不可能を断定しない |
+| Terraform1.16.5 / provider6.67.0 | 既存infra mockとlock。Context7でcustom endpoints設定を確認 | 本番3rootの公開ソース再利用・構築・設定read-backを必須基盤として計画へ採用。未対応APIは現在確定していない。全apply成功/不可能を断定しない |
 | OIDC/S3 remote backend/GHA/Cognito domain本番/TLS/PITR/実Chrome | 本番受け入れ資料に未実施 | 今回は対象外。production rootをローカル用へ改変しない |
 
 承認後は必要APIを「成功実測 / sourceのみ / 未対応action / 未実施」の四区分で更新し、
@@ -115,7 +115,7 @@ WWW-Authenticateのraw値は秘密を含まない保証がないためpublic証�
 ユーザーの指摘を受け、SDK構築と補足Terraform probeという初稿から、Terraform構築→設定確認→実HTTP→
 DDB/S3/CloudWatch確認→destroyへ改訂した。必要APIが不足する場合、TF/Logsをunsupported、
 依存ケースをnot-runとして記録し、正式E2E未完了とする。独立U/Iは継続できる。
-独立したローカルrootの成功は、本番3root全体のapply成功の証拠にはならない。
+この時点の案は独立ローカルrootだったが、下記の最小変更方針への改訂で本番3rootの公開定義を再利用する。Floci成功は実AWSの本番apply成功の証拠にはならない。
 
 公開ソースを確認すると、APIは安全なHTTPエラー応答を作るが結果ログを出していない。
 shared loggingと清掃Lambdaには構造化ログがある。Gateway access logはrequestId/routeKey/status/responseLengthで、
@@ -137,3 +137,28 @@ AWS公開Price Listの東京S3/CloudWatch JSON取得はnetworkのNo route to hos
 東京の取り込み価格を確定値として掲載せず、USD1/GBという比較仮定で追加費用の規模を示した。FW変更は行っていない。
 月100回、追加1KiB/回なら約100KiB。本文・画像を除いた結果ログの追加を勧める。
 S3の60日保持は小額の保存費と35日復旧を比較したうえで維持する案。短縮・永久削除は計画に含めない。
+
+## Terraform変更を最小限にする改訂
+
+ユーザーの条件は「Terraform変更は必要最低限、接続先以外は完全に本番同一が理想」。
+module切り出しや別resource定義の新設は採らず、本番3rootの公開.tf/lockを実行ごとの一時ディレクトリで再利用する。
+本番ソースは変更しない。backend定義は読まず、local backend/合成inputs/接続overrideを生成する。
+認証/route/schema/IAM/TLS必須policy/保持期間/実行設定/削除防止と規定上限を維持する。
+Eの小容量/rate3 fixture案を廃止し、容量境界は規定値I、実rate境界はcount119合成seedへ変更した。
+
+公開sourceでprevent_destroy、DDB deletion protection、Cognito ACTIVE、artifact version削除拒否を確認した。
+検証中は保護を維持し、後片付けでのみownedサービス側保護/policyと一時rootのprevent_destroyを解除する案。
+この回収差分は接続先差分に含めず、設計承認対象として区別した。元の本番定義は書き換えない。
+applicationのissuer/Hosted UI検証はAWS HTTPS固定であり、Floci URL向けの最小接続差分が必要になる。
+HTTPでS3 TLS policyに拒否される等の不足は、policy緩和ではなくunsupported/未完了として扱う。
+
+本番初期構築手順を読み、bootstrap→platform→application API-only seed→API IDのbootstrap handoff→
+ZIP登録→通常application applyを計画へ反映した。9alarm/OIDC等も勝手に対象resourceから外さない。
+本番backend/private inputs/state/planは読んでいない。Floci apply/destroyも未実施。
+
+Context7は `Terraform` libraryをresolveして `/websites/developer_hashicorp_terraform` のoverride mergeを確認した。
+各質問library→docsの2commandをsandbox外で実行し、quotaエラーはなかった。
+[公式override説明](https://developer.hashicorp.com/terraform/language/files/override)では、一般のnested blockは全置換、
+lifecycleは引数単位のmergeとされている。追加差分が既存validation/policyを落とさない検査をTF-04へ追加した。
+[公式lifecycle説明](https://developer.hashicorp.com/terraform/tutorials/state/resource-lifecycle)を基に、
+prevent_destroy維持中の通常destroyを成功前提にしない。mockのoverride_resourceはproviderを呼ばないため実E2Eへ使わない。

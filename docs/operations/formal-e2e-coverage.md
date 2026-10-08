@@ -60,7 +60,7 @@ TF-01/03でTerraform構築と設定を確認してから、E/Lケースを実行
 | API-11 / S§7, V / F06 | JSON2097151/2097152/2097153 bytes、UTF-8 | 前二者は他条件有効なら成功、超過413 PAYLOAD_TOO_LARGE、job/S3なし | 境界 | rt boundaries | title等制約を超えない余白で正確なbodyを作る / 必須 | E | payload通過未確認 | Gateway上限との区別。MAX_JSON_BYTES既定値を保持 |
 | API-12 / S§5,7, V / F12 | limit既定20、1/50、0/51/不正、ページ順 | 200評価件数上限、無効422 INVALID_LIMIT、強いowner Query | 境界 | rt reads-rate | 51合成metadata項目・limit別 / 必須 | E | 見込 | Query命令/Scan不使用はIで補完 |
 | API-13 / S§5, V | tombstoneのみの先頭page、偽/他owner/不正cursor | 空itemsでもnextCursorあり→末尾まで欠落重複なし。cursor不正422 | 境界/異常 | rt reads-rate empty_filtered_page、forged_cursor | 本物cursor交換/改ざん / 必須 | E | 見込 | 複数page snapshot保証なし |
-| API-14 / S§4, V | auth拒否とinput/gate拒否のrate順、rate上限 | auth拒否RATE不変、auth済み422/503は+1。rate3fixtureの4件目429/Retry-After一致、保存なし | 境界/異常 | rt reads-rate/api | 分内window余裕・二token共有 / 必須 | E+I | 見込 | 規定120/121・次分/TTL/同時120はU/I。override実測を120並行Eと呼ばない |
+| API-14 / S§4, V | auth拒否とinput/gate拒否のrate順、rate上限 | auth拒否RATE不変、auth済み422/503は+1。実上限120、合成count119から実GETの200→429/Retry-After一致、保存なし | 境界/異常 | rt reads-rate/api | 分内window余裕・二token共有 / 必須 | E+I | 見込 | rate設定は120のまま。合成seedを記録し、121回送信や120並行Eと呼ばない。次分/TTL/同時競合はU/I |
 
 ## 競合・容量・保存
 
@@ -71,7 +71,7 @@ TF-01/03でTerraform構築と設定を確認してから、E/Lケースを実行
 | STORE-03 / S§5 / F02,B02 | 同ETag PATCH/PATCH、DELETE/DELETE、PATCH/DELETE | barrier同時送信、一成功/一拒否、revision+1、counter/job一回だけ変化。PATCH同士は412、DELETE勝者後の強いreadでは404も契約内 | 競合 | rt writes/lowered-quotas | 個別独立fixture + 同revision読取を揃えるI / 必須 | E+I | transaction実互換未確認 | sequential staleで代用しない。双方が旧activeを読んだIは敗者412 |
 | STORE-04 / S§5 | 同ID同時POST、異ID同時更新、再送 | 一201/一409、異項目保持、再送で二重quotaなし | 競合/異常 | rt writes | actual DDB/counters / 必須 | E | 見込 | 無期限クライアント冪等キーは追加しない |
 | STORE-05 / S§5, V | tombstone、削除後GET/再作成 | 200→404→409、本文/画像参照除去、counter減算、他項目不変 | 遷移 | old CRUD、rt writes | exact tombstone field照合 / 必須 | E | 過去成功 | Undo APIなし |
-| STORE-06 / S§5,7 / F06 | itemCount2・imageBytes24の等号/超過・同時競合 | 最大内成功/増分超過413 OWNER_STORAGE_LIMIT_EXCEEDED、一括整合 | 境界/競合 | rt writes/images/lowered-quotas | 小上限専用fixture / 必須 | E | 見込 | 規定1000/128MiBとlowered cap回復はU/Iも維持 |
+| STORE-06 / S§5,7 / F06 | 規定1000件/128MiBの等号/超過・同時競合・削除回復 | 最大内成功/増分超過413 OWNER_STORAGE_LIMIT_EXCEEDED、一括整合 | 境界/競合 | rt writes/images/lowered-quotas | 規定値の合成境界状態・service/adapter / 必須 | I+U | 決定的注入が必要 | E/Lの設定は下げない。通常Eのcounter整合はSTORE-03/05・IMG-06で確認 |
 | STORE-07 / S§5,6 / F11,F16 | transaction before/after-response-lost、再照合失敗 | 同ClientRequestToken/next、強いreadで成功確定または503、counter二重なし、committed保護 | 障害 | rt writes/images | real adapterへ狭い送信fault / 必須 | I | 実送信+応答遮断は要実装 | ZIP Gatewayの実faultと呼ばない |
 
 ## 画像
@@ -112,9 +112,10 @@ TF-01/03でTerraform構築と設定を確認してから、E/Lケースを実行
 | OPS-04 / S§8, R | recreated sub、explicit remap、target collision/bad counter | 自動対応なし、明示mapのみ、bad stateでreadyToSwitch=false、Cognito復元false | 異常 | op recovery | local単独ケース / 必須 | L+I | 見込 | Cognito password/sessionや35日PITRはA |
 | OPS-05 / S§10, D / F19,B06 | current build/package→S3 ZIP→API/cleanup | local digest=manifest=S3 pinned checksum=両Lambda CodeSha256/alias選択version | 正常/異常 | dl bundle/artifact/release、旧L報告 | stale/tampered control + actual register / 必須 | L+E | 一部過去成功 | ZIP古い固定hash禁止、dirty build入力digestを併記 |
 | OPS-06 / S§6, J | daily configとowned one-time起動 | cron03UTC/OFF/DISABLED/retry2/age3600/cleanup alias read-back。at→job変化 | 正常/遷移 | application mock | 設定はTF-03必須、起動実probeは互換性調査必須 | L+A | sourceにEvent invokeあり、live未確認 | source記載は稼働binary証明ではない。日次運転/配信保証はA |
-| TF-01 / S§9〜11, handoff§8 | E2E local root apply→current ZIP/Gateway/save→destroy | Terraform1.16.5/provider6.67.0、同route/scope/schema/hash、動作assert、owned資源のみ回収 | 正常/互換性 | dl infra-check/plan-guardはmock | 構築成功・destroy / 必須 | L | 未確認、必要APIごと判定 | production3root/OIDC/remote state full applyは対象外 |
+| TF-01 / S§9〜11, handoff§8 | 本番3root再利用→current ZIP/Gateway/save→結果確定→回収 | Terraform1.16.5/provider6.67.0、同route/scope/schema/hash、動作assert、owned資源のみ回収 | 正常/互換性 | dl infra-check/plan-guardはmock | 構築成功・destroy / 必須 | L | 未確認、必要APIごと判定 | 全resource定義を再利用。remote backend/実AWS/GHAは対象外。Floci不足APIを省略しない |
 | TF-02 / handoff安全境界 | apply途中失敗、destroy失敗、endpoint漏れ | default AWS送信前拒否、ローカルstateだけ、partial owned inventory回収、cleanup別報告 | 障害/異常 | old transport、dl private-command | isolated driver負例 / 必須 | I+L | driverを新規実装 | 本番state/plan/inputsは存在確認以上の対象にしない |
-| TF-03 / S§4〜6,9〜13 | apply後の構築設定read-back、差異control | 3table/GSI/TTL/PITR35日、S3 versioning/暗号化/公開防止/CORS/旧version60日、認証/16route/alias/同一ZIP、Lambda実行設定、3log group30日、daily Scheduler一致 | 正常/異常 | dl infra mock | 実read-back gate / 必須 | L | 必要API未確認 | 不足設定を省略してpassにしない。本番との差分を列挙 |
+| TF-03 / S§4〜6,9〜13 | apply後の構築設定read-back、差異control | 3table/GSI/TTL/PITR35日、S3 versioning/暗号化/公開防止/CORS/旧version60日、認証/16route/alias/同一ZIP、Lambda実行設定、3log group30日、daily Scheduler一致 | 正常/異常 | dl infra mock | 実read-back gate / 必須 | L | 必要API未確認 | 削除防止/TLS必須policy・9alarm/OIDC設定も維持。不足設定を省略してpassにしない |
+| TF-04 / user最小変更方針 | 本番ソース配置と追加差分、回収段階の分離 | 本番.tf/lock/address変更0、元bytes/digest一致、接続/隔離差分だけ許可、検証中は保護/上限維持、後片付け変更で再試験禁止 | 異常/整合 | 未実装 | source/override/回収phase負例 / 必須 | I+L | 未確認 | overrideのnested block置換でvalidation/policyを落とさない |
 | OBS-01 / S§13 / F10 | APIの成功/拒否/503/初期化失敗、cold/warm | 1 invocation 1件、operation/status/code/IDs/duration、安全なJSON512bytes以内、HTTP契約不変 | 正常/異常 | shared loggingのみ、API結果ログなし | 製品結果ログ追加・handler境界capture / 必須 | U+I | APIコード追加後に確認 | captureはCloudWatch配信証拠ではない |
 | OBS-02 / S§13 | CRUD成功、入力拒否、Gateway認証拒否 | APIとGatewayのrequestId/status照合、API error codeはHTTPと一致。認証拒否はGatewayのみ | 正常/異常 | Gateway access log設定のみ | owned Logs実読取、60秒poll / 必須 | E | 配信未確認 | raw console/手動PutLogEventsで代用しない |
 | OBS-03 / S§6,13, J | 清掃Lambda成功/不完全結果、件数照合 | Lambda request ID、cleanup/status/処理件数と実保存状態一致 | 正常/障害 | cleanup構造化ログ既存 | 実成功配信 + 故障時境界capture / 必須 | L+I | 配信未確認 | 決定的故障Iのcaptureを実配信扱いにしない |
@@ -130,5 +131,5 @@ TF-01/03でTerraform構築と設定を確認してから、E/Lケースを実行
 source・期待assertを持たせ、日本語結果の全case inventoryと一対一で照合する。
 Uだけの成功でE/L未実施を埋めない。互換性調査必須のIMG-09/OPS-06起動経路は、
 実際の採否・失敗probe・制限が記録されれば調査完了、未確認のまま除外しない。
-TF-01/03・OBS実配信・E/L必須をFlociが阻害する場合は正式E2E未完了とする。Terraform構築失敗時は依存E/Lをnot-runとし、SDK構築を成功の代替にしない。
-rate、容量、cleanup上限を小fixtureで実施した値と、規定値のU/I証拠を別々に記録する。
+TF-01/03/04・OBS実配信・E/L必須をFlociが阻害する場合は正式E2E未完了とする。Terraform構築失敗時は依存E/Lをnot-runとし、SDK構築を成功の代替にしない。
+E/Lは本番の上限を維持する。合成rate状態、規定容量境界I、清掃合成日時、既存lowered-cap U/Iを区別して記録する。

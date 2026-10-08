@@ -11,11 +11,11 @@
 
 正式E2Eは次の順で実行する。Terraformによる構築と設定の確認を、すべての実経路ケースの前提とする。
 
-1. 現行ソースからZIPを作り、E2E専用TerraformでFlociにサービスを構築する。
+1. 現行ソースからZIPを作り、既存の本番Terraformの3rootを使ってFlociにサービスを構築する。
 2. 設定を読み戻し、認証・ルート・保存先・実行するZIP・保持期間が意図どおりであることを確認する。
 3. 合成ユーザーで認証し、実HTTPで登録・更新・削除・不正な入力を送る。
 4. HTTP応答に加えて、DynamoDB、S3、CloudWatchの結果を確認する。
-5. Terraformで当該実行のリソースを削除し、漏れがないことを確認する。
+5. 検証結果の記録後、当該実行のリソースだけを回収し、漏れがないことを確認する。削除防止の解除はこの後片付け段階だけで行う。
 
 | ケース | 入力 | DynamoDBの結果 | S3の結果 | CloudWatchの結果 |
 | --- | --- | --- | --- | --- |
@@ -35,7 +35,9 @@
 
 東京リージョン・月100リクエスト未満という利用見込みでは、旧version60日保持を維持し、
 API Lambdaに1呼び出し1件の結果ログを追加する案を採る。費用の前提と比較は
-[費用・ログ方針](../../operations/formal-e2e-cost-and-logging.md)に記載する。以下はこの表を実装するための詳細である。
+[費用・ログ方針](../../operations/formal-e2e-cost-and-logging.md)に記載する。Terraformは既存のresource定義を再利用し、共通module化や本番ファイルの書き換えを計画しない。
+接続先以外は本番と同じ設定を目標とし、下記§8で必要な隔離・接続・後片付けの差分を区別する。
+以下はこの表を実装するための詳細である。
 
 ## 1. 意図、成功条件、現在の状態
 
@@ -61,13 +63,18 @@ rootのFWとFloci READMEのユーザー変更も保持する。旧19タスクを
 この調査ではbuild、既存suite再実行、Flociリソース作成、Terraform applyは行っていない。
 過去の337 Node / 3 Python / 12 Flociテストの成功は保存文書の記録であり、今回実行した結果ではない。
 
-## 2. 方式比較と推奨
+## 2. Terraformの再利用方針
 
-| 方式 | 利点 | 費用・制約 | 判断 |
+既存の `infra/bootstrap`、`infra/platform/production`、`infra/application/production` を再利用する。
+各rootの公開ソースを実行ごとの一時ディレクトリへ配置し、接続設定とローカルbackendだけを追加する。
+resource定義の複製をリポジトリへ新設せず、共通moduleへの切り出しやresource addressの移動も行わない。
+元ファイルと配置後ファイルのdigest一致、追加設定の差分許可リスト、実際の設定読み戻しで同一性を確認する。
+
+| 方式 | 利点 | 制約 | 判断 |
 | --- | --- | --- | --- |
-| A: E2E専用Terraform構築・設定確認 → 実HTTP → 保存状態・ログ確認 | 構築から最終結果まで追える。障害注入は別の結合試験で再現できる | Flociの必要APIが非対応なら、正式E2Eは未完了。本番IaC全体のapplyを証明するものではない | **推奨** |
-| B: 本番3rootの完全applyを全ケースの前提にする | 設定から実行まで一続きで追える | 保護設定・backend・IAM・OIDC・未知のAPIが全テストを阻害する。本番設定の変更を促す圧力が生じる | 採らない |
-| C: 既存の単一CRUDへ全ケースを足す | 初期差分が小さい | 先頭で失敗すると後続が未実施になる。fixture間の依存と古いZIPへの固定も残る | 採らない |
+| A: 本番3rootを一時ディレクトリで再利用 | 既存のresource定義と初期構築手順を検証できる。本番ソースを変更せずに進められる | Flociの不足API、接続URLの検証、後片付けの保護解除を扱う必要がある | 推奨 |
+| B: 共通moduleへ切り出す | 本番とE2Eの定義を共有できる | 既存IaCの構造・resource address・回帰確認の変更が増える | 今回は採らない |
+| C: E2E専用のresource定義を新設する | ローカル構築だけに合わせやすい | 本番との設定ずれや二重管理が残る | 採らない |
 
 ## 3. 検証層と必須範囲
 
@@ -104,7 +111,7 @@ Schedulerのone-time起動とS3署名強制は互換性調査を必須とし、�
 | `tests/integration/formal-e2e/{faults,cleanup-resume,harness}.test.ts` | 決定的な障害と検証基盤自体の意味のある負例 |
 | `scripts/e2e/{preflight,run,prepare-artifact,terraform}.ts` | 準備、明示ケース選択、結果集約、ローカルIaCの管理 |
 | `tests/fixtures/synthetic/formal-e2e/` | 生成規則・小さな合成画像/JSON。実画像・私有mappingなし |
-| `tests/e2e/floci/infra/` | 独立したlocal backend / synthetic variables / pinned provider |
+| `scripts/e2e/terraform-source.ts` | 本番3rootの公開ソース配置、digest照合、追加差分の検査。合成inputs/local backendは実行時に生成 |
 | `docs/operations/formal-e2e-{README,results,limitations}.md` | 日本語実行手順、fresh結果、層別の制限 |
 
 入口の予定は `e2e:preflight`、`test:integration:e2e`、`test:e2e:floci`、`test:e2e:terraform`。
@@ -127,6 +134,9 @@ suiteごとに `e2e-<random owned prefix>` のpool、role、3table、画像/ZIP 
 API、API/cleanup Lambda/version/alias、log groupをTerraformで作る。SDKは合成user・データの準備、ZIP upload、
 設定・保存状態・ログの読み取り、清掃呼び出しに使う。user/passwordは合成値とし、メモリ内だけで扱う。
 所有者A/B、read-only、write-only、同pool別clientと別poolを用途ごとに用意する。
+各ケースに合成user A/Bを割り当て、別ケースのRATEや保存状態を共有しない。
+負例用の同pool別clientやone-time scheduleは追加のcontrol資源としてmanifestに登録し、基盤構築の代わりには使わない。
+別poolや復旧用3tableが必要な場合は、同じ本番3rootを別owned prefix/stateで再利用する。
 本番の16route（具体method10 + 有限ANY6）を同じJWT/scopeで登録し、削除・並べ替えで成功させない。
 CORSは本番設定に揃え、callback originをCORS originと混同しない。
 
@@ -147,9 +157,9 @@ S3はvirtual-host形式を含む可能性があるため、署名URLのbucket/ow
 このalias対応で足りなければ失敗/制限として示し、FW/Docker/host設定を勝手に変更しない。
 
 Terraform管理リソースはrun専用stateとowned manifestに対応づける。SDKで作った合成データも成功直後に回収手順を登録する。
-途中で失敗してもfinallyで回収を試す。SDKでbucket全version/markerやuserを回収後、同じroot/stateでdestroyする。
-Schedulerは最初に停止/削除し、処理終了を確認する。SDKはuser・bucket内容を回収し、Terraform管理資源は
-destroyで回収する。例外時の補助回収もrun manifestのowned IDに限定し、stateとの整合を記録する。
+途中で失敗してもfinallyで回収を試す。検証終了を記録してから保護解除・合成データ回収・逆順destroyを行う。解除は当該runの一時rootとownedリソースだけに限定する。
+Schedulerは最初に停止/削除し、処理終了を確認する。SDKはuser・bucket内容とサービス側削除保護を扱い、Terraform管理資源は
+後片付け用overrideを追加した同じ一時root/stateでdestroyする。例外時の補助回収もrun manifestのowned IDに限定し、stateとの整合を記録する。
 永久version削除はfixture全体の回収clientだけに許可し、清掃roleに付けない。
 回収後にowned IDの不在を確認し、cleanup errorsとleaksを本体結果と別件数にする。
 prefixが一致するだけの未知資源や、他runのmanifestを採用しない。
@@ -184,9 +194,12 @@ APIの所有者境界を検証し、既知の署名URLを別ownerが取得でき
 設定上SigV4検査が任意であるFlociでは取得200だけで署名強制を証明しない。
 
 既定本文2097152±1、画像1048576±1を実経路でも確認する。
-容量128MiB/1000件とrate120の規定値はU/Iで検証し、実Eは正規のoverrideを使う
-小容量専用fixture（itemCount2/imageBytes24、PNG12bytes、rate3）で境界・競合・回復を確認する。
-override値は証拠へ記録し、1000件/128MiB/120並行の実AWS負荷試験と呼ばない。
+実E/Lでは `runtime_limits={}` として容量128MiB/1000件、rate120を維持し、小容量やrate3へ変更しない。
+容量の等号・超過・競合・回復は、規定値を設定したIで上限直前の合成状態を用意して確認する。
+実Eは登録・差し替え・削除に伴うcounterの整合を確認し、容量境界のIを実HTTP試験と呼ばない。
+rate境界は実上限120のまま、合成ownerの当該minuteにcount119と正しいexpiresAtをseedし、
+二つのtokenでGETを一回ずつ送り、200→429/Retry-Afterとcount120を確認する。
+準備した状態を記録し、121回の実リクエストを送った試験とは説明しない。
 rate試験は分境界を跨いだrunを合格にせず、事前に窓の余裕を確認して開始する。
 
 ## 7. 清掃、障害、移行・復旧
@@ -211,41 +224,65 @@ ZIPのAPI認証を迂回するfault harnessをEとして集計しない。
 import→verify→publish、空owner・特殊key・拒否・再実行を実Floci adapterで確認する。
 通常CLIが共有credential chainを作る場合はそのまま実行せず、既存注入interfaceに
 明示ローカルclientを渡すE2E wrapperを使う。製品CLIを変更しない。
-復旧は合成データを別3tableへseedし、未公開prepare、default read-only照合、
+復旧は別owned stackの同じ定義で作成した3tableへ合成データをseedし、未公開prepare、default read-only照合、
 非現行version→新key現行保全、再実行、明示remap、source不変を確認する。
 これはPITR APIやデータ切替/rollbackを実証しない。
 
-## 8. Terraform・Schedulerの採否と互換性
+## 8. 本番Terraformの再利用とFloci互換性
 
-調査と採否の詳細は[調査記録](../../operations/formal-e2e-research.md)に記載している。
-Terraformを必須基盤に採用する。**E2E専用の独立root**で、必要な認証・Gateway・両Lambda・保存先・ログを構築する。
-bootstrap applyでZIP bucket等を準備し、SDKで現行ZIPをuploadする。discoveryで得たissuer/ローカルendpoint等を
-合成入力へ渡してruntime applyを行う。最終設定を読み戻すまでE/Lケースを開始しない。
-部分applyだけで構築確認成功とはしない。providerが必要とするread/Tag/waiterも調査対象とする。
-公開された本番resource定義は設定比較に使うが、本番rootのapplyやbackend/private inputs、state/planの参照は行わない。
-本番設定をFlociへ合わせて変更しない。
-provider6.67.0の必要API/endpoint schemaを先に確認し、API単位の対応表を作る。
-metadata/profile/default endpointの利用を無効にし、使用サービスのendpointをすべて明示する。
-取得したproviderはpinned lockで検証する。ローカルstate/planはrun固有の0700 directoryだけに置き、公開証拠へ含めない。
-applyが失敗しても同じroot/stateのowned resourceをdestroyし、残存リソースはmanifestで照合する。
+[調査記録](../../operations/formal-e2e-research.md)に根拠を記載する。
+本番Terraformの公開ソースを使うローカル構築を必須基盤とする。実AWSの本番環境には接続しない。
+変更対象はE2Eのdriverと文書であり、既存の本番 `.tf` / lock / resource addressは変更しない。
 
-本番との差分はlocal endpoint、使い捨てリソース名、削除保護等のfixtureの寿命、ローカルHTTP接続の扱いに限定して列挙する。
-IAM/TLS強制の同等性はAで確認する。差分一覧にない設定を黙って省略しない。
-JWT/scopes/route/同一artifact/保存schema/cleanup契約を変えて互換性を得ない。
-API不足があれば失敗actionと最小独立probeを記録し、TFをunsupportedまたはpartialと判定する。
-TF非対応時は依存するE/Lをnot-runとし、独立したU/Iは継続する。正式E2Eは未完了とする。
-TFの成功も本番3root全体のapply成功を意味しない。
-未知互換性を事前に「対応済み」と扱わない。
+### 同じ設定で検証する範囲
 
-構築確認では3tableのkey/GSI/TTL/PITR35日、S3のversioning/暗号化/公開防止/lifecycle60日/CORS、
-CognitoのPKCE/client/scope/期限、16route/JWT authorizer/integration/alias/CORS、両Lambdaのhandler/runtime/
-timeout/concurrency/同一ZIP、3log groupの30日保持、Schedulerの日次設定を実際に読み戻す。
-規定値fixtureとquota/rate縮小fixtureは、それぞれTerraform入力と読み戻した値を照合する。
+本番の認証設定、16route/scopes、DDB schema/GSI/TTL/PITR35日、S3 versioning/暗号化/公開防止/
+旧version60日、IAM policy/trust、Lambda runtime/handler/memory/timeout/concurrency/alias、log group30日、
+Schedulerと9alarmの定義を再利用する。容量・rate・清掃上限、CORSやcallbackの検証条件も維持する。
+削除防止とS3のTLS必須policyも、構築から結果確認まで本番どおりに保持する。
+Flociが設定を受け付けることと、IAM/TLS/alarm等をAWSと同様に強制・実行することは区別する。
+後者の本番同等性はAの未検証範囲である。
 
-Schedulerは日次03:00 UTC/OFF/DISABLED/cleanup alias/retry2/age3600の設定を読み戻し、Lで確認する。
-起動経路は別のowned one-time `at(...)` schedule、input `{}`、同aliasで試す。
-最大90秒の観測pollでjob/checkpointの実変化を確認し、delivery受付だけで完了としない。
-日次を待たず、日次時刻の実運転・AWS async再試行/IAM/監視はAへ残す。
+### 差分の扱い
+
+| 区分 | 差分 | 適用する段階 |
+| --- | --- | --- |
+| 接続 | providerのlocal endpoint/dummy credential、metadata/profile遮断、Flociのissuer/Hosted UI URL、必要なruntime endpoint | 構築・検証 |
+| 隔離 | 本番backendを使わないlocal state、owned prefix、合成account/repository/origin/callback/user、実行時に作られたID | 構築・検証。既存の入力検証を満たす値を使う |
+| 後片付け | 一時rootのprevent_destroy解除、owned資源のサービス側削除保護・削除拒否policyの解除 | 結果の確定後、または失敗時の回収段階だけ |
+| 変更しない設定 | 認証・route・保存schema・容量/rate・保持期間・実行設定・保護policy等 | 検証中の追加差分は認めない |
+
+接続先以外の差分も上表のとおり存在するため「完全に同一」とは記録しない。
+接続・隔離に必要な差分だけで構築できるかは未実測。必要APIが非対応なら、設定を省略・緩和せず
+failedActionと独立probeを保存し、TFをunsupported/partial、依存E/Lをnot-run、正式E2Eを未完了とする。
+S3のHTTP接続がTLS必須policyで拒否される場合も、policyを削って成功にしない。
+接続先の変更に伴うURL検証の追加は、discoveryで確認したowned Floci URLだけに限定する。
+API ID形式等の接続と無関係な検証を緩めない。必要な差分が上表を超える場合は原因と具体的差分を提示する。
+
+### 一時rootの準備・apply・回収
+
+各rootの公開 `.tf`（本番backend定義を除く）と公開lockを明示したpathだけから配置する。
+本番backend/private inputs/state/plan・実データを読まず、run固有の0700 directoryにlocal backendと合成inputsを作る。
+通常ファイルを保持し、生成する接続overrideの変更先を許可リストで制限する。
+overrideはnested blockを丸ごと置き換える場合があるため、元のvalidationやpolicyを落としていないことを検査する。
+TF1.16.5/provider6.67.0を固定し、全使用service endpointとアカウント照合を確認する。
+
+構築順は本番の初期構築手順に沿って、bootstrap→platform→applicationのAPI-only seed→
+API IDを渡すbootstrap更新→現行ZIP登録→application全体applyとする。
+seedは本番の既存手順どおり同じresource addressだけをtargetとし、通常applyではseed flagを外す。
+root間はallowlisted outputsを合成inputsへ渡し、別rootのstateを読まない。
+初期化・seed・一部resourceだけの成功を基盤成功にせず、3rootの最終構築と設定読み戻しを要求する。
+
+すべての結果を記録してから、Scheduler停止・処理終了確認、owned資源のサービス側削除保護やbucket削除拒否の解除、
+合成user・全bucket version/marker回収、一時rootの後片付けoverride、application→platform→bootstrapのdestroyを行う。
+保護解除は回収専用clientからowned IDにだけ行い、検証中のroleやpolicyを変更しない。
+partial applyや試験失敗でもこの回収を試し、解除/回収失敗とleakを本体結果と別に報告する。
+後片付け設定で再びケースを実行しない。実行開始時と結果確定前には保護設定を読み戻し、検証中の変更がないことを確認する。
+
+Schedulerの日次03:00 UTC/OFF/DISABLED/cleanup alias/retry2/age3600は同じ定義で読み戻す。
+起動経路は別のowned one-time `at(...)` schedule、input `{}`、同aliasで試し、
+最大90秒の短いpollでjob/checkpointの実変化を確認する。daily scheduleをテスト用へ変更しない。
+日次の実運転・AWS async再試行/IAM/監視はAへ残す。
 設定に接続先追加・host rebuildが必要なら具体的差分と再開手順を保存して停止する。
 
 ### API結果ログと観測方法
@@ -272,7 +309,7 @@ rawログはメモリ内で照合し、公開結果へは許可項目とassert�
 
 run固有のGit追跡対象外の `artifacts/formal-e2e/<runId>/` に、0700 directory/0600 manifest・JSON結果を保存する。
 証拠はcaseId、requirementId、layer、pass/fail/not-run/unsupported/out-of-scope、
-phase、許可されたstatus/code、assert名、件数、duration、cleanupとleak件数、非秘密のtool/ZIP digestだけ。
+phase、許可されたstatus/code、assert名、件数、duration、cleanupとleak件数、非秘密のtool/ZIP/本番公開ソースdigest、差分区分と件数だけ。
 fixtureの前提が満たせない場合は依存ケースをnot-runとし、独立したsuiteは継続する。必須ケースは自動skipにしない。
 全ケースを列挙してから実行し、fixture初期化に失敗しても集計対象からケースを除外しない。
 全assertはbody/token/URL等を含まない固定メッセージに包み、node:testの差分・stack、SDK例外、
@@ -296,7 +333,7 @@ API結果ログの追加は本書の承認対象に含める。それ以外の�
 ## 10. 自己レビュー・承認対象
 
 出典、層、必須ケース、実HTTPとclaims注入の区別、現行ソース/ZIP証拠、
-時刻合成と実期限、既定値とoverride、Terraform採否と未検証の区別を確認した。
+時刻合成と実期限、本番設定の維持、接続・隔離・後片付けの差分、Terraform採否と未検証の区別を確認した。
 本書と対応表/計画案は未承認である。実装ファイルは作成していない。
-承認対象は方式A、対応表の必須範囲、制限、API結果ログの追加、計画案のタスク順。
+承認対象は本番3rootの再利用、上表の接続・隔離・後片付け差分、対応表の必須範囲、制限、API結果ログの追加、計画案のタスク順。
 実AWS/GHA/push/PR/merge・実データ・製品設計変更を承認対象へ拡張しない。
