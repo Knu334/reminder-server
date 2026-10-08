@@ -13,6 +13,16 @@
 **Status:** 2026-10-08レビュー待ち。設計/対応表/本計画の承認前は、実装・Flociリソース作成・applyを開始しない。
 ハンドオフが許可した文書作成の範囲で、設計案と計画案を同時に提示した。SDD方式は選択済みのため、再確認は不要。
 
+## 作る順序と、テストを実行する順序
+
+Task1〜12は実装する順序であり、完成したE2Eの実行順序とは異なる。
+実行時は、preflight/ZIP準備→本番3rootのlocal apply→設定読み戻し/ログsmoke→
+合成user/データ準備→実入力→HTTP/DDB/S3/CloudWatch照合→結果確定→保護解除/回収の順とする。
+suiteごとに独立した基盤でapply以降を繰り返し、ZIPはrun内で共通にする。ケースごとのapplyは行わない。
+Task3/4が構築と設定確認、Task5〜10がケースの入力/保存照合、Task4/11が実ログ照合、Task12が全体集約を担当する。
+Task11でサービス別ログ試験を追加するが、完成したrunnerでは各ケースの出力確認にログassertを含める。
+TFケースのlayerはL、`--layer floci|terraform`は実行入口の選択値とする。
+
 ## Global Constraints
 
 - 既存worktree `/workspace/.worktrees/aws-sdd` / `feature/aws-sdd-implementation` を使用し、reset/checkout/historyの改変はしない。旧19タスクを再dispatchしない。
@@ -28,7 +38,7 @@
 - 元画像を変換しない。入力はBASE64/data URLとし、DBにはmetadataだけを保存する。直接upload APIを追加しない。
 - random owned prefixとrun manifestを用意し、finallyで全リソースを回収して不在を確認する。cleanup errors/leaksは別々に集計する。例外/子プロセス/TF出力に秘密・raw body・全envを出さない。
 - 既存の本番3rootの公開ソースを再利用し、module化・本番.tf/lockの編集・resource address移動をしない。本番backend/state/plan/private inputsを読まず、local backend/run固有の合成inputs/stateを使う。接続・隔離以外の設定差分は検証中に加えない。保護解除はowned資源の後片付け段階だけで行う。
-- Terraform apply・設定確認・CloudWatch結果ログ配信は必須。TF/Logs非対応では依存E/Lをnot-runとし、正式E2Eは未完了。独立U/Iは継続する。Scheduler起動/署名強制の互換性調査結果は別に記載する。必須E/L/Iに未実施が残れば完了としない。実AWS/IAM/TLS/PITR/Chrome/性能との同等性を推定しない。
+- Terraform apply・設定確認・CloudWatch結果ログ配信は必須。基盤初期化失敗では依存E/Lをnot-run、入力後の保存/ログ不一致はfailとして残す。正式E2Eは未完了とし、独立U/Iは継続する。Scheduler起動/署名強制の互換性調査結果は別に記載する。必須E/L/Iに未実施が残れば完了としない。実AWS/IAM/TLS/PITR/Chrome/性能との同等性を推定しない。
 - 製品バグ/Floci非互換は独立した失敗ケースと原因を記録する。API結果ログの追加は本計画の承認対象。それ以外の製品動作の修正は、内容を提示して別途承認されるまでE2E実装へ含めない。host rebuild/接続先追加が必要なら、成果物と再開手順を保存して停止する。
 
 ## Review Focus
@@ -101,7 +111,7 @@ Task4で既存SDK固定versionに合わせた `@aws-sdk/client-cloudwatch-logs` 
 
 **Interfaces:** 上記型、`preflight(): Promise<LocalTarget>`、`localRequest(target: LocalTarget, url: URL, options: { method?: string; headers?: Record<string,string>; body?: string|Buffer }): Promise<HttpResult>`、`createEvidence(definitions: CaseDefinition[], runDirectory: string): Promise<Evidence>`、`runCase(definition: CaseDefinition, evidence: Evidence, action: () => Promise<void>): Promise<void>`、`runMain(argv: string[]): Promise<0|1|2>`。
 
-- [ ] Step 1 RED: `harness.test.ts` に `reject_public_redirect_unknown_host_before_socket`、`dns_drift_preserves_host`、`failed_case_keeps_inventory_and_siblings`、`canary_never_reaches_report_or_stderr`、`cleanup_failure_changes_exit` を作る。外部hostへのsocket接続が0であることと、秘密canaryを含むAssertionErrorのdiff/stackも表示されないことをassertする。selected3でpass1/fail1/not-run1が残り、cleanup.errors1ならexit1となることもassertする。
+- [ ] Step 1 RED: `harness.test.ts` に `reject_public_redirect_unknown_host_before_socket`、`dns_drift_preserves_host`、`failed_case_keeps_inventory_and_siblings`、`canary_never_reaches_report_or_stderr`、`cleanup_failure_changes_exit` を作る。外部hostへのsocket接続が0であることと、秘密canaryを含むAssertionErrorのdiff/stackも表示されないことをassertする。selected3でpass1/fail1/not-run1が残り、cleanup.errors1ならexit1となることもassertする。構築前の阻害はnot-run、入力後のログ欠落はfailでHTTP実施情報が残ること、TFケースのlayerがLとなることも確認する。
 - [ ] Step 2 RED実行: `PATH=… npx tsx --test tests/integration/formal-e2e/harness.test.ts`。未実装interfaceまたは期待安全性の失敗を記録。通信環境失敗をREDと呼ばない（以下の`PATH=…`はGlobal Constraintsの完全prefix）。
 - [ ] Step 3 最小実装: 既存のpinnedRequestを参照して、DNS pin/元Host/no-redirect/30秒deadline、証拠allowlist/0700・0600、先行するcase registryの作成を実装する。子プロセスのenvはallowlistから安全な値だけで構築し、raw stderrを転送しない。入口は `e2e:preflight=tsx scripts/e2e/preflight.ts`、`test:integration:e2e=tsx --test tests/integration/formal-e2e/*.test.ts`、`test:e2e:floci=tsx scripts/e2e/run.ts --layer floci` とする。未知のsuite/caseはexit2とし、部分選択であることを表示する。失敗後の継続と、最上位の失敗情報からの秘密除去を保証する。
 - [ ] Step 4 GREEN: harnessとpreflight、typecheck/lintを実行し、case assertionと安全な結果だけが出ることを確認する。現在のhealth/version/IPが不適合ならpreflightを失敗させ、fallbackしない。
@@ -233,7 +243,7 @@ Task4で既存SDK固定versionに合わせた `@aws-sdk/client-cloudwatch-logs` 
 
 **Interfaces:** CaseDefinition/CaseResult/RunSummary。`coverage.test.ts`は対応表のID集合とregistryのrequirementId、required/layer/source、all suite inventoryを照合する。
 
-- [ ] Step 1 RED: `every_required_case_has_result_and_source`、`partial_selection_cannot_claim_full_completion`、`unsupported_not_run_cleanup_are_separate` を作る。fixtureの最上位での失敗/timeoutでは、全caseがnot-runとして残りexit1となることをassertする。結果から消えたcaseや出力されたbody canaryが0であり、U/AだけのrowをE必須にしないこともassertする。
+- [ ] Step 1 RED: `every_required_case_has_result_and_source`、`partial_selection_cannot_claim_full_completion`、`unsupported_not_run_cleanup_are_separate` を作る。fixture初期化の失敗/timeoutでは未開始caseがnot-runとして残りexit1となることをassertする。入力後の保存/ログ不一致をnot-runへ戻さずfailとすることも確認する。結果から消えたcaseや出力されたbody canaryが0であり、U/AだけのrowをE必須にしないこともassertする。
 - [ ] Step 2 RED実行: coverage/harness/terraform-driverのoffline試験を実行する。ケースplaceholderを未実施のままpassにしない。
 - [ ] Step 3 最小完成: registry/matrix/READMEの実存在入口を一致させ、依存準備・fixture生成・suite選択・失敗診断・owned recovery・後片付け・CI runner準備を日本語で記載。現在のpatched imageのhost準備は既存手順へリンク、GHA/workflow変更なし。結果reportはfresh UTC、HEAD/dirty入力digest/tool/ZIP/API-cleanup hashes、本番公開ソースdigest/差分区分・件数、layer別counts/required not-run/unsupported、cleanup/leaks、review/rulings、既知制限を保持。
 - [ ] Step 4 fresh検証: prefix付き `npm ci`（必要時）、typecheck/lint→build/package/verify:zip→`npm test`→test:packaging→必要infra:check→audit:runtime/audit:all→test:integration:e2e→test:e2e:floci→test:e2e:terraform。ZIPはE2E prepareでも現行buildから作る。Floci必須groupsを全実行、TF/Logs非対応はfail/unsupportedと依存not-runを記録し、正式E2Eは未完了。順序/実際のcommand/exit/count/安全なwarningsを記録。今回のuser baseline diffはstageしていない新E2E pathだけを検査。

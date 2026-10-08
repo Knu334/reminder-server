@@ -76,7 +76,29 @@ resource定義の複製をリポジトリへ新設せず、共通moduleへの切
 | B: 共通moduleへ切り出す | 本番とE2Eの定義を共有できる | 既存IaCの構造・resource address・回帰確認の変更が増える | 今回は採らない |
 | C: E2E専用のresource定義を新設する | ローカル構築だけに合わせやすい | 本番との設定ずれや二重管理が残る | 採らない |
 
-## 3. 検証層と必須範囲
+## 3. 実行順序と検証層
+
+### 実行順序
+
+§4〜9は、次の実行順序の準備・判定・例外を定義する。節番号自体は実行順序を表さない。
+
+| 順序 | 行うこと | 次へ進む条件 | 詳細・計画 |
+| --- | --- | --- | --- |
+| 1 | 接続先を確認し、現行ソースからZIPを作る | ローカル接続の確認、生成元digestとZIP整合 | §4〜5、Task1/3 |
+| 2 | 本番3rootを再利用してFlociへapplyする | bootstrap/platform/applicationの最終構築成功。途中のseedだけでは通過しない | §8、Task3 |
+| 3 | 実サービスの設定を読み戻す | 本番設定との一致、接続・隔離差分の許可範囲、同一ZIP、保護設定、log配信のsmokeを確認 | §8、Task4 |
+| 4 | ケース固有の合成データ・userを用意し、入力を送る | 前提が成立し、通常APIは実PKCE/JWT/Gateway経由で送信 | §5〜7、Task5〜10 |
+| 5 | HTTP・DDB・S3・CloudWatchの結果を照合する | ケースに定義した出力がすべて一致。HTTP成功だけでは合格にしない | §6〜8、Task4〜11 |
+| 6 | 結果を確定してから保護解除・回収する | 全ケースの実施/未実施が残り、回収error/leakが0 | §5/8/9、Task3/4/12 |
+
+現案ではsuiteごとに独立した基盤を使い、順序2〜6を繰り返す。ZIPはrun内で共通にする。
+ケースごとのapplyは行わず、合成user・データを分離する。別poolや復旧先が必要なケースだけ追加stackを使う。
+これは一度のapplyで全suiteが同じ基盤を共有する構成とは異なるが、各ケースは必ず構築・設定確認後に開始する。
+
+### ケースをどの経路で確認するか
+
+U/I/E/L/Aは検証経路の区分であり、実行順序ではない。Terraform構築・設定確認はLに分類する。
+全体を合格にするには、上表の構築・設定確認と、対応表の必須ケースの両方が必要である。
 
 [要件別対応表](../../operations/formal-e2e-coverage.md)をケースの根拠とする。
 対応表で付与する `AUTH/API/STORE/IMG/CLEAN/OPS/TF/OBS/SAFE` のIDは新しい検証IDであり、
@@ -94,8 +116,10 @@ Eの必須群は、認証・独立負例、health/ready/旧API/v2契約、所有
 一覧/cursor、逐次ETagと同時競合、画像元bytes/metadata/URL/差し替え/孤児。
 Lの必須群は、実際の清掃処理における合成状態/時刻・保護・lease・ページ巡回・再実行と、合成移行/復旧での実adapter結合。
 Iではunknown outcome、ページ途中中断、GSI遅延、処理上限等を再現する。
-Terraform applyと設定確認、CloudWatchへの結果ログ配信は必須。非対応は基盤のunsupportedとして記録し、
-依存するE/Lケースをnot-runにする。SDKで基盤を作り直して正式E2E成功とはしない。
+Terraform applyと設定確認、CloudWatchへの結果ログ配信は必須。構築・設定確認が失敗した場合、
+当該基盤を使うE/Lはnot-runにする。SDKで基盤を作り直して正式E2E成功とはしない。
+入力送信後に保存状態やログが不一致だった場合は、実施したケースをfailにする。not-runへ戻して実施証拠を消さない。
+故障注入Iで確認する依存先障害と容量境界は、実HTTP/CloudWatch配信のEとは別に報告する。
 Schedulerのone-time起動とS3署名強制は互換性調査を必須とし、実AWSの保証とは区別する。
 必須のE/Lケースに未実施が残れば「正式E2E完了」としない。
 
@@ -120,7 +144,9 @@ Schedulerのone-time起動とS3署名強制は互換性調査を必須とし、�
 `test:e2e:floci` の既定は構築・設定確認と必須E/L/loggingの全群。Scheduler起動probeも実行して互換性結果を残す。
 `--suite auth|api|storage|images|cleanup|operations|logging|scheduler` は
 単独診断用で、部分実行を全体成功にしない。suite内のケースIDで選択できる。
-E/LとIとTFの結果は異なるlayer値で保存し、混ぜた「成功件数」を唯一の結果にしない。
+layerはU/I/E/L/Aだけとする。TFは構築・設定確認のケース群で、layer=Lとして保存する。
+`--layer floci|terraform` は既存案の実行入口の選択値であり、結果のlayerへそのまま転記しない。
+構築・設定確認、通常API、清掃/合成運用、故障注入の件数をそれぞれ示し、合計成功件数だけで完了を判断しない。
 
 preflightは指定バージョン・依存関係・ローカルFloci・必要な通信を確認し、既定endpointへのfallbackを拒否する。
 `prepare-artifact` は実行ごとに既存build/package/verify:zipを順に実行し、snapshot ZIPをfixtureへ渡す。
@@ -168,7 +194,24 @@ SDK retriesで失敗を隠さず、readiness/GSI/Schedulerの観測pollのみ期
 
 ## 6. ケースの組み立てと判定
 
-各ケースでは「構築・設定確認済みの前提→操作→HTTP/headers→DDBの強い整合性のある読み取り→必要なS3/job/counter→ログ照合」の順に確認する。
+### 入力と最終結果の対応
+
+各ケースでは「構築・設定確認済みの前提→入力→HTTP/headers→DDBの強い整合性のある読み取り→S3/job/counter→CloudWatchログ」の順に確認する。
+ケース定義にはHTTP・DDB・S3・ログの期待をそれぞれ記載する。画像のない操作でもS3への書き込みがないことを確認し、
+条件に当てはまらない出力は理由を示す。ログだけ、またはHTTPだけの成功で、保存状態の確認を省略しない。
+
+| 出力 | 正常系で確認すること | 異常系で確認すること |
+| --- | --- | --- |
+| HTTP | operationごとのstatus、DTO、ETag等 | 想定status/code。Gateway拒否とAPI拒否を区別 |
+| DynamoDB | 登録・更新後の項目/revision/画像参照/job/counter。削除後はtombstoneとcounter減少 | 入力拒否時の保存不変。故障時はcommit確定または再実行可能な追跡状態 |
+| S3 | 登録・差し替え後の元bytes/version/checksum。API削除直後は保持、清掃後は現行GET404・元version保持 | 入力拒否時の追加保存なし。Put成功後のDB失敗では孤児jobによる追跡と元画像保護 |
+| CloudWatch | APIのoperation/status、GatewayのrequestId/status、清掃のoperation/status/件数を実log groupで確認 | APIに到達した拒否はHTTPと同じstatus/code。認証拒否はGatewayログとAPI結果ログ不在。故障注入Iのcaptureは実配信と区別 |
+
+具体的な入力値と期待値は対応表の各要件からケースへ展開し、ログの照合方法は§8に従う。
+ログが60秒以内に確認できない場合、HTTPや保存結果が正しくても、そのログ必須ケースはfailとする。
+
+### 境界・競合・認証の判定
+
 拒否されたリクエストでは、項目/counter/job/画像が変わらないことをassertする。ただし認証済みの入力不正は
 rateを消費するので、RATE行とSTORAGE行を分けて期待値を指定する。
 同時競合は共通ETag取得後のbarrier releaseとPromise.allSettledで2要求を送る。
@@ -203,6 +246,10 @@ rate境界は実上限120のまま、合成ownerの当該minuteにcount119と正
 rate試験は分境界を跨いだrunを合格にせず、事前に窓の余裕を確認して開始する。
 
 ## 7. 清掃、障害、移行・復旧
+
+この節も§3の構築・設定確認済みの基盤で実行する。APIの登録・削除から清掃へ続く正常系は、
+実HTTPで作った画像/jobを起点とし、清掃後のDDB/S3と実清掃ログまで照合する。
+清掃Lambdaの手動invokeと合成運用CLIはL、故障注入はIとして通常APIのEと区別する。
 
 実際の清掃handlerは、同じZIPの別Lambda/aliasを `{}` で手動invokeする。FunctionErrorとpayloadを別々に確認する。
 APIで生じたcommitted/retired/pendingの状態を使い、fixtureの合成jobだけをcondition付きで古い時刻に更新する。
@@ -317,12 +364,14 @@ fixtureの前提が満たせない場合は依存ケースをnot-runとし、独
 token/code/cookie/password/credential/署名URL/private data/全envを出力しない。
 
 終了コードは0=選択した必須ケース全成功かつcleanup/leak0、1=本体/cleanup/leak/必要case未実施、
-2=preflightまたは不正選択。必須TF/Logsのunsupportedはexit1とし、依存する全ケースのnot-runを残す。
+2=preflightまたは不正選択。必須TF/Logsのunsupportedはexit1とする。
+基盤初期化前に阻害されたケースはnot-run、入力や処理を実行してから不一致が分かったケースはfailとして残す。
 結果の統合にはexitだけでなくcase inventoryを照合し、部分実行やTF非対応を全体GREENにしない。
 CIでは固定toolのrunnerと現在の修正済みFlociをホスト側で準備し、同じnpm入口を呼ぶ設計とする。
 Docker socketはFlociのみ。今回はGHA起動・workflow変更・devcontainer/FW変更をしない。
 
-承認後の完了条件は、対応表の必須E/L/Iを所定の入口から新たに実行し、保存・副作用assertが一致し、
+承認後の完了条件は、Terraform構築・設定読み戻し・実ログ配信と、対応表の必須E/L/Iを所定の入口から新たに実行し、
+HTTP・DDB・S3・ログの期待assertがすべて一致し、
 既存test/typecheck/lint/build/package/verify:zip/packaging/必要infra回帰が成功、
 cleanup/leak0、秘密不使用、日本語README・結果・制限・review・rulingsの保存がすべて揃うこと。
 TF/Logsの非対応は必須ケースの未完了、Scheduler起動/署名強制の非対応は調査結果として明記する。

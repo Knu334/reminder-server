@@ -21,6 +21,7 @@ HTTP拒否の不変はSTORAGE/reminder/job/S3を指す。認証済み入力拒�
 ## 実行順と最終結果の見方
 
 TF-01/03でTerraform構築と設定を確認してから、E/Lケースを実行する。
+TFケースのlayerはLであり、実行入口のterraform選択値とは区別する。suiteごとに構築・設定確認後、各ケースを実行する。
 正常系はHTTP応答に加え、DDBレコード・S3元bytes/job・OBSのCloudWatch結果ログを確認する。
 削除直後はtombstone/retired、保護期間後の清掃はmarker/done、旧versionは60日保持という段階を分ける。
 異常系もHTTP・ログと保存状態を照合する。認証拒否はGateway、APIに到達した拒否はAPI Lambdaのログを使う。
@@ -132,4 +133,5 @@ source・期待assertを持たせ、日本語結果の全case inventoryと一対
 Uだけの成功でE/L未実施を埋めない。互換性調査必須のIMG-09/OPS-06起動経路は、
 実際の採否・失敗probe・制限が記録されれば調査完了、未確認のまま除外しない。
 TF-01/03/04・OBS実配信・E/L必須をFlociが阻害する場合は正式E2E未完了とする。Terraform構築失敗時は依存E/Lをnot-runとし、SDK構築を成功の代替にしない。
+入力後の保存/ログ不一致は実施したケースのfailとして残し、not-runへ戻さない。HTTPだけ、ログだけの成功でケース全体をpassにしない。
 E/Lは本番の上限を維持する。合成rate状態、規定容量境界I、清掃合成日時、既存lowered-cap U/Iを区別して記録する。

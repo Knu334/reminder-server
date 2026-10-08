@@ -162,3 +162,14 @@ Context7は `Terraform` libraryをresolveして `/websites/developer_hashicorp_t
 lifecycleは引数単位のmergeとされている。追加差分が既存validation/policyを落とさない検査をTF-04へ追加した。
 [公式lifecycle説明](https://developer.hashicorp.com/terraform/tutorials/state/resource-lifecycle)を基に、
 prevent_destroy維持中の通常destroyを成功前提にしない。mockのoverride_resourceはproviderを呼ばないため実E2Eへ使わない。
+
+## 実行イメージと詳細記述の整合確認
+
+設計§3以降を、冒頭の「構築→設定確認→入力→HTTP/DDB/S3/CloudWatch→回収」と計画に照らして確認した。
+§3/6/8には改訂内容が入っていたが、実行順と節・Taskの対応、suiteごとの構築、最終結果の判定が追いにくかった。
+§3に実行順と条件の表、§6に出力ごとの正常/異常判定、計画に実装順と実行順の区別を追加した。
+現案はsuiteごとに独立したstackで構築以降を繰り返す。ケースごとのapplyや本番定義の変更はしない。
+
+§4の「TFを別layer」という記述は共通型U/I/E/L/Aと不一致だったため、TFケースはLに統一した。
+また、基盤初期化前のnot-runと、入力後の保存/ログ不一致のfailを区別し、実施済み証拠をnot-runへ戻さない規則を明記した。
+Iの故障注入/captureを実HTTP・CloudWatch配信の証拠にしない境界は維持した。コード変更・applyは未実施。
