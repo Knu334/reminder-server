@@ -233,3 +233,39 @@ bootstrap/oidc.tfはGitHub provider URLを固定する。ARNはaccount+URLで決
 ログobserverはowned Lambda groupごとに一つとし、全caseの期待を登録後、suite末尾に最終対象入力から最大60秒でまとめて確定する。ログ不在の負例ごとに60秒待たない。未確定caseをpassにせず、observer障害は入力済みcaseのfailへ反映する。
 設計§3に工程別見積もり22〜65分、run本体75分と回収15分、全体90分、各poll/processの期限を記載した。実測前の見積もりであり、実装後に工程別時間で更新する。
 旧Task2のAPI結果ログ変更は[独立先行計画](../superpowers/plans/2026-10-08-reminder-server-api-result-logging.md)へ切り出した。独立承認・検証・commit後にE2Eを実装する。E2E Task2は前提確認だけで、製品コードを変更しない。費用・保持の前提は維持する。
+
+## 2026-10-08 API結果ログの前提確認（正式E2E Task2）
+
+独立API結果ログ計画は2026-10-08に承認済みで、製品変更は `95dfcdf`、F10の結果記録は `93bfaf1` にコミットされた。独立taskレビューと最終レビュー（gpt-6-astra/high）はいずれもApprovedで、作業を止める指摘はない。承認・レビューの引き継ぎ証跡は本計画の `api-prerequisite.md`、公開の検証記録は[2026-10-08 F10追補](../implementation-results.md#2026-10-08-f10追補-api結果ログのローカル検証)で確認した。既存のESLint警告とnpm ciのESLint9.39.0非推奨・サポート終了警告は残る。
+
+### 製品のJSON契約
+
+`src/api.ts` の `withApiResultLogging` は、`ApiHandler` 型のdelegateを包む。最外側の本番handlerを一度だけ包み、初期化・cold/warm invocation、成功・拒否・503の結果を1呼び出し1件で記録する。HTTP応答とdelegateが投げた例外の同一性を保ち、ログ出力の失敗で応答を変えない。
+
+- JSONは512bytes以内で、`requestId` / `lambdaRequestId` / `operation` / `status` / `code` / `durationMs` に限定する。
+- IDは安全なASCII文字（英数字・`_`・`-`）で各128文字以内とし、不正なIDは省く。
+- operationは既存routeの固定許可値を使い、未知の操作は `unknown` にする。codeは既存の固定許可値だけを記録し、未知のcodeと正常時のcodeは省く。
+- 本文・画像・owner/item ID・生path/query・token・署名URL・例外message/stackを記録しない。
+- 既存logging helper/consoleを使う。APIからのPutLogEvents、新SDK依存、alarm、metric、subscriptionは追加しておらず、ログ保持30日は変更していない。
+
+### 検証結果の有効範囲
+
+| 確認した既存証跡 | 結果 |
+| --- | --- |
+| API結果ログ単独 | 22/22 |
+| 関連API/runtime回帰 | 66/66 |
+| Node全suite | 359/359（runtime188 / operations74 / delivery97） |
+| Python packaging | 3/3 |
+| typecheck / lint | 成功 |
+| build / package / verify:zip | 成功。Node全suite前にZIPを再生成・検証 |
+| runtime / full audit | 両方0 vulnerabilities。証跡取得時点の結果 |
+
+Node24.21.0/npm11.11.1/Python3.13.16で得た結果である。Task1の `1fdd90d` と修正 `1597df4` は独立レビュー済みで、製品コードを変えずにharness39件を追加し、既存359件も再確認した。Task2では `93bfaf1` から開始時の `1597df4` までの製品・既存runtime/operations/delivery試験・lockfileの差分がないことを確認した。package.jsonの追加はTask1のE2E入口であり、既存の試験scriptと依存関係は変わっていない。製品sourceが変わっていないため、成功済みの試験は再実行していない。
+
+未コミットのnull-body修正は `src/api/event.ts`、`tests/runtime/api.test.ts`、`tests/runtime/boundaries.test.ts` に残っている。既存のnull-body回帰6件は359件に含まれ、この3ファイルの差分をTask2の前後で保持した。これらは今回の文書commitに含めない。
+
+### 判定と残る配信確認
+
+独立製品変更の承認・レビュー・commitと、同一sourceのローカル回帰結果を確認したため、API結果ログの前提確認は満たした。今回の追記は製品検証OBS-01/04の前提記録である。console capture/stdoutのJSONはCloudWatchへの配信を証明しない。API/清掃ログの実配信と入力後のHTTP/DDB/S3/ログ照合は後続Eの検証に残り、正式E2Eはまだ完了していない。Gatewayログ配信は別の互換性調査として扱う。
+
+独立API変更のinfra:checkはTerraform不在でinitできず、成功とは数えていない。ツール準備と3rootの確認はTask3に残す。Task2では文書だけを追記し、製品コード、公開Terraform定義とログ保持設定は変更していない。Floci資源作成、Terraform apply/destroy、実AWS、GHA、push/PR/merge、FW/devcontainer変更は行っていない。後続で前提回帰が失敗した場合は製品ログ変更の問題として切り分け、Floci構築へ進まず、製品修正をE2Eタスクへ含めない。
