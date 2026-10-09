@@ -324,13 +324,40 @@ export const operationDefinitions: CaseDefinition[] = [
 definitions.push(...operationDefinitions);
 
 /**
+ * Service result logs (OBS-02/03) and the Scheduler start path (OPS-06). The logging E cases each own their synthetic users; the Gateway
+ * refusal absence is observed once at the end of the suite with delivered normal controls on both sides. The Scheduler trigger is a
+ * compatibility measurement: pass, a precisely identified unsupported, or fail; the daily schedule is only ever read.
+ */
+function loggingCase(id: string, http: string[], ddb: string[], s3: string[], logs: string[]): CaseDefinition {
+  return { id, requirementId: id.split('/')[0]!, layer: 'E', required: true, acceptance: 'behavior', suite: 'logging', source: `formal-e2e-coverage/${id.split('/')[0]!}`, outputs: [
+    { kind: 'http', assertions: http }, { kind: 'dynamodb', assertions: ddb }, { kind: 's3', assertions: s3 }, { kind: 'logs', assertions: logs },
+  ] };
+}
+export const loggingDefinitions: CaseDefinition[] = [
+  loggingCase('OBS-02/crud-success-result-logs', ['create-201', 'get-200-same-body', 'patch-200-revision-2', 'delete-200-then-get-404'], ['row-and-counter-follow-each-step'], ['no-image-versions-added'], ['create-result-delivered', 'get-result-delivered', 'patch-result-delivered', 'delete-result-delivered', 'get-404-result-delivered']),
+  loggingCase('OBS-02/input-rejection-result-logs', ['invalid-json-400', 'media-415', 'owner-field-422', 'missing-item-404', 'valid-control-200'], ['rejections-leave-rows-unchanged-rate-plus-five'], ['no-image-versions-added'], ['invalid-json-400-result-delivered', 'media-415-result-delivered', 'owner-field-422-result-delivered', 'missing-404-result-delivered', 'control-result-delivered']),
+  loggingCase('OBS-02/gateway-refusal-result-absence', ['no-jwt-401', 'write-only-get-403', 'valid-controls-200'], ['refusal-owner-rate-storage-unchanged'], ['refusal-image-versions-unchanged'], ['no-jwt-api-result-absent', 'write-only-api-result-absent']),
+  loggingCase('OBS-03/cleanup-start-end-pairing', ['invoke-200-no-function-error-counts-1-1', 'second-invoke-200-no-delete'], ['due-orphan-done-and-checkpoint-saved'], ['marker-added-original-version-retained'], ['delivered', 'delivered-2']),
+];
+definitions.push(...loggingDefinitions);
+export const schedulerDefinitions: CaseDefinition[] = [
+  { id: 'OPS-06/one-time-trigger', requirementId: 'OPS-06', layer: 'L', required: true, acceptance: 'compatibility', suite: 'scheduler', source: 'formal-e2e-coverage/OPS-06', outputs: [
+    { kind: 'http', assertions: ['scheduler-trigger-measured'] }, { kind: 'dynamodb', assertions: ['job-checkpoint-change-measured'] }, { kind: 's3', assertions: ['marker-change-measured'] }, { kind: 'logs', assertions: ['cleanup-start-end-measured'] },
+  ] },
+  { id: 'OPS-06/daily-schedule-preserved', requirementId: 'OPS-06', layer: 'L', required: true, acceptance: 'behavior', suite: 'scheduler', source: 'formal-e2e-coverage/OPS-06', outputs: [
+    { kind: 'http', assertions: ['daily-03utc-off-disabled-retry2-age3600-alias-read-back', 'only-daily-schedule-in-group'] }, { kind: 'dynamodb', assertions: [], notApplicableReason: 'scheduler-config-read-only' }, { kind: 's3', assertions: [], notApplicableReason: 'scheduler-config-read-only' }, { kind: 'logs', assertions: [], notApplicableReason: 'no-invocation-in-read-back' },
+  ] },
+];
+definitions.push(...schedulerDefinitions);
+
+/**
  * Cases whose result the runner records itself because it may be `unsupported` (compatibility acceptance): the probe returns the
  * measured outcome and the runner maps it. The matching caseActions entry only makes the case selectable; it is never run through runCase.
  */
 export type MeasuredOutcome = 'pass' | 'unsupported' | 'fail';
 export const caseMeasurements = new Map<string, (fixture: import('./types.ts').SuiteFixture) => Promise<MeasuredOutcome | { outcome: MeasuredOutcome; httpStatus: number }>>();
 /** Fixed evidence reason of a measurement that ends unsupported; the default is signature-enforcement-unsupported. */
-export const measurementUnsupportedReasons = new Map<string, 'hosted-revoke-unsupported'>([['AUTH-11/hosted-revoke-endpoint', 'hosted-revoke-unsupported']]);
+export const measurementUnsupportedReasons = new Map<string, 'hosted-revoke-unsupported' | 'scheduler-trigger-unsupported'>([['AUTH-11/hosted-revoke-endpoint', 'hosted-revoke-unsupported'], ['OPS-06/one-time-trigger', 'scheduler-trigger-unsupported']]);
 /** A guard returns true when a prerequisite case has not passed; the runner then records not-run. */
 export const caseGuards = new Map<string, (fixture: import('./types.ts').SuiteFixture) => boolean>();
 /**

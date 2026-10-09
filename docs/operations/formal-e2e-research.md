@@ -290,3 +290,36 @@ cleanupは結果確定後に行う。driver自身がLambdaをinvokeしていな�
 最後に、first init/apply前のmanifestへ公開resourceの静的addressも登録した。bootstrap13、platform16、application15の計44familyであり、動的instanceの実数83とは区別する。作成後のowned IDをfamilyへ対応づけ、空のstate snapshotでも既知IDを消さない。未知IDや未開始intentを不在と決めつけず、確認できたfamilyとZIPだけremovedへ進める。default接続、foreign state、source/overrideの改変、stale/tampered ZIP、create-only upload、保護解除失敗、結果確定前のcleanup、DNSとprocess中断の負例を検証した。
 
 5run目は静的addressへのID保存で、log groupの先頭/を拒否するdriverの不備によりplatform apply後に失敗した。回収後の45件はすべて不在だった。保存済み83IDの30resource kindを確認し、log group、API stage、alias、permission、ARNなどの形ごとに所有関係を検証する処理へ修正した。6run目は全構築と読み戻しに成功し、cleanup19/19、errors0、leaks0、独立不在83/83を確認した。manifestの44family、3root、ZIPはすべてremovedだった。このrunでは各rootの初回init直前にintentを登録していた。最終修正では全44familyを最初のTerraform spawn前に永続化し、partial failureでも未開始rootのintentを削除済みにしないことをoffline試験で確認した。この保存順だけの修正ではbackendを再構築していない。最終integrationは61/61、固定Terraform試験は2/2、生成3rootのinit・fmt・validateは9/9、packagingは3/3、typecheckとlintはexit0だった。
+
+## Scheduler起動とサービス別結果ログの実測（正式E2E Task 11、2026-10-10）
+
+patched Floci refresh.5（health `2.2.0-local-refresh.5-native`）に対して、`logging`と`scheduler`の2 suiteを実行した。日次Schedulerは読み取りだけで、変更も削除もしていない。製品、infra、Floci、`.devcontainer`は変更していない。
+
+### 実測結果
+
+| 対象 | run | 結果 | 実測内容 |
+| --- | --- | --- | --- |
+| OBS-02 CRUD成功ログ | e2e-a90fb040（`--suite logging`、272秒） | pass | POST 201 / GET 200 / PATCH 200 / DELETE 200 と、削除後のGET 404 について、HTTP、DynamoDB、S3、API結果ログを照合した。ログは返却されたrequest IDに紐づき、各1件だった |
+| OBS-02 入力拒否ログ | 同上 | pass | invalid JSON 400、media type 415、owner field 422、存在しないitem 404について、status、code、operationがAPI log groupのログと一致した。最後の正常対照200も配信された。rateは+5で保存は不変だった |
+| OBS-02 Gateway 401/403 | 同上 | pass | JWTなし401と書き込みのみのtokenによるGET 403で、HTTP、保存、S3 versionが不変だった。前後に正常対照のAPI結果ログが配信された上で、拒否側のAPI結果ログ不在を確認した。不在確認はsuite末尾の一括観測で行った |
+| OBS-03 清掃ログ対応 | 同上 | pass | 1回目はevaluated 1 / deletes 1、2回目はdeletes 0。各invokeのstartとendを別々の観測区間で対応づけ、実際のjob done、marker、checkpointとも一致した |
+| OPS-06 daily Schedule | e2e-94e3b315（`--suite scheduler`、223秒） | pass | `cron(0 3 * * ? *)`、UTC、window OFF、DISABLED、retry 2、event age 3600秒、入力`{}`、cleanup aliasの読み戻しがprobeの前後で同一だった。group内にはdaily 1件だけが残った |
+| OPS-06 one-time起動 | 同上 | pass | 同じScheduler groupにrun専用の`at()` Scheduleを作成し、読み戻した。作成の10秒後の時刻を指定し、期限の90秒以内にjobがdone、delete marker追加、checkpoint保存へ変化した。cleanup_startと終了ログ（status 200、evaluated 1、deletes 1）も配信された |
+| OBS-04 Gateway配信 | 各runのfixture smoke | unsupported（Floci） | stageのaccessLogSettings（destinationとformat）は設定gateで読み戻せた。実HTTPのAPI結果は配信されたが、gateway log groupのeventは0件だった。v2配信は`gateway-delivery-unsupported`として制限に記録する |
+
+one-time Scheduleは、作成の前にowned manifestへ予約した。削除後に`GetSchedule`で不在を読み戻してから、処理終了ログの待機、合成データの回収へ進んだ。2 runともcleanupは18/18で、errors 0、leaks 0だった。run終了時の掃引でも、owned Scheduleは残っていなかった。
+
+### 判定の根拠
+
+Schedule受付だけでは成功としない。passには、job done、delete marker、checkpoint、配信された清掃ログの4つが揃うことが必要である。`unsupported`と判定するのは次の2つだけである。
+
+- 受付後、期限内に変化が何もなく、清掃ログも1件もない。
+- CreateScheduleがHTTP 501と、既知のnot-implemented名で拒否された。
+
+それ以外の組み合わせは失敗とする。例として、状態だけ変化してログがない場合、ログだけ配信されて状態が変化しない場合、日次設定が変化した場合、Scheduleが削除されなかった場合は失敗になる。ログの欠落（`anyLog=false`）とログ内容の不一致（`anyLog=true`）は、`scheduler-probe.json`の固定語彙で区別している。
+
+### 未検証・制限
+
+- S3 TLS policy: 設定gateは、Deny policyがFlociへ保持されていること（policy-present）を読み戻した。Flociは`aws:SecureTransport`を評価しないため、HTTPリクエストの成功は強制の証拠にならない。強制はenforcement-unverifiedとして記録し、実AWSでの確認に残す。
+- 日次運転（03:00 UTCの実起動）、実AWS IAM（Scheduler roleのtrustやSourceArn）、非同期invokeの再試行（retry 2、event age 3600秒）の同等性は確認していない。one-time probeはretry 0で、1回だけ起動する構成にした。
+- v1直接proxyのログはv2/JWT経路の代用にしていない。Gateway配信の観測は、gateway log groupのeventの有無だけを使う。

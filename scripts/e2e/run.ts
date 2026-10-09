@@ -13,6 +13,8 @@ import '../../tests/e2e/floci/support/storage-cases.ts';
 import '../../tests/e2e/floci/support/image-cases.ts';
 import '../../tests/e2e/floci/support/cleanup-cases.ts';
 import '../../tests/e2e/floci/support/operation-cases.ts';
+import '../../tests/e2e/floci/support/logging-cases.ts';
+import '../../tests/e2e/floci/support/scheduler-cases.ts';
 
 export const deadlines = { run: 75 * 60_000, cleanup: 15 * 60_000, total: 90 * 60_000, http: 30_000, terraform: 10 * 60_000, authExpiry: 330_000, logs: 60_000, scheduler: 90_000, cleanupInvoke: 700_000 } as const;
 export class RunBudget {
