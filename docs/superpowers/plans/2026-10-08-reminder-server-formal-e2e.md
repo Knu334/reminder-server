@@ -41,7 +41,7 @@ TFの実apply・設定確認はL、driver/sourceの負例はI。`--layer floci|t
 - 実AWS/GHA/push/PR/mergeは禁止。実データ/私有.env/AWS credentials/private mapping/state/plan/画像backupの読み取り・hash計算・表示・コピーも禁止する。
 - Node24.21.0/npm11.11.1/Python3.13.16、TFを使う場合1.16.5/provider6.67.0。全npm/npx/Python/準備commandは `PATH=/tmp/aws-sdd-tools/node_modules/.bin:/tmp/aws-sdd-tools/bin:$PATH` を付ける。
 - 接続先は `http://floci:4566` とそのdiscoveryで確認した同一RFC1918 IPv4/owned S3 hostだけ。SDK/providerは明示region `ap-northeast-1`、local dummyまたはFloci発行の合成role credential、maxAttempts=1、profile/metadata/default endpoint fallbackなし。
-- Floci image `floci-local:2.2.0-refresh.2-native` / health `2.2.0-local-refresh.2-native` を維持。MiniStack/LocalStackへ変更しない。Docker socketはFlociのみ、FW/devcontainer編集なし。 2026-10-09にユーザー承認のうえ、Lambda AddPermissionのSourceAccount保持修正を追加したrefresh.2へ更新した（root commit 7a9b60f）。
+- Floci image `floci-local:2.2.0-refresh.3-native` / health `2.2.0-local-refresh.3-native` を維持。MiniStack/LocalStackへ変更しない。Docker socketはFlociのみ、FW/devcontainer編集なし。 2026-10-09にユーザー承認のうえ、Lambda AddPermissionのSourceAccount保持（refresh.2）とListVersionsByFunctionの版順修正（refresh.3）を追加した
 - 実Hosted UI PKCE/S256・JWKS署名・Gateway JWT・Docker Lambdaを維持。偽authorizer context/API直接invoke/route削除・並べ替え/認証や入力緩和をEへ混ぜない。
 - 製品値はaccess/ID300秒・refresh30日・rotation grace10秒、画像URL900秒、本文2097152/画像1048576 bytes、item1000/image134217728 bytes/rate120。E/Lはruntime_limits={}として規定値を維持する。容量境界は規定値のI、rate境界は合成count119から実HTTPで確認する。
 - cleanupは24h=86400000ms、lease20分=1200000ms、GSI12partition/KEYS_ONLY/page50、候補10000/delete5000/600秒/残り60秒/並行4とする。製品へtest clock/cap overrideを追加しない。

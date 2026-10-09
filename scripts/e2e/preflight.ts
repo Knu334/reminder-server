@@ -25,7 +25,7 @@ export async function preflight(record?: (result: ProcessEvidence) => Promise<vo
     const health = await localRequest(target, new URL('/_localstack/health', target.endpoint), {});
     if (health.status !== 200) throw new Error('health');
     const body: unknown = JSON.parse(health.bytes.toString('utf8'));
-    if (!body || typeof body !== 'object' || !('version' in body) || body.version !== '2.2.0-local-refresh.2-native') throw new Error('version');
+    if (!body || typeof body !== 'object' || !('version' in body) || body.version !== '2.2.0-local-refresh.3-native') throw new Error('version');
     return target;
   } catch { throw new Error('E2E_PREFLIGHT_FAILED'); }
 }
