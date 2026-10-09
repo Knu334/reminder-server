@@ -33,9 +33,9 @@ export function createSim(options: SimOptions = {}) {
   const observer = new LogObserver({ api: 'api-group', gateway: 'gateway-group', cleanup: 'cleanup-group' });
   const handler = withApiResultLogging(createApiHandler({ config: harnessConfig, service: h.service, owners: h.owners, images: h.images, clock }));
   let counter = 0; let logId = 0; let sequence = 0;
-  const subs = new Map<string, string>([['a', 'sim-subject-a'], ['b', 'sim-subject-b']]);
-  const sessionFor = (owner: string, scopes: string[]): AuthSession => {
-    const now = Math.floor(Date.now() / 1000); const claims = { iss: harnessConfig.issuer, sub: subs.get(owner)!, client_id: harnessConfig.clientId, iat: now - 1, exp: now + 300, scope: scopes.join(' '), token_use: 'access', jti: String(++sequence) };
+  const authIds: string[] = [];
+  const sessionFor = (authId: string, owner: string, scopes: string[]): AuthSession => {
+    const now = Math.floor(Date.now() / 1000); const claims = { iss: harnessConfig.issuer, sub: `sim-${authId}-${owner}`, client_id: harnessConfig.clientId, iat: now - 1, exp: now + 300, scope: scopes.join(' '), token_use: 'access', jti: String(++sequence) };
     return { accessToken: `${part({ alg: 'RS256' })}.${part(claims)}.sim`, refreshToken: `refresh-${sequence}`, claims };
   };
   async function gateway(path: string, request: { token?: string; method?: string; headers?: Record<string, string>; body?: string }): Promise<HttpResult> {
@@ -75,10 +75,13 @@ export function createSim(options: SimOptions = {}) {
     for (const [name, value] of Object.entries(cors)) out.set(name, value);
     return respond(result.statusCode ?? 0, result.body ?? '', Object.fromEntries(out.entries()));
   }
+  /** One auth per isolation key, like createCaseAuth: its own synthetic users A and B. */
+  const auths = new Map<string, unknown>();
+  function authFor(authId: string): unknown { let auth = auths.get(authId); if (!auth) { authIds.push(authId); auth = { login: async (owner: string, scopes: string[]) => sessionFor(authId, owner, scopes) }; auths.set(authId, auth); } return auth; }
   const rows = (table: string) => { const snap = h.snapshot(); return table === 'reminders' ? snap.reminders : table === 'jobs' ? snap.jobs as unknown as Record<string, unknown>[] : [...snap.storage, ...snap.rates]; };
   const fixture = {
     config: harnessConfig, target: { endpoint: 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map() }, prefix: 'sim',
-    auth: { login: async (owner: string, scopes: string[]) => sessionFor(owner, scopes) },
+    auth: authFor('default'),
     async request(path: string, request: { token?: string; method?: string; headers?: Record<string, string>; body?: string } = {}) {
       const result = await gateway(path, request); return options.tamper ? options.tamper(request.method ?? 'GET', path, result) : result;
     },
@@ -102,5 +105,5 @@ export function createSim(options: SimOptions = {}) {
   fixtureStates.set(fixture, { disposed: false } as never);
   suiteLogStates.set(fixture, { observer, pending: [], cleanup: new Map(), completions: [], lastInput: 0 });
   apiIo.raw = async (_fixture, _url, request) => request.headers.origin === ORIGIN ? { status: 200, headers: new Headers({ 'access-control-allow-origin': ORIGIN, 'access-control-allow-methods': 'GET,HEAD' }), bytes: Buffer.alloc(0) } : { status: 403, headers: new Headers(), bytes: Buffer.alloc(0) };
-  return { fixture, observer, harness: h, advance: (ms: number) => { offset += ms; } };
+  return { fixture, observer, harness: h, authFor: (authId: string) => authFor(authId) as SuiteFixture['auth'], authIds, advance: (ms: number) => { offset += ms; } };
 }

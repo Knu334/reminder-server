@@ -25,13 +25,15 @@ async function sleepFor(ms: number): Promise<void> { for (let left = ms; left > 
 
 type Owner = 'a' | 'b';
 type Actor = { owner: Owner; token: string; ownerId: string };
-type Shared = { sessions: Map<Owner, AuthSession>; passed: Set<string>; data: Map<string, unknown> };
+type Shared = { passed: Set<string>; data: Map<string, unknown> };
+/** Sessions belong to one case's (or one declared dependency group's) auth, so users never leak across independent cases. */
+const sessions = new WeakMap<object, Map<Owner, AuthSession>>();
 const shared = new WeakMap<object, Shared>();
-function stateOf(fixture: SuiteFixture): Shared { const key = fixtureState(fixture); let value = shared.get(key); if (!value) { value = { sessions: new Map(), passed: new Set(), data: new Map() }; shared.set(key, value); } return value; }
+function stateOf(fixture: SuiteFixture): Shared { const key = fixtureState(fixture); let value = shared.get(key); if (!value) { value = { passed: new Set(), data: new Map() }; shared.set(key, value); } return value; }
 /** A signed token for the shared owner A or B; renewed before its real five minute life ends. */
 async function actor(fixture: SuiteFixture, owner: Owner): Promise<Actor> {
-  const state = stateOf(fixture); let session = state.sessions.get(owner);
-  if (!session || session.claims.exp * 1000 - Date.now() < 60_000) { session = await fixture.auth.login(owner, [READ, WRITE], 'primary'); state.sessions.set(owner, session); }
+  let owned = sessions.get(fixture.auth); if (!owned) { owned = new Map(); sessions.set(fixture.auth, owned); } let session = owned.get(owner);
+  if (!session || session.claims.exp * 1000 - Date.now() < 60_000) { session = await fixture.auth.login(owner, [READ, WRITE], 'primary'); owned.set(owner, session); }
   return { owner, token: session.accessToken, ownerId: ownerIdFor(fixture.config.issuer, session.claims.sub) };
 }
 /** A second token for the same owner, used to show that the rate window is shared per owner. */
@@ -100,14 +102,6 @@ async function s3Versions(fixture: SuiteFixture): Promise<number> {
 type Snapshot = { domain: string; full: string; rate: number; s3: number };
 const snapshot = async (fixture: SuiteFixture, ...owners: Actor[]): Promise<Snapshot & { rates: number[] }> => { const rates: number[] = []; for (const owner of owners) rates.push(await rateTotal(fixture, owner.ownerId)); return { domain: await snapshotOwnedStorage(fixture, { excludeRate: true }), full: await snapshotOwnedStorage(fixture), rate: rates[0] ?? 0, rates, s3: await s3Versions(fixture) }; };
 
-const RATE_BUDGET = 100;
-/** Keeps a case inside one rate window: wait for the next UTC minute when the planned requests would not fit. */
-async function ensureRate(fixture: SuiteFixture, actors: Actor[], need: number): Promise<void> {
-  const minute = Math.floor(apiIo.now() / 60_000); let wait = false;
-  for (const owner of actors) { const row = await fixture.clients.dynamodb.send(new GetCommand({ TableName: fixture.config.ownerStateTable, Key: keys.rate(owner.ownerId, minute), ConsistentRead: true })); if (Number(row.Item?.count ?? 0) + need > RATE_BUDGET) wait = true; }
-  if (wait) await sleepFor(60_000 - (apiIo.now() % 60_000) + 1_000);
-}
-
 async function createItem(fixture: SuiteFixture, who: Actor, body: string, contentType?: string): Promise<Probe> {
   return send(fixture, '/v2/reminders', { token: who.token, method: 'POST', headers: jsonHeaders(contentType), body });
 }
@@ -131,7 +125,7 @@ const operationFor = (method: string, path: string): string => method === 'POST'
 
 /** Authenticated rejection from the Lambda: exact status/code, storage unchanged, rate consumed once, valid control afterwards. */
 async function rejectCase(fixture: SuiteFixture, recorder: CaseRecorder, score: Score, caseId: string, param: RejectParam): Promise<void> {
-  const who = await actor(fixture, 'a'); await ensureRate(fixture, [who], 4);
+  const who = await actor(fixture, 'a');
   const before = await snapshot(fixture, who);
   const headers = param.method === 'GET' ? {} : { ...jsonHeaders(param.contentType), ...(param.ifMatch ? { 'if-match': param.ifMatch } : {}) };
   const probe = await send(fixture, param.path, { token: who.token, method: param.method, headers, ...(param.body !== undefined ? { body: param.body } : {}) });
@@ -150,7 +144,7 @@ for (const param of rejectParams) register(param.id, [], (fixture, recorder, sco
 
 async function acceptCase(fixture: SuiteFixture, recorder: CaseRecorder, score: Score, caseId: string, param: AcceptParam): Promise<void> {
   if (param.bodyBytes !== undefined && Buffer.byteLength(param.body, 'utf8') !== param.bodyBytes) throw new Error('INPUT_BODY_REJECTED');
-  const who = await actor(fixture, 'a'); await ensureRate(fixture, [who], 4);
+  const who = await actor(fixture, 'a');
   const result = await createChecked(fixture, who, param.body, { storedId: param.storedId, ...(param.title !== undefined ? { title: param.title } : {}), ...(param.url !== undefined ? { url: param.url } : {}), ...(param.reminderTime !== undefined ? { reminderTime: param.reminderTime } : {}) }, param.contentType);
   recorder.recordInput({ httpStatus: result.probe.status });
   score.ok('http', 'created-201-location-etag-dto', result.http); score.ok('dynamodb', 'stored-reminder-and-counter-match', result.stored); score.ok('s3', 'no-image-versions-added', result.s3);
@@ -170,7 +164,7 @@ async function unchangedAround(fixture: SuiteFixture, who: Actor, action: () => 
 }
 
 register('API-01/gate-transition', [], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'a'); await ensureRate(fixture, [who], 4);
+  const who = await actor(fixture, 'a');
   const before = await snapshot(fixture, who); let health: Probe; let unpublishedReady: Probe; let unpublishedList: Probe;
   await fixture.setPublication(false);
   try { health = await send(fixture, '/healthz'); unpublishedReady = await send(fixture, '/readyz'); unpublishedList = await send(fixture, '/v2/reminders', { token: who.token }); }
@@ -214,7 +208,7 @@ for (const param of methodParams) register(param.id, [], async (fixture, recorde
 /** The Gateway edge answers: no Lambda result may exist between a delivered control before and after. */
 async function validControl(fixture: SuiteFixture, who: Actor): Promise<LogExpectation> { const probe = await send(fixture, '/v2/reminders', { token: who.token }); if (!listOf(probe)) throw new Error('API_CONTROL_FAILED'); return logOf(probe, 200, { operation: 'list' }); }
 for (const param of unknownPaths) register(param.id, [], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'a'); await ensureRate(fixture, [who], 4);
+  const who = await actor(fixture, 'a');
   const before = await validControl(fixture, who); await tick();
   const stored = await snapshot(fixture, who); const since = Date.now();
   const response = await send(fixture, param.path); const until = Date.now();
@@ -231,7 +225,7 @@ const CRUD_ID = 'crud-1';
 type Crud = { etag: string; text: string; dto: Record<string, unknown> };
 const crud = (fixture: SuiteFixture): Crud => { const value = stateOf(fixture).data.get('crud') as Crud | undefined; if (!value) throw new Error('CRUD_STATE_MISSING'); return value; };
 register('API-04/empty-list', [], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'a'); await ensureRate(fixture, [who], 3);
+  const who = await actor(fixture, 'a');
   const before = await snapshot(fixture, who); const probe = await send(fixture, '/v2/reminders', { token: who.token }); const after = await snapshot(fixture, who);
   recorder.recordInput({ httpStatus: probe.status });
   const state = await readOwnerState(fixture, who.ownerId);
@@ -240,7 +234,7 @@ register('API-04/empty-list', [], async (fixture, recorder, score) => {
   defer(recorder, 'API-04/empty-list', 'list-result-delivered', logOf(probe, 200, { operation: 'list' }));
 });
 register('API-04/create', [], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'a'); await ensureRate(fixture, [who], 3);
+  const who = await actor(fixture, 'a');
   const body = JSON.stringify(makeInput({ id: CRUD_ID, title: 'First title' }));
   const result = await createChecked(fixture, who, body, { storedId: CRUD_ID, title: 'First title', reminderTime: '2026-10-03T00:00:00.000Z' });
   recorder.recordInput({ httpStatus: result.probe.status });
@@ -250,7 +244,7 @@ register('API-04/create', [], async (fixture, recorder, score) => {
   stateOf(fixture).data.set('crud', { etag: result.probe.headers.get('etag')!, text: result.probe.text, dto } satisfies Crud);
 });
 register('API-04/get', ['API-04/create'], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'a'); await ensureRate(fixture, [who], 3); const created = crud(fixture);
+  const who = await actor(fixture, 'a'); const created = crud(fixture);
   const rowBefore = await readReminder(fixture, who.ownerId, CRUD_ID); const before = await snapshot(fixture, who);
   const probe = await send(fixture, `/v2/reminders/${CRUD_ID}`, { token: who.token }); const after = await snapshot(fixture, who); const rowAfter = await readReminder(fixture, who.ownerId, CRUD_ID);
   recorder.recordInput({ httpStatus: probe.status });
@@ -259,7 +253,7 @@ register('API-04/get', ['API-04/create'], async (fixture, recorder, score) => {
   defer(recorder, 'API-04/get', 'get-result-delivered', logOf(probe, 200, { operation: 'get' }));
 });
 register('API-04/patch', ['API-04/create'], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'a'); await ensureRate(fixture, [who], 3); const created = crud(fixture);
+  const who = await actor(fixture, 'a'); const created = crud(fixture);
   const stateBefore = await readOwnerState(fixture, who.ownerId); const versions = await s3Versions(fixture);
   const probe = await send(fixture, `/v2/reminders/${CRUD_ID}`, { token: who.token, method: 'PATCH', headers: { ...jsonHeaders(), 'if-match': created.etag }, body: JSON.stringify({ title: 'Updated title', hidden: true }) });
   recorder.recordInput({ httpStatus: probe.status });
@@ -271,7 +265,7 @@ register('API-04/patch', ['API-04/create'], async (fixture, recorder, score) => 
   if (!dto) throw new Error('CRUD_STATE_MISSING'); stateOf(fixture).data.set('crud', { etag: probe.headers.get('etag')!, text: probe.text, dto } satisfies Crud);
 });
 register('API-04/delete', ['API-04/patch'], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'a'); await ensureRate(fixture, [who], 5); const current = crud(fixture);
+  const who = await actor(fixture, 'a'); const current = crud(fixture);
   const stateBefore = await readOwnerState(fixture, who.ownerId); const versions = await s3Versions(fixture);
   const removed = await send(fixture, `/v2/reminders/${CRUD_ID}`, { token: who.token, method: 'DELETE', headers: { 'if-match': current.etag } });
   recorder.recordInput({ httpStatus: removed.status });
@@ -288,7 +282,7 @@ register('API-04/delete', ['API-04/patch'], async (fixture, recorder, score) => 
 // API-12/13 pagination on owner B, which owns nothing else until these cases have finished.
 const SEED = 'API-12/seed-51';
 register(SEED, [], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'b'); await ensureRate(fixture, [who], 55); const before = await snapshot(fixture, who); const stateBefore = await readOwnerState(fixture, who.ownerId);
+  const who = await actor(fixture, 'b'); const before = await snapshot(fixture, who); const stateBefore = await readOwnerState(fixture, who.ownerId);
   const probes: Probe[] = [];
   for (let n = 1; n <= 51; n++) { probes.push(await createItem(fixture, who, JSON.stringify(makeInput({ id: sequence(n, n)[0], title: `Item ${n}` })))); await apiIo.sleep(60); }
   recorder.recordInput({ httpStatus: probes.at(-1)!.status });
@@ -302,7 +296,7 @@ async function pageOf(fixture: SuiteFixture, who: Actor, query: string): Promise
 for (const [label, query, count] of [['default', '', 20], ['limit-1', '?limit=1', 1], ['limit-20', '?limit=20', 20], ['limit-50', '?limit=50', 50]] as const) {
   const id = `API-12/${label}`;
   register(id, [SEED], async (fixture, recorder, score) => {
-    const who = await actor(fixture, 'b'); await ensureRate(fixture, [who], 3); const before = await snapshot(fixture, who);
+    const who = await actor(fixture, 'b'); const before = await snapshot(fixture, who);
     const { probe, page } = await pageOf(fixture, who, query); const after = await snapshot(fixture, who); recorder.recordInput({ httpStatus: probe.status });
     score.ok('http', 'page-size-order-and-cursor', !!page && same(ids(page.items), sequence(1, count)) && page.items.every((item, index) => item.title === `Item ${index + 1}` && item.thumbnail === null) && typeof page.nextCursor === 'string');
     score.ok('dynamodb', 'list-leaves-rows-unchanged-rate-plus-one', before.domain === after.domain && after.rate === before.rate + 1); score.ok('s3', 'no-image-versions-added', before.s3 === after.s3);
@@ -312,7 +306,7 @@ for (const [label, query, count] of [['default', '', 20], ['limit-1', '?limit=1'
 for (const limit of [20, 7]) {
   const id = `API-12/walk-limit-${limit}`;
   register(id, [SEED], async (fixture, recorder, score) => {
-    const who = await actor(fixture, 'b'); await ensureRate(fixture, [who], 12); const before = await snapshot(fixture, who);
+    const who = await actor(fixture, 'b'); const before = await snapshot(fixture, who);
     const seen: string[] = []; let cursor: string | null = null; let pages = 0; let first: Probe | undefined; let linked = true;
     do {
       const { probe, page } = await pageOf(fixture, who, `?limit=${limit}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`); first ??= probe; pages++;
@@ -327,7 +321,7 @@ for (const limit of [20, 7]) {
 
 const TOMBSTONES = 'API-13/tombstone-seed';
 register(TOMBSTONES, [SEED, 'API-12/walk-limit-20'], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'b'); await ensureRate(fixture, [who], 8); const versions = await s3Versions(fixture); const stateBefore = await readOwnerState(fixture, who.ownerId);
+  const who = await actor(fixture, 'b'); const versions = await s3Versions(fixture); const stateBefore = await readOwnerState(fixture, who.ownerId);
   const removed: Probe[] = [];
   for (const id of sequence(1, 3)) {
     const current = await send(fixture, `/v2/reminders/${id}`, { token: who.token });
@@ -341,7 +335,7 @@ register(TOMBSTONES, [SEED, 'API-12/walk-limit-20'], async (fixture, recorder, s
   defer(recorder, TOMBSTONES, 'first-delete-result-delivered', logOf(removed[0]!, 200, { operation: 'remove' }));
 });
 register('API-13/tombstone-head-limit-3', [TOMBSTONES], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'b'); await ensureRate(fixture, [who], 22); const before = await snapshot(fixture, who);
+  const who = await actor(fixture, 'b'); const before = await snapshot(fixture, who);
   const head = await pageOf(fixture, who, '?limit=3'); recorder.recordInput({ httpStatus: head.probe.status });
   const seen: string[] = []; let cursor = head.page?.nextCursor ?? null; let pages = 0; let linked = !!head.page;
   while (cursor !== null && pages < 30) { const { page } = await pageOf(fixture, who, `?limit=3&cursor=${encodeURIComponent(cursor)}`); pages++; if (!page) { linked = false; break; } seen.push(...ids(page.items)); cursor = page.nextCursor; }
@@ -352,7 +346,7 @@ register('API-13/tombstone-head-limit-3', [TOMBSTONES], async (fixture, recorder
   defer(recorder, 'API-13/tombstone-head-limit-3', 'list-result-delivered', logOf(head.probe, 200, { operation: 'list' }));
 });
 register('API-13/tombstone-head-limit-1', [TOMBSTONES], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'b'); await ensureRate(fixture, [who], 6); const before = await snapshot(fixture, who);
+  const who = await actor(fixture, 'b'); const before = await snapshot(fixture, who);
   const steps: NonNullable<ReturnType<typeof listOf>>[] = []; let first: Probe | undefined; let cursor: string | null = null; let linked = true;
   for (let step = 0; step < 4; step++) { const { probe, page } = await pageOf(fixture, who, `?limit=1${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`); first ??= probe; if (!page) { linked = false; break; } steps.push(page); cursor = page.nextCursor; }
   recorder.recordInput({ httpStatus: first?.status ?? 0 }); const after = await snapshot(fixture, who);
@@ -372,14 +366,15 @@ async function cursorCase(fixture: SuiteFixture, recorder: CaseRecorder, score: 
   score.ok('dynamodb', 'rejection-storage-unchanged-rate-plus-one', before.domain === after.domain && after.rate === before.rate + 1); score.ok('s3', 'no-image-versions-added', before.s3 === after.s3);
   defer(recorder, caseId, 'rejection-result-delivered', logOf(probe, 422, { operation: 'list', code: 'INVALID_CURSOR' })); defer(recorder, caseId, 'control-result-delivered', logOf(control, 200, { operation: 'list' }));
 }
-for (const forged of forgedCursors) register(forged.id, [SEED], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'b'); await ensureRate(fixture, [who], 5);
+for (const forged of forgedCursors) register(forged.id, [], async (fixture, recorder, score) => {
+  const who = await actor(fixture, 'b');
+  for (const id of ['cur-1', 'cur-2']) if ((await createItem(fixture, who, JSON.stringify(makeInput({ id })))).status !== 201) throw new Error('CURSOR_SETUP_FAILED');
   const real = await pageOf(fixture, who, '?limit=1'); if (!real.page?.nextCursor) throw new Error('CURSOR_SETUP_FAILED');
   await cursorCase(fixture, recorder, score, forged.id, { sender: who, cursor: forged.forge(real.page.nextCursor), controlWho: who, controlCursor: real.page.nextCursor });
 });
 register('API-13/other-owner-cursor', [], async (fixture, recorder, score) => {
-  const owner = await actor(fixture, 'a'); const other = await actor(fixture, 'b'); await ensureRate(fixture, [owner, other], 6);
-  for (const id of ['cur-a-1', 'cur-a-2']) { const probe = await createItem(fixture, owner, JSON.stringify(makeInput({ id }))); if (![201, 409].includes(probe.status)) throw new Error('CURSOR_SETUP_FAILED'); }
+  const owner = await actor(fixture, 'a'); const other = await actor(fixture, 'b');
+  for (const id of ['cur-a-1', 'cur-a-2']) { const probe = await createItem(fixture, owner, JSON.stringify(makeInput({ id }))); if (probe.status !== 201) throw new Error('CURSOR_SETUP_FAILED'); }
   const real = await pageOf(fixture, owner, '?limit=1'); if (!real.page?.nextCursor) throw new Error('CURSOR_SETUP_FAILED');
   await cursorCase(fixture, recorder, score, 'API-13/other-owner-cursor', { sender: other, cursor: real.page.nextCursor, controlWho: owner, controlCursor: real.page.nextCursor });
 });
@@ -389,12 +384,13 @@ const OWN = 'API-05/seed';
 type Own = { aOnly: string; aSame: string; bSame: string };
 const own = (fixture: SuiteFixture): Own => { const value = stateOf(fixture).data.get('own') as Own | undefined; if (!value) throw new Error('OWN_STATE_MISSING'); return value; };
 register(OWN, [], async (fixture, recorder, score) => {
-  const a = await actor(fixture, 'a'); const b = await actor(fixture, 'b'); await ensureRate(fixture, [a, b], 5);
+  const a = await actor(fixture, 'a'); const b = await actor(fixture, 'b');
+  const versions = await s3Versions(fixture);
   const aOnly = await createItem(fixture, a, JSON.stringify(makeInput({ id: 'own-a-only', title: 'A only' }))); const aSame = await createItem(fixture, a, JSON.stringify(makeInput({ id: 'own-same', title: 'A same' }))); const bSame = await createItem(fixture, b, JSON.stringify(makeInput({ id: 'own-same', title: 'B same' })));
   recorder.recordInput({ httpStatus: bSame.status });
   const rows = [await readReminder(fixture, a.ownerId, 'own-same'), await readReminder(fixture, b.ownerId, 'own-same')] as unknown as (Record<string, unknown> | null)[];
   score.ok('http', 'both-owners-create-201', [aOnly, aSame, bSame].every(probe => probe.status === 201 && strongEtag(probe) && !!dtoOf(probe)));
-  score.ok('dynamodb', 'rows-independent-per-owner', a.ownerId !== b.ownerId && rows[0]?.title === 'A same' && rows[1]?.title === 'B same' && rows[0]?.ownerId === a.ownerId && rows[1]?.ownerId === b.ownerId); score.ok('s3', 'no-image-versions-added', true);
+  score.ok('dynamodb', 'rows-independent-per-owner', a.ownerId !== b.ownerId && rows[0]?.title === 'A same' && rows[1]?.title === 'B same' && rows[0]?.ownerId === a.ownerId && rows[1]?.ownerId === b.ownerId); score.ok('s3', 'no-image-versions-added', versions === await s3Versions(fixture));
   defer(recorder, OWN, 'a-create-result-delivered', logOf(aSame, 201, { operation: 'create' })); defer(recorder, OWN, 'b-create-result-delivered', logOf(bSame, 201, { operation: 'create' }));
   stateOf(fixture).data.set('own', { aOnly: aOnly.headers.get('etag')!, aSame: aSame.headers.get('etag')!, bSame: bSame.headers.get('etag')! } satisfies Own);
 });
@@ -408,7 +404,7 @@ for (const attempt of [
 ]) {
   const id = `API-05/other-owner-${attempt.name}`; const logName = attempt.http.replace(/^(b-[a-z]+-404).*/, '$1-result-delivered');
   register(id, [OWN], async (fixture, recorder, score) => {
-    const a = await actor(fixture, 'a'); const b = await actor(fixture, 'b'); await ensureRate(fixture, [a, b], 6); const etags = own(fixture);
+    const a = await actor(fixture, 'a'); const b = await actor(fixture, 'b'); const etags = own(fixture);
     const rowsBefore = await aRows(fixture, a); const before = await snapshot(fixture, a);
     const options = (token: string): Options => ({ token, method: attempt.method, ...(attempt.headers ? { headers: attempt.headers(etags) } : {}), ...(attempt.body !== undefined ? { body: attempt.body } : {}) });
     const foreign = await send(fixture, attempt.path('own-a-only'), options(b.token)); recorder.recordInput({ httpStatus: foreign.status });
@@ -421,7 +417,7 @@ for (const attempt of [
   });
 }
 register('API-05/other-owner-list', [OWN], async (fixture, recorder, score) => {
-  const a = await actor(fixture, 'a'); const b = await actor(fixture, 'b'); await ensureRate(fixture, [a, b], 5); const rowsBefore = await aRows(fixture, a); const before = await snapshot(fixture, a);
+  const a = await actor(fixture, 'a'); const b = await actor(fixture, 'b'); const rowsBefore = await aRows(fixture, a); const before = await snapshot(fixture, a);
   const seen: Record<string, unknown>[] = []; let cursor: string | null = null; let pages = 0; let first: Probe | undefined;
   do { const { probe, page } = await pageOf(fixture, b, `?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`); first ??= probe; pages++; if (!page) break; seen.push(...page.items); cursor = page.nextCursor; } while (cursor !== null && pages < 10);
   recorder.recordInput({ httpStatus: first?.status ?? 0 }); const after = await snapshot(fixture, a);
@@ -430,7 +426,7 @@ register('API-05/other-owner-list', [OWN], async (fixture, recorder, score) => {
   if (first) defer(recorder, 'API-05/other-owner-list', 'b-first-list-result-delivered', logOf(first, 200, { operation: 'list' }));
 });
 register('API-05/same-id-independent', [OWN], async (fixture, recorder, score) => {
-  const a = await actor(fixture, 'a'); const b = await actor(fixture, 'b'); await ensureRate(fixture, [a, b], 5); const etags = own(fixture); const versions = await s3Versions(fixture);
+  const a = await actor(fixture, 'a'); const b = await actor(fixture, 'b'); const etags = own(fixture); const versions = await s3Versions(fixture);
   const bBefore = await readReminder(fixture, b.ownerId, 'own-same');
   const patched = await send(fixture, '/v2/reminders/own-same', { token: a.token, method: 'PATCH', headers: { ...jsonHeaders(), 'if-match': etags.aSame }, body: '{"title":"A same 2"}' }); recorder.recordInput({ httpStatus: patched.status });
   const bGet = await send(fixture, '/v2/reminders/own-same', { token: b.token });
@@ -456,7 +452,7 @@ register('API-06/disallowed-origin-preflight', [], async (fixture, recorder, sco
   score.ok('dynamodb', 'no-storage-or-rate-change', unchanged); score.ok('s3', 'no-image-versions-added', s3);
 });
 for (const [id, origin, allowed] of [['API-06/allowed-origin-actual', ORIGIN, true], ['API-06/disallowed-origin-actual', OTHER_ORIGIN, false]] as const) register(id, [], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'a'); await ensureRate(fixture, [who], 3); const before = await snapshot(fixture, who);
+  const who = await actor(fixture, 'a'); const before = await snapshot(fixture, who);
   const probe = await send(fixture, '/v2/reminders', { token: who.token, headers: { origin } }); recorder.recordInput({ httpStatus: probe.status }); const after = await snapshot(fixture, who);
   const exposed = lower(probe.headers.get('access-control-expose-headers'));
   score.ok('http', allowed ? 'get-200-allow-origin-expose-headers-no-credentials' : 'get-200-no-allow-origin', !!listOf(probe) && noCredentials(probe) && (allowed ? probe.headers.get('access-control-allow-origin') === ORIGIN && ['allow', 'etag', 'location', 'retry-after', 'x-request-id'].every(name => exposed.includes(name)) : probe.headers.get('access-control-allow-origin') === null));
@@ -474,7 +470,7 @@ for (const [id, origin, allowed] of [['API-06/s3-allowed-origin-preflight', ORIG
 
 // API-14 gate order and the real per-owner limit.
 register('API-14/auth-refusal-rate-unchanged', [], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'a'); await ensureRate(fixture, [who], 4);
+  const who = await actor(fixture, 'a');
   const before = await validControl(fixture, who); await tick();
   const stored = await snapshot(fixture, who); const since = Date.now(); const refused = await send(fixture, '/v2/reminders'); const until = Date.now(); const after = await snapshot(fixture, who); await tick();
   recorder.recordInput({ httpStatus: refused.status }); const control = await validControl(fixture, who);
@@ -483,7 +479,7 @@ register('API-14/auth-refusal-rate-unchanged', [], async (fixture, recorder, sco
   defer(recorder, 'API-14/auth-refusal-rate-unchanged', 'refusal-api-result-absent', { service: 'api', requestId: edgeId(refused), since, until, status: 401, mode: 'absent' }, { before, after: control });
 });
 register('API-14/unpublished-503-rate-plus-one', [], async (fixture, recorder, score) => {
-  const who = await actor(fixture, 'a'); await ensureRate(fixture, [who], 3); const before = await snapshot(fixture, who); let probe: Probe;
+  const who = await actor(fixture, 'a'); const before = await snapshot(fixture, who); let probe: Probe;
   await fixture.setPublication(false);
   try { probe = await send(fixture, '/v2/reminders', { token: who.token }); } finally { await fixture.setPublication(true); }
   recorder.recordInput({ httpStatus: probe.status }); const after = await snapshot(fixture, who);

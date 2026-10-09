@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { definitions, caseActions, caseGuards, apiDefinitions } from './support/cases.ts';
+import { definitions, caseActions, caseGuards, apiDefinitions, caseAuthId } from './support/cases.ts';
 import './support/api-cases.ts';
 import { makeInput, makeJsonBodyBytes, MAX_JSON_BYTES, codePoints, urlOfCodePoints, rejectParams, acceptParams } from './support/input-fixtures.ts';
 
@@ -59,11 +59,11 @@ void test('every API requirement has E cases with four output expectations and a
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createEvidence, runCase, evidenceContext, flushPendingLogs, finalizeResults } from './support/evidence.ts';
+import { createEvidence, evidenceContext, flushPendingLogs, finalizeResults } from './support/evidence.ts';
 import { createSim } from './api-sim.ts';
 import type { Sim, SimOptions } from './api-sim.ts';
 import type { HttpResult } from './support/types.ts';
-import { executeSuites, runFixturePrerequisites, recordUnstarted } from '../../../scripts/e2e/run.ts';
+import { executeSuites, runFixturePrerequisites, recordUnstarted, runSuiteCase } from '../../../scripts/e2e/run.ts';
 import { fixtureStates } from './support/fixture.ts';
 import { snapshotOwnedStorage } from './support/storage.ts';
 
@@ -74,8 +74,8 @@ async function runSuite(ids: string[] | undefined, options: SimOptions = {}): Pr
     const selected = definitions.filter(def => def.suite === 'api' && (!ids || ids.includes(def.id)));
     const evidence = await createEvidence(selected, join(directory, 'run'));
     for (const def of selected) {
-      if (caseGuards.get(def.id)?.(sim.fixture)) { await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'prerequisite-failed' }); continue; }
-      await runCase(def, evidence, async recorder => { await caseActions.get(def.id)!(sim.fixture, recorder); });
+      // The real runner hook: guard, then the case's own isolation-key auth.
+      await runSuiteCase(evidence, def, sim.fixture, { createAuth: async (_suite, authId) => sim.authFor(authId), bind(view, source) { fixtureStates.set(view, fixtureStates.get(source)!); } });
     }
     await flushPendingLogs(evidence, async checks => sim.observer.flush(checks, Date.now()));
     await finalizeResults(evidence);
@@ -180,4 +180,19 @@ void test('settings failure leaves every API case not-run, never pass, fail or u
     assert.equal(api.length, apiDefinitions.length); assert.equal(inputs, 0);
     assert.ok(api.every(item => item.result.status === 'not-run' && item.result.reason === 'prerequisite-failed'));
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+void test('independent cases get their own synthetic users; only declared dependency groups share them', async () => {
+  const { sim, failures } = await runSuite(undefined);
+  assert.deepEqual(failures, []);
+  const api = definitions.filter(def => def.suite === 'api');
+  const keys = new Set(api.map(def => caseAuthId(def)));
+  assert.deepEqual(new Set(sim.authIds.filter(id => id !== 'default')), keys);
+  const groups = ['API-group-04', 'API-group-05', 'API-group-12-13'];
+  for (const group of groups) assert.ok(api.filter(def => caseAuthId(def) === group).length > 1, group);
+  assert.equal(keys.size, api.length - groups.reduce((sum, group) => sum + api.filter(def => caseAuthId(def) === group).length - 1, 0));
+  // Declared groups are exactly the dependency chains: every guard dependency shares the dependent's key.
+  for (const def of api) if (caseGuards.has(def.id)) assert.ok(['API-group-04', 'API-group-05', 'API-group-12-13'].includes(caseAuthId(def)), def.id);
+  // Each non-group case has an auth key equal to its own id.
+  for (const def of api.filter(def => !groups.includes(caseAuthId(def)))) assert.equal(caseAuthId(def), def.id);
 });

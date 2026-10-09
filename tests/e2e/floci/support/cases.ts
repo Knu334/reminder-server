@@ -157,5 +157,13 @@ definitions.push(...apiDefinitions);
 
 /** A guard returns true when a prerequisite case has not passed; the runner then records not-run. */
 export const caseGuards = new Map<string, (fixture: import('./types.ts').SuiteFixture) => boolean>();
-/** Suites whose cases share one set of owners (the suite default auth) because later cases reuse earlier data. */
-export const sharedCaseAuth = new Set<string>(['api']);
+/**
+ * Auth/isolation key of a case. Every case gets its own synthetic users A/B (its own RATE and data) except cases inside an
+ * explicit dependency group, which must see the same data: the CRUD life cycle, the owner-B pagination chain, and the ownership pair.
+ */
+const authGroups = new Map<string, string>([
+  ...apiDefinitions.filter(def => def.id.startsWith('API-04/')).map(def => [def.id, 'API-group-04'] as const),
+  ...apiDefinitions.filter(def => def.id.startsWith('API-05/')).map(def => [def.id, 'API-group-05'] as const),
+  ...apiDefinitions.filter(def => ['API-12/seed-51', 'API-12/default', 'API-12/limit-1', 'API-12/limit-20', 'API-12/limit-50', 'API-12/walk-limit-20', 'API-12/walk-limit-7'].includes(def.id) || def.id.startsWith('API-13/tombstone')).map(def => [def.id, 'API-group-12-13'] as const),
+]);
+export function caseAuthId(def: { id: string; suite: string }): string { return def.suite === 'api' ? authGroups.get(def.id) ?? def.id : def.id; }

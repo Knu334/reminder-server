@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { createEvidence, recordProcess, terraformActions, finalizeResults, runCase, evidenceContext, flushPendingLogs } from '../../tests/e2e/floci/support/evidence.ts';
 import type { ProcessEvidence } from '../../tests/e2e/floci/support/evidence.ts';
 import type { CaseDefinition, Evidence, ProvisionedStack, E2EFixture } from '../../tests/e2e/floci/support/types.ts';
-import { definitions, caseActions, caseGuards, sharedCaseAuth } from '../../tests/e2e/floci/support/cases.ts';
+import { definitions, caseActions, caseGuards, caseAuthId } from '../../tests/e2e/floci/support/cases.ts';
 import '../../tests/e2e/floci/support/auth-cases.ts';
 import '../../tests/e2e/floci/support/api-cases.ts';
 
@@ -167,7 +167,7 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
           const { suiteLogStates, cleanupChecksMatch, cleanupCaseMatches } = await import('../../tests/e2e/floci/support/logs.ts');
           const suiteResult = await executeSuites(executable, {
             create: suite => createFixture({ suite, publication: true }, fixture!),
-            async action(def, suite) { if (caseGuards.get(def.id)?.(suite)) { await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'prerequisite-failed' }); return; } await runCase(def, evidence, async recorder => { const view = { ...suite, auth: await createCaseAuth(suite, sharedCaseAuth.has(def.suite) ? `${def.suite}-default` : def.id) }; fixtureStates.set(view, fixtureState(suite)); suiteLogStates.set(view, suiteLogStates.get(suite)!); await caseActions.get(def.id)!(view, recorder); }); },
+            action: (def, suite) => runSuiteCase(evidence, def, suite, { createAuth: createCaseAuth, bind(view, source) { fixtureStates.set(view, fixtureState(source)); suiteLogStates.set(view, suiteLogStates.get(source)!); } }),
             async flush(suite) { const state = suiteLogStates.get(suite)!; await flushPendingLogs(evidence, async checks => { const results = await state.observer.flush(checks, Math.max(state.lastInput, fixtureState(suite).lastInput), 60_000, () => cleanupChecksMatch(state)); return results.map(result => ({ ...result, matched: result.matched && cleanupCaseMatches(state, result.caseId) })); }); },
             reset: suite => suite.resetSuite(),
             blocked: def => evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'prerequisite-failed' }),
@@ -201,6 +201,12 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
 }
 if (require.main === module) {
   void runMain(process.argv.slice(2)).then(code => { process.exitCode = code; }, () => { console.error('E2E_HARNESS_FAILED'); process.exitCode = 1; });
+}
+
+/** One case: a failed prerequisite is an explicit not-run; otherwise the case gets the auth of its own isolation group (its own synthetic users unless it is in a declared dependency group). */
+export async function runSuiteCase(evidence: Evidence, def: CaseDefinition, suite: import('../../tests/e2e/floci/support/types.ts').SuiteFixture, wiring: { createAuth(suite: import('../../tests/e2e/floci/support/types.ts').SuiteFixture, authId: string): Promise<import('../../tests/e2e/floci/support/types.ts').FixtureAuth>; bind(view: import('../../tests/e2e/floci/support/types.ts').SuiteFixture, source: import('../../tests/e2e/floci/support/types.ts').SuiteFixture): void }): Promise<void> {
+  if (caseGuards.get(def.id)?.(suite)) { await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'prerequisite-failed' }); return; }
+  await runCase(def, evidence, async recorder => { const view = { ...suite, auth: await wiring.createAuth(suite, caseAuthId(def)) }; wiring.bind(view, suite); await caseActions.get(def.id)!(view, recorder); });
 }
 
 /** Cases never started stay not-run: prerequisite-failed when the settings/smoke gate failed, implementation-pending when no action exists. */
