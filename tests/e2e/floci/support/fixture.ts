@@ -291,7 +291,7 @@ export async function fixtureSmoke(fixture: E2EFixture, input?: (status: number)
 }
 
 export function assertGatewayCors(actual: Cors | undefined): void {
-same({ ...actual, MaxAge: actual?.MaxAge ?? 0, AllowMethods: actual?.AllowMethods?.slice().sort(), ExposeHeaders: actual?.ExposeHeaders?.slice().sort() }, { AllowOrigins: ['https://extension.example.test'], AllowMethods: ['DELETE', 'GET', 'OPTIONS', 'PATCH', 'POST', 'PUT'], AllowHeaders: ['authorization', 'content-type', 'if-match'], ExposeHeaders: ['Allow', 'ETag', 'Location', 'Retry-After', 'X-Request-Id'], AllowCredentials: false, MaxAge: 0 });
+same({ ...actual, AllowCredentials: actual?.AllowCredentials ?? false, MaxAge: actual?.MaxAge ?? 0, AllowMethods: actual?.AllowMethods?.slice().sort(), ExposeHeaders: actual?.ExposeHeaders?.slice().sort() }, { AllowOrigins: ['https://extension.example.test'], AllowMethods: ['DELETE', 'GET', 'OPTIONS', 'PATCH', 'POST', 'PUT'], AllowHeaders: ['authorization', 'content-type', 'if-match'], ExposeHeaders: ['Allow', 'ETag', 'Location', 'Retry-After', 'X-Request-Id'], AllowCredentials: false, MaxAge: 0 });
 }
 
 export function gatewayRequestUrl(base: string, path: string): URL {

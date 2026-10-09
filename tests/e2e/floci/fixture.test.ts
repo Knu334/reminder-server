@@ -152,6 +152,7 @@ void test('failed smoke retains actual HTTP input progress for honest dependent 
 void test('Gateway CORS compares public settings with the API service zero MaxAge default', async () => {
   const { assertGatewayCors } = await import('./support/fixture.ts'); const cors = { AllowOrigins: ['https://extension.example.test'], AllowMethods: ['GET', 'POST', 'PATCH', 'DELETE', 'PUT', 'OPTIONS'], AllowHeaders: ['authorization', 'content-type', 'if-match'], ExposeHeaders: ['ETag', 'Location', 'X-Request-Id', 'Retry-After', 'Allow'], AllowCredentials: false, MaxAge: 0 };
   assert.doesNotThrow(() => assertGatewayCors(cors));
+  const { AllowCredentials: _omitted, ...omitsFalseDefault } = cors; assert.doesNotThrow(() => assertGatewayCors(omitsFalseDefault));
   for (const changed of [{ AllowCredentials: true }, { AllowOrigins: ['https://foreign.test'] }, { MaxAge: 300 }, { AllowMethods: ['GET'] }, { ExposeHeaders: [] }]) assert.throws(() => assertGatewayCors({ ...cors, ...changed }), /SETTINGS_MISMATCH/);
 });
 
