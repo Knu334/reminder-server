@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, createPublicKey, randomBytes, randomUUID, verify } from 'node:crypto';
-import { AdminCreateUserCommand, AdminDisableUserCommand, AdminSetUserPasswordCommand, AdminGetUserCommand, AdminDeleteUserCommand, CreateUserPoolClientCommand, DescribeUserPoolClientCommand, DeleteUserPoolClientCommand, CreateUserPoolCommand, CreateResourceServerCommand, DescribeUserPoolCommand, UpdateUserPoolCommand, DeleteUserPoolCommand, ListUserPoolsCommand, ListUserPoolClientsCommand } from '@aws-sdk/client-cognito-identity-provider';
+import { RevokeTokenCommand, AdminCreateUserCommand, AdminDisableUserCommand, AdminSetUserPasswordCommand, AdminGetUserCommand, AdminDeleteUserCommand, CreateUserPoolClientCommand, DescribeUserPoolClientCommand, DeleteUserPoolClientCommand, CreateUserPoolCommand, CreateResourceServerCommand, DescribeUserPoolCommand, UpdateUserPoolCommand, DeleteUserPoolCommand, ListUserPoolsCommand, ListUserPoolClientsCommand } from '@aws-sdk/client-cognito-identity-provider';
 import type { UserPoolClientType, UserPoolType } from '@aws-sdk/client-cognito-identity-provider';
 import type { SuiteFixture, FixtureAuth, AuthSession } from './types.ts';
 import { fixtureState } from './fixture.ts';
@@ -96,7 +96,8 @@ export async function createCaseAuth(fixture: SuiteFixture, caseId: string): Pro
   async authorize(owner, scopes, kind, options = {}) { const flow = await begin(owner, scopes, kind, options.challengeMethod); return { ...(flow.code ? { code: flow.code } : {}), ...(flow.rejection ? { rejection: { ...(flow.rejection.status !== undefined ? { status: flow.rejection.status } : {}), ...(flow.rejection.error ? { error: flow.rejection.error } : {}) } } : {}), verifier: flow.verifier, callback, clientId: flow.clientId }; },
   exchangeCode(fields) { return postToken(fields); },
   async requestRefresh(token, kind) { return postToken({ grant_type: 'refresh_token', client_id: (await control(kind)).client, refresh_token: token }); },
-  async revoke(current) { const response = await localRequest(fixture.target, new URL(state.stack.bindings.cognito_auth_base_url!.replace(/\/$/, '') + '/oauth2/revoke'), { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: current.refreshToken, client_id: current.claims.client_id }).toString() }); if (response.status !== 200) throw new Error('TOKEN_REVOKE_FAILED'); },
+  // Floci serves no hosted /oauth2/revoke route; the RevokeToken API action revokes the refresh-token family (AWS-equivalent).
+  async revoke(current) { await state.cognito.send(new RevokeTokenCommand({ ClientId: current.claims.client_id, Token: current.refreshToken })); },
   async disable(owner) { const user = await createUser(primaryPool, owner); await state.cognito.send(new AdminDisableUserCommand({ UserPoolId: user.pool, Username: user.username })); const read = await state.cognito.send(new AdminGetUserCommand({ UserPoolId: user.pool, Username: user.username })); if (read.Enabled !== false) throw new Error('AUTH_FIXTURE_FAILED'); },
   verifySession(current) { const jwks = auth.jwks.get(current.claims.iss); if (!jwks) throw new Error('JWKS_UNAVAILABLE'); verifyJwt(current.accessToken, jwks, { client_id: current.claims.client_id, lifetime: 300 }); },
   verifiesAgainstPrimaryKeys(current) { const jwks = auth.jwks.get(fixture.config.issuer); if (!jwks) throw new Error('JWKS_UNAVAILABLE'); try { verifySignature(current.accessToken, jwks); return true; } catch { return false; } } };

@@ -113,7 +113,7 @@ run('AUTH-05/foreign-issuer', async (fixture, recorder, score) => {
 });
 
 run('AUTH-07/scope-and-id-token', async (fixture, recorder, score) => {
-  const control = await fixture.auth.login('a', [READ], 'primary'); const readOnly = await fixture.auth.login('a', [READ], 'primary'); const writeOnly = await fixture.auth.login('a', [WRITE], 'primary');
+  const control = await fixture.auth.login('a', [READ, 'openid'], 'primary'); const readOnly = await fixture.auth.login('a', [READ], 'primary'); const writeOnly = await fixture.auth.login('a', [WRITE], 'primary');
   if (!control.idToken) throw new Error('AUTH_ID_TOKEN_MISSING');
   await refusals(fixture, recorder, score, 'AUTH-07/scope-and-id-token', control.accessToken, [
     { token: readOnly.accessToken, method: 'POST', body: '{}', status: 403, http: 'read-only-post-403', log: 'read-only-post-api-result-absent' },
