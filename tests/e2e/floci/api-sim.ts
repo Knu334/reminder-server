@@ -27,7 +27,7 @@ const SCOPES: Record<string, string | null> = {
 const part = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');
 
 export type Sim = ReturnType<typeof createSim>;
-export type SimOptions = { /** Replace the handler's answer to break one behavior (negative tests). */ tamper?: (method: string, path: string, result: HttpResult) => HttpResult; /** Alter the stored original as S3 would return it (negative tests). */ tamperObject?: (bytes: Buffer) => Buffer; /** Alter what the signed image URL serves (negative tests). */ tamperFetch?: (result: HttpResult) => HttpResult };
+export type SimOptions = { /** Replace the handler's answer to break one behavior (negative tests). */ tamper?: (method: string, path: string, result: HttpResult) => HttpResult; /** Alter the stored original as S3 would return it (negative tests). */ tamperObject?: (bytes: Buffer) => Buffer; /** Alter what the signed image URL serves (negative tests). */ tamperFetch?: (result: HttpResult) => HttpResult; /** How the double's image URLs treat a changed signature or an expired short URL (IMG-09). */ signature?: 'enforced' | 'lenient-tamper' | 'lenient-expiry' | 'control-fails' | 'unexpected-tamper' };
 export function createSim(options: SimOptions = {}) {
   const h = createHarness(); h.setPublication(true);
   // The store's synthetic clock starts in 2026-10; move it to now so DTO times (e.g. the 900 s URL end) are comparable with request times.
@@ -123,9 +123,15 @@ export function createSim(options: SimOptions = {}) {
   imageIo.expirySeconds = url => { try { return Number(new URL(url).searchParams.get('expires')); } catch { return Number.NaN; } };
   imageIo.fetch = async (_fixture, url, ref) => {
     const parsed = new URL(url); if (parsed.hostname !== 'synthetic.test' || parsed.pathname !== `/${ref.key}` || parsed.searchParams.get('versionId') !== ref.versionId) throw new Error('IMAGE_URL_REJECTED');
-    const bytes = Buffer.from(await h.images.get(ref, budget())); const result = { status: 200, headers: new Headers({ 'content-type': mimes.get(`${ref.key}#${ref.versionId}`) ?? 'application/octet-stream' }), bytes };
-    return options.tamperFetch ? options.tamperFetch(result) : result;
+    const mode = options.signature ?? 'enforced'; const refuse = (status: number): HttpResult => ({ status, headers: new Headers(), bytes: Buffer.alloc(0) });
+    const serve = async (): Promise<HttpResult> => { const bytes = Buffer.from(await h.images.get(ref, budget())); const result = { status: 200, headers: new Headers({ 'content-type': mimes.get(`${ref.key}#${ref.versionId}`) ?? 'application/octet-stream' }), bytes }; return options.tamperFetch ? options.tamperFetch(result) : result; };
+    if (mode === 'control-fails') return refuse(403);
+    if (parsed.searchParams.get('sig') === 'bad') return mode === 'lenient-tamper' ? serve() : refuse(mode === 'unexpected-tamper' ? 500 : 403);
+    const expiry = Number(parsed.searchParams.get('exp')); if (Number.isFinite(expiry) && expiry > 0 && apiIo.now() > expiry) return mode === 'lenient-expiry' ? serve() : refuse(403);
+    return serve();
   };
+  // Signature seams: the double's URLs carry a plain marker instead of SigV4; time is the simulated clock.
+  imageIo.tamper = url => `${url}&sig=bad`; imageIo.shortUrl = async (_fixture, ref, seconds) => `https://synthetic.test/${ref.key}?versionId=${ref.versionId}&exp=${apiIo.now() + seconds * 1000}`; imageIo.sleep = ms => apiIo.sleep(ms);
   fixtureStates.set(fixture, { disposed: false } as never);
   suiteLogStates.set(fixture, { observer, pending: [], cleanup: new Map(), completions: [], lastInput: 0 });
   apiIo.raw = async (_fixture, _url, request) => request.headers.origin === ORIGIN ? { status: 200, headers: new Headers({ 'access-control-allow-origin': ORIGIN, 'access-control-allow-methods': 'GET,HEAD' }), bytes: Buffer.alloc(0) } : { status: 403, headers: new Headers(), bytes: Buffer.alloc(0) };

@@ -56,6 +56,9 @@ export async function fetchOwnedImage(fixture: SuiteFixture, url: string, ref: I
 /** Seams for the offline double: production uses the guarded local transport and the SigV4 expiry parameter. */
 export const imageIo = {
   fetch: (fixture: SuiteFixture, url: string, ref: ImageRef): Promise<HttpResult> => fetchOwnedImage(fixture, url, ref),
+  tamper: (url: string): string => tamperUrlSignature(url),
+  shortUrl: (fixture: SuiteFixture, ref: ImageRef, seconds: number): Promise<string> => shortLivedUrl(fixture, ref, seconds),
+  sleep: (ms: number): Promise<void> => new Promise<void>(resolve => setTimeout(resolve, ms)),
   expirySeconds: (url: string): number => { try { return Number(new URL(url).searchParams.get('X-Amz-Expires')); } catch { return Number.NaN; } },
 };
 
@@ -71,14 +74,19 @@ export async function shortLivedUrl(fixture: SuiteFixture, ref: ImageRef, second
   if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 60) throw new Error('IMAGE_FIXTURE_REJECTED');
   return getSignedUrl(fixture.clients.s3, new GetObjectCommand({ Bucket: fixture.config.imagesBucket, Key: ref.key, VersionId: ref.versionId }), { expiresIn: seconds });
 }
-export type SignatureProbeInput = { control: string; tampered: string; shortLived: string; fetch(url: string): Promise<number>; waitUntilExpired(): Promise<void> };
+export type SignatureProbeInput = { control: string; tampered: string; shortLived: string; expected: Buffer; fetch(url: string): Promise<{ status: number; bytes: Buffer }>; waitUntilExpired(): Promise<void> };
+export type SignatureOutcome = 'enforced' | 'unsupported' | 'control-failed' | 'unexpected';
 /**
- * Compare a valid control, a signature-only change and a short-lived independent URL after expiry. A lenient server (tampered or
- * expired URL accepted) means signature enforcement is unsupported here; a failing control means the probe itself proves nothing.
+ * Compare a valid control, a signature-only change and a short-lived independent URL after expiry. Only a 400/403 refusal counts as
+ * enforcement and only an accepted answer (2xx with the expected original bytes) counts as leniency; any other answer (404, 5xx, a
+ * 2xx with other bytes) is unexpected and proves nothing. A failing control means the probe itself measures nothing.
  */
-export async function probeSignatureEnforcement(input: SignatureProbeInput): Promise<'enforced' | 'unsupported' | 'control-failed'> {
+export async function probeSignatureEnforcement(input: SignatureProbeInput): Promise<SignatureOutcome> {
+  const good = (result: { status: number; bytes: Buffer }): boolean => result.status === 200 && result.bytes.equals(input.expected);
   const [control, early] = [await input.fetch(input.control), await input.fetch(input.shortLived)];
-  if (control !== 200 || early !== 200) return 'control-failed';
+  if (!good(control) || !good(early)) return 'control-failed';
   const tampered = await input.fetch(input.tampered); await input.waitUntilExpired(); const late = await input.fetch(input.shortLived);
-  return [400, 403].includes(tampered) && [400, 403].includes(late) ? 'enforced' : 'unsupported';
+  const classify = (result: { status: number; bytes: Buffer }): 'rejected' | 'accepted' | 'unexpected' => [400, 403].includes(result.status) ? 'rejected' : result.status >= 200 && result.status < 300 && result.bytes.equals(input.expected) ? 'accepted' : 'unexpected';
+  const [a, b] = [classify(tampered), classify(late)];
+  return a === 'unexpected' || b === 'unexpected' ? 'unexpected' : a === 'accepted' || b === 'accepted' ? 'unsupported' : 'enforced';
 }

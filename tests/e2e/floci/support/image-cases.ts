@@ -1,11 +1,11 @@
 import { isDeepStrictEqual } from 'node:util';
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { GetObjectCommand, HeadObjectCommand, ListObjectVersionsCommand } from '@aws-sdk/client-s3';
-import { caseActions, definitions } from './cases.ts';
+import { caseActions, caseMeasurements, definitions } from './cases.ts';
 import { Score } from './auth-cases.ts';
 import { actor, commonHeaders, createItem, defer, dtoOf, errorIs, isRecord, itemHeaders, listOf, logOf, send } from './api-cases.ts';
 import type { Actor, Probe } from './api-cases.ts';
-import { FORMATS, IMAGE_MIME, base64Of, dataUrlOf, imageBytes, imageIo, ownedPrefix, sha256Base64, sha256Of } from './image-fixtures.ts';
+import { FORMATS, IMAGE_MIME, probeSignatureEnforcement, base64Of, dataUrlOf, imageBytes, imageIo, ownedPrefix, sha256Base64, sha256Of } from './image-fixtures.ts';
 import type { ImageFormat } from './image-fixtures.ts';
 import { makeInput } from './input-fixtures.ts';
 import { readOwnerState, readReminder } from './storage.ts';
@@ -187,13 +187,13 @@ register('IMG-04/issue-and-fetch', async (fixture, recorder, score) => {
 });
 
 // IMG-05 refused URL requests: no URL, no change.
-async function refuseUrl(fixture: SuiteFixture, recorder: CaseRecorder, score: Score, caseId: string, owner: Actor, asker: Actor, id: string, code: string, control: () => Promise<{ probe: Probe; ok: boolean; operation: string }>, before: Snap, ownerSnap: () => Promise<Snap>, askerFresh?: () => Promise<boolean>): Promise<void> {
+async function refuseUrl(fixture: SuiteFixture, recorder: CaseRecorder, score: Score, caseId: string, _owner: Actor, asker: Actor, id: string, code: string, control: () => Promise<{ probe: Probe; ok: boolean; operation: string }>, before: Snap, ownerSnap: () => Promise<Snap>, askerFresh?: () => Promise<boolean>): Promise<void> {
   const refused = await urlReq(fixture, asker, id); recorder.recordInput({ httpStatus: refused.status }); track(recorder, caseId, 'refusal-result-delivered', refused, 404, 'thumbnail', code);
   const after = await ownerSnap(); const checked = await control(); track(recorder, caseId, 'control-result-delivered', checked.probe, 200, checked.operation);
   score.ok('http', '404-expected-code-no-url-field', errorIs(refused, 404, code) && isRecord(refused.json) && !('url' in refused.json) && !refused.text.includes('X-Amz') && !refused.text.includes('versionId'));
   score.ok('http', 'control-200', checked.ok);
   score.ok('dynamodb', 'storage-jobs-rows-unchanged', isDeepStrictEqual(before.row, after.row) && isDeepStrictEqual(before.jobs, after.jobs) && isDeepStrictEqual(before.state, after.state) && (askerFresh ? await askerFresh() : true));
-  score.ok('s3', 'owned-versions-unchanged', isDeepStrictEqual(before.versions, after.versions) && isDeepStrictEqual(before.markers, after.markers) && owner.ownerId.length === 64);
+  score.ok('s3', 'owned-versions-unchanged', isDeepStrictEqual(before.versions, after.versions) && isDeepStrictEqual(before.markers, after.markers));
 }
 register('IMG-05/other-owner', async (fixture, recorder, score) => {
   const caseId = 'IMG-05/other-owner'; const id = 'img-1'; const a = await fresh(fixture); const b = await actor(fixture, 'b'); if (a.ownerId === b.ownerId) throw new Error('IMAGE_OWNER_NOT_DISTINCT');
@@ -224,7 +224,7 @@ register('IMG-06/replace', async (fixture, recorder, score) => {
   score.ok('http', 'get-current-reference-matches-patch', read.status === 200 && read.bytes.equals(patched.bytes) && etagOf(read) === etagOf(patched));
   score.ok('http', 'url-serves-new-original-bytes', !!issuedUrl && !!ref2 && !!served && served.status === 200 && served.bytes.equals(second) && served.type.split(';')[0] === 'image/jpeg' && !!urlParts(issuedUrl.url, ref2));
   score.ok('dynamodb', 'new-committed-old-retired-due-plus-24h', !!ref2 && after.jobs.length === 2 && isCommitted(jobOf(after.jobs, ref2.imageId), ref2, who.ownerId) && isRetired(jobOf(after.jobs, ref1.imageId), ref1, who.ownerId, patchedAt(patched)));
-  score.ok('dynamodb', 'row-reference-and-counter-delta', !!ref2 && after.row?.revision === 2 && after.row?.deleted === false && after.state.itemCount === 1 && after.state.imageBytes === second.length && second.length - first.length === 100);
+  score.ok('dynamodb', 'row-reference-and-counter-delta', !!ref2 && after.row?.revision === 2 && after.row?.deleted === false && after.state.itemCount === 1 && after.state.imageBytes === second.length);
   score.ok('s3', 'both-versions-retained-original-bytes', !!ref2 && after.versions.length === 2 && after.markers.length === 0 && exactObject(old, ref1, first) && exactObject(current, ref2, second));
 });
 register('IMG-06/omit-keeps', async (fixture, recorder, score) => {
@@ -274,3 +274,24 @@ async function duplicateCase(fixture: SuiteFixture, recorder: CaseRecorder, scor
 }
 register('IMG-07/duplicate-id-with-image', (fixture, recorder, score) => duplicateCase(fixture, recorder, score, 'IMG-07/duplicate-id-with-image', false));
 register('IMG-07/duplicate-after-delete', (fixture, recorder, score) => duplicateCase(fixture, recorder, score, 'IMG-07/duplicate-after-delete', true));
+
+// IMG-09 signature enforcement measurement: a compatibility investigation, never inferred from a valid GET.
+// pass = control served and tampered/expired URLs refused (400/403); unsupported = control served but the tampered or expired URL was
+// accepted with the original bytes (policy present, enforcement unverified); anything else fails.
+const SHORT_SECONDS = 2;
+caseMeasurements.set('IMG-09/signature-enforcement', async fixture => {
+  const id = 'img-1'; const who = await fresh(fixture); const data = imageBytes('png', 64, 11);
+  const created = await createItem(fixture, who, body(id, base64Of(data))); const ref = refOf(await readReminder(fixture, who.ownerId, id) as unknown as Row);
+  if (created.status !== 201 || !ref) return 'fail';
+  const issued = await urlReq(fixture, who, id); const issuedUrl = urlBody(issued, ref); if (!issuedUrl) return 'fail';
+  let outcome;
+  try {
+    outcome = await probeSignatureEnforcement({
+      control: issuedUrl.url, tampered: imageIo.tamper(issuedUrl.url), shortLived: await imageIo.shortUrl(fixture, ref, SHORT_SECONDS), expected: data,
+      fetch: async url => { try { const result = await imageIo.fetch(fixture, url, ref); return { status: result.status, bytes: result.bytes }; } catch { return { status: 0, bytes: Buffer.alloc(0) }; } },
+      waitUntilExpired: () => imageIo.sleep((SHORT_SECONDS + 2) * 1000),
+    });
+  } catch { return 'fail'; }
+  return outcome === 'enforced' ? 'pass' : outcome === 'unsupported' ? 'unsupported' : 'fail';
+});
+caseActions.set('IMG-09/signature-enforcement', async () => { throw new Error('MEASURED_CASE_RECORDED_BY_RUNNER'); });

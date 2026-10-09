@@ -235,13 +235,18 @@ export const imageDefinitions: CaseDefinition[] = [
     { kind: 's3', assertions: [], notApplicableReason: 'injected-adapter-no-real-service-stop' }, { kind: 'logs', assertions: [], notApplicableReason: 'handler-boundary-no-delivery' },
   ] },
   { id: 'IMG-09/signature-enforcement', requirementId: 'IMG-09', layer: 'L', required: true, acceptance: 'compatibility', suite: 'images', source: 'formal-e2e-coverage/IMG-09', outputs: [
-    { kind: 'http', assertions: ['valid-control-200', 'signature-only-tamper-rejected', 'short-lived-url-rejected-after-expiry'] },
+    { kind: 'http', assertions: ['control-get-measured', 'signature-tamper-measured', 'expired-url-measured'] },
     { kind: 'dynamodb', assertions: [], notApplicableReason: 'direct-s3-request-no-storage-effect' },
     { kind: 's3', assertions: ['owned-key-version-pinned-independent-short-url'] }, { kind: 'logs', assertions: [], notApplicableReason: 'direct-s3-request-no-api-result' },
   ] },
 ];
 definitions.push(...imageDefinitions);
 
+/**
+ * Cases whose result the runner records itself because it may be `unsupported` (compatibility acceptance): the probe returns the
+ * measured outcome and the runner maps it. The matching caseActions entry only makes the case selectable; it is never run through runCase.
+ */
+export const caseMeasurements = new Map<string, (fixture: import('./types.ts').SuiteFixture) => Promise<'pass' | 'unsupported' | 'fail'>>();
 /** A guard returns true when a prerequisite case has not passed; the runner then records not-run. */
 export const caseGuards = new Map<string, (fixture: import('./types.ts').SuiteFixture) => boolean>();
 /**

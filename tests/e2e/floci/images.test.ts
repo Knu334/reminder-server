@@ -29,13 +29,33 @@ void test('the image inventory has independent E cases for IMG-01..07, an I case
     assert.equal(caseGuards.has(def.id), false, `${def.id} has no dependency group`);
   }
   const integration = images.find(def => def.id.startsWith('IMG-08'))!; assert.equal(integration.layer, 'I'); assert.equal(caseActions.has(integration.id), false);
-  const signature = images.find(def => def.id.startsWith('IMG-09'))!; assert.equal(signature.layer, 'L'); assert.equal(signature.acceptance, 'compatibility'); assert.equal(caseActions.has(signature.id), false);
+  const signature = images.find(def => def.id.startsWith('IMG-09'))!; assert.equal(signature.layer, 'L'); assert.equal(signature.acceptance, 'compatibility'); assert.equal(caseActions.has(signature.id), true);
 });
 
 void test('IMG-08 names runtime tests that exist and IMG-09 is never executed as a plain valid-GET pass', async () => {
   const source = await readFile(join(process.cwd(), 'tests/runtime/images.test.ts'), 'utf8'); const i = images.find(def => def.id.startsWith('IMG-08'))!;
   for (const name of i.outputs.find(output => output.kind === 'dynamodb')!.assertions) assert.ok(source.includes(`"${name}"`), name);
-  const l = images.find(def => def.id.startsWith('IMG-09'))!; assert.ok(l.outputs[0]!.assertions.includes('signature-only-tamper-rejected') && l.outputs[0]!.assertions.includes('short-lived-url-rejected-after-expiry'));
+  const l = images.find(def => def.id.startsWith('IMG-09'))!; assert.deepEqual(l.outputs[0]!.assertions, ['control-get-measured', 'signature-tamper-measured', 'expired-url-measured']);
+});
+
+async function runSignature(signature: NonNullable<SimOptions['signature']>): Promise<Saved> {
+  const directory = await mkdtemp(join(tmpdir(), 'images-signature-')); const sim = createSim({ signature });
+  try {
+    const def = images.find(item => item.id === 'IMG-09/signature-enforcement')!; const evidence = await createEvidence([def], join(directory, 'run'));
+    await runSuiteCase(evidence, def, sim.fixture, { createAuth: async (_suite, authId) => sim.authFor(authId), bind(view, source) { fixtureStates.set(view, fixtureStates.get(source)!); } });
+    await finalizeResults(evidence);
+    const saved = JSON.parse(await readFile(join(evidenceContext(evidence).directory, 'results.json'), 'utf8')) as { cases: { id: string; result: Saved }[] };
+    return saved.cases[0]!.result;
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}
+void test('IMG-09 is executed: enforced passes, lenient tamper or expiry is unsupported, and an unusable control or unexpected answer fails', async () => {
+  assert.equal(caseActions.has('IMG-09/signature-enforcement'), true);
+  const enforced = await runSignature('enforced'); assert.equal(enforced.status, 'pass'); assert.ok(enforced.outputs?.every(output => output.status !== 'fail'));
+  for (const mode of ['lenient-tamper', 'lenient-expiry'] as const) {
+    const result = await runSignature(mode); assert.equal(result.status, 'unsupported', mode); assert.equal(result.reason, 'signature-enforcement-unsupported', mode);
+    assert.ok(result.outputs?.filter(output => output.assertions.length).every(output => output.status === 'pass' && output.assertions.length > 0));
+  }
+  for (const mode of ['control-fails', 'unexpected-tamper'] as const) assert.equal((await runSignature(mode)).status, 'fail', mode);
 });
 
 type Saved = { id: string; status: string; reason?: string; outputs?: { kind: string; status: string; assertions: { name: string; status: string }[] }[] };

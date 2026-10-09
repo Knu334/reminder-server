@@ -464,11 +464,16 @@ void test('image_url_signature_helpers_alter_only_the_signature_and_the_probe_se
   for (const name of ['versionId', 'X-Amz-Expires']) assert.equal(left.searchParams.get(name), right.searchParams.get(name));
   assert.equal(left.pathname, right.pathname); assert.equal(left.host, right.host);
   assert.throws(() => tamperUrlSignature('http://floci:4566/x?versionId=1'), /IMAGE_URL_REJECTED/);
-  const make = (control: number, tampered: number, early: number, late: number) => { const answers = new Map([['control', control], ['tampered', tampered], ['short', 0]]); let phase = 0;
-    return { control: 'control', tampered: 'tampered', shortLived: 'short', fetch: async (name: string) => name === 'short' ? (phase++ === 0 ? early : late) : answers.get(name)!, waitUntilExpired: async () => undefined }; };
+  const body = Buffer.from('original-bytes');
+  const make = (control: number, tampered: number, early: number, late: number, other = body) => { let phase = 0;
+    const answer = (status: number) => ({ status, bytes: status >= 200 && status < 300 ? other : Buffer.alloc(0) });
+    return { control: 'control', tampered: 'tampered', shortLived: 'short', expected: body, fetch: async (name: string) => answer(name === 'control' ? control : name === 'tampered' ? tampered : phase++ === 0 ? early : late), waitUntilExpired: async () => undefined }; };
   assert.equal(await probeSignatureEnforcement(make(200, 403, 200, 403)), 'enforced');
+  assert.equal(await probeSignatureEnforcement(make(200, 400, 200, 403)), 'enforced');
   assert.equal(await probeSignatureEnforcement(make(200, 200, 200, 403)), 'unsupported');
   assert.equal(await probeSignatureEnforcement(make(200, 403, 200, 200)), 'unsupported');
   assert.equal(await probeSignatureEnforcement(make(403, 403, 200, 403)), 'control-failed');
   assert.equal(await probeSignatureEnforcement(make(200, 403, 403, 403)), 'control-failed');
+  for (const status of [404, 500, 301]) { assert.equal(await probeSignatureEnforcement(make(200, status, 200, 403)), 'unexpected', `tamper ${status}`); assert.equal(await probeSignatureEnforcement(make(200, 403, 200, status)), 'unexpected', `expired ${status}`); }
+  assert.equal(await probeSignatureEnforcement(make(200, 403, 200, 403, Buffer.from('other'))), 'control-failed');
 });
