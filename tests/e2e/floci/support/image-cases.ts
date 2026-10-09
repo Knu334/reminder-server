@@ -23,21 +23,21 @@ const itemPath = (id: string): string => `/v2/reminders/${encodeURIComponent(id)
 type Row = Record<string, unknown> | null; type Job = Record<string, unknown>;
 type Ref = { imageId: string; key: string; versionId: string; mime: string; bytes: number; sha256: string };
 
-const getReq = (fixture: SuiteFixture, who: Actor, id: string): Promise<Probe> => send(fixture, itemPath(id), { token: who.token });
-const urlReq = (fixture: SuiteFixture, who: Actor, id: string): Promise<Probe> => send(fixture, `${itemPath(id)}/thumbnail-url`, { token: who.token });
-const patchReq = (fixture: SuiteFixture, who: Actor, id: string, ifMatch: string, fields: Record<string, unknown>): Promise<Probe> => send(fixture, itemPath(id), { token: who.token, method: 'PATCH', headers: { 'content-type': 'application/json', 'if-match': ifMatch }, body: JSON.stringify(fields) });
-const deleteReq = (fixture: SuiteFixture, who: Actor, id: string, ifMatch: string): Promise<Probe> => send(fixture, itemPath(id), { token: who.token, method: 'DELETE', headers: { 'if-match': ifMatch } });
-const etagOf = (probe: Probe): string => probe.headers.get('etag') ?? '';
-const track = (recorder: CaseRecorder, caseId: string, assertion: string, probe: Probe, status: number, operation: string, code?: string): void => defer(recorder, caseId, assertion, logOf(probe, status, { operation, ...(code ? { code } : {}) }));
+export const getReq = (fixture: SuiteFixture, who: Actor, id: string): Promise<Probe> => send(fixture, itemPath(id), { token: who.token });
+export const urlReq = (fixture: SuiteFixture, who: Actor, id: string): Promise<Probe> => send(fixture, `${itemPath(id)}/thumbnail-url`, { token: who.token });
+export const patchReq = (fixture: SuiteFixture, who: Actor, id: string, ifMatch: string, fields: Record<string, unknown>): Promise<Probe> => send(fixture, itemPath(id), { token: who.token, method: 'PATCH', headers: { 'content-type': 'application/json', 'if-match': ifMatch }, body: JSON.stringify(fields) });
+export const deleteReq = (fixture: SuiteFixture, who: Actor, id: string, ifMatch: string): Promise<Probe> => send(fixture, itemPath(id), { token: who.token, method: 'DELETE', headers: { 'if-match': ifMatch } });
+export const etagOf = (probe: Probe): string => probe.headers.get('etag') ?? '';
+export const track = (recorder: CaseRecorder, caseId: string, assertion: string, probe: Probe, status: number, operation: string, code?: string): void => defer(recorder, caseId, assertion, logOf(probe, status, { operation, ...(code ? { code } : {}) }));
 
-async function fresh(fixture: SuiteFixture): Promise<Actor> {
+export async function fresh(fixture: SuiteFixture): Promise<Actor> {
   const who = await actor(fixture, 'a'); const state = await readOwnerState(fixture, who.ownerId);
   if (state.itemCount !== 0 || state.imageBytes !== 0 || (await jobsOf(fixture, who.ownerId)).length !== 0) throw new Error('IMAGE_OWNER_NOT_FRESH');
   const owned = await versionsOf(fixture, who.ownerId); if (owned.versions.length || owned.markers.length) throw new Error('IMAGE_OWNER_NOT_FRESH');
   return who;
 }
 /** Image jobs belong to an owner by their ownerId attribute; the table is scanned and filtered, never trusted by key shape. */
-async function jobsOf(fixture: SuiteFixture, ownerId: string): Promise<Job[]> {
+export async function jobsOf(fixture: SuiteFixture, ownerId: string): Promise<Job[]> {
   const found: Job[] = []; let ExclusiveStartKey: Record<string, unknown> | undefined;
   do {
     const page = await fixture.clients.dynamodb.send(new ScanCommand({ TableName: fixture.config.imageJobsTable, ConsistentRead: true, ...(ExclusiveStartKey ? { ExclusiveStartKey } : {}) }));
@@ -47,7 +47,7 @@ async function jobsOf(fixture: SuiteFixture, ownerId: string): Promise<Job[]> {
 }
 type Version = { key: string; versionId: string; size: number }; type Marker = { key: string; versionId: string };
 /** Versions and delete markers under the owner's own prefix only. */
-async function versionsOf(fixture: SuiteFixture, ownerId: string): Promise<{ versions: Version[]; markers: Marker[] }> {
+export async function versionsOf(fixture: SuiteFixture, ownerId: string): Promise<{ versions: Version[]; markers: Marker[] }> {
   const prefix = ownedPrefix(ownerId); const versions: Version[] = []; const markers: Marker[] = []; let KeyMarker: string | undefined; let VersionIdMarker: string | undefined;
   do {
     const page = await fixture.clients.s3.send(new ListObjectVersionsCommand({ Bucket: fixture.config.imagesBucket, Prefix: prefix, ...(KeyMarker ? { KeyMarker } : {}), ...(VersionIdMarker ? { VersionIdMarker } : {}) }));
@@ -60,27 +60,27 @@ async function versionsOf(fixture: SuiteFixture, ownerId: string): Promise<{ ver
 }
 type Object = { versionId: string; length: number; contentType: string; checksum: string; bytes: Buffer };
 /** The stored original read back by its exact owned key and version. */
-async function inspect(fixture: SuiteFixture, ref: { key: string; versionId: string }): Promise<Object | undefined> {
+export async function inspect(fixture: SuiteFixture, ref: { key: string; versionId: string }): Promise<Object | undefined> {
   try {
     const head = await fixture.clients.s3.send(new HeadObjectCommand({ Bucket: fixture.config.imagesBucket, Key: ref.key, VersionId: ref.versionId, ChecksumMode: 'ENABLED' }));
     const got = await fixture.clients.s3.send(new GetObjectCommand({ Bucket: fixture.config.imagesBucket, Key: ref.key, VersionId: ref.versionId }));
     return { versionId: String(head.VersionId), length: Number(head.ContentLength), contentType: String(head.ContentType), checksum: String(head.ChecksumSHA256), bytes: Buffer.from(await got.Body!.transformToByteArray()) };
   } catch { return undefined; }
 }
-const exactObject = (found: Object | undefined, ref: Ref, data: Buffer): boolean => !!found && found.versionId === ref.versionId && found.length === data.length && found.contentType === ref.mime && found.checksum === sha256Base64(data) && found.bytes.equals(data) && ref.bytes === data.length && ref.sha256 === sha256Of(data);
+export const exactObject = (found: Object | undefined, ref: Ref, data: Buffer): boolean => !!found && found.versionId === ref.versionId && found.length === data.length && found.contentType === ref.mime && found.checksum === sha256Base64(data) && found.bytes.equals(data) && ref.bytes === data.length && ref.sha256 === sha256Of(data);
 
 type Snap = { row: Row; state: { itemCount: number; imageBytes: number }; jobs: Job[]; versions: Version[]; markers: Marker[] };
 async function snap(fixture: SuiteFixture, who: Actor, id: string): Promise<Snap> {
   const owned = await versionsOf(fixture, who.ownerId);
   return { row: await readReminder(fixture, who.ownerId, id) as unknown as Row, state: await readOwnerState(fixture, who.ownerId), jobs: await jobsOf(fixture, who.ownerId), ...owned };
 }
-const refOf = (row: Row): Ref | undefined => isRecord(row?.thumbnail) ? row!.thumbnail as Ref : undefined;
-const jobOf = (jobs: Job[], imageId: string): Job | undefined => jobs.find(job => job.jobId === imageId);
+export const refOf = (row: Row): Ref | undefined => isRecord(row?.thumbnail) ? row!.thumbnail as Ref : undefined;
+export const jobOf = (jobs: Job[], imageId: string): Job | undefined => jobs.find(job => job.jobId === imageId);
 const sortKey = (due: number, jobId: string): string => `${String(due).padStart(13, '0')}#${jobId}`;
-const isCommitted = (job: Job | undefined, ref: Ref, ownerId: string): boolean => !!job && job.state === 'committed' && job.ownerId === ownerId && job.key === ref.key && job.versionId === ref.versionId && job.mime === ref.mime && job.bytes === ref.bytes && job.sha256 === ref.sha256 && ['dueAtMs', 'cleanupPartition', 'cleanupSortKey', 'leaseOwner'].every(field => job[field] === undefined);
+export const isCommitted = (job: Job | undefined, ref: Ref, ownerId: string): boolean => !!job && job.state === 'committed' && job.ownerId === ownerId && job.key === ref.key && job.versionId === ref.versionId && job.mime === ref.mime && job.bytes === ref.bytes && job.sha256 === ref.sha256 && ['dueAtMs', 'cleanupPartition', 'cleanupSortKey', 'leaseOwner'].every(field => job[field] === undefined);
 /** Retired by the transition that happened at `atMs`: due exactly 24 h later, in the retired index, version still pinned. */
-const isRetired = (job: Job | undefined, ref: Ref, ownerId: string, atMs: number): boolean => !!job && job.state === 'retired' && job.ownerId === ownerId && job.key === ref.key && job.versionId === ref.versionId && job.dueAtMs === atMs + DAY && /^retired#0[0-3]$/.test(String(job.cleanupPartition)) && job.cleanupSortKey === sortKey(atMs + DAY, ref.imageId);
-const isPending = (job: Job | undefined, ownerId: string, data: Buffer, mime: string): boolean => !!job && job.state === 'pending' && job.ownerId === ownerId && typeof job.versionId === 'string' && job.mime === mime && job.bytes === data.length && job.sha256 === sha256Of(data) && job.key === `${ownedPrefix(ownerId)}${String(job.jobId)}` && typeof job.createdAtMs === 'number' && job.dueAtMs === job.createdAtMs + DAY && /^pending#0[0-3]$/.test(String(job.cleanupPartition)) && job.cleanupSortKey === sortKey(job.dueAtMs as number, String(job.jobId));
+export const isRetired = (job: Job | undefined, ref: Ref, ownerId: string, atMs: number): boolean => !!job && job.state === 'retired' && job.ownerId === ownerId && job.key === ref.key && job.versionId === ref.versionId && job.dueAtMs === atMs + DAY && /^retired#0[0-3]$/.test(String(job.cleanupPartition)) && job.cleanupSortKey === sortKey(atMs + DAY, ref.imageId);
+export const isPending = (job: Job | undefined, ownerId: string, data: Buffer, mime: string): boolean => !!job && job.state === 'pending' && job.ownerId === ownerId && typeof job.versionId === 'string' && job.mime === mime && job.bytes === data.length && job.sha256 === sha256Of(data) && job.key === `${ownedPrefix(ownerId)}${String(job.jobId)}` && typeof job.createdAtMs === 'number' && job.dueAtMs === job.createdAtMs + DAY && /^pending#0[0-3]$/.test(String(job.cleanupPartition)) && job.cleanupSortKey === sortKey(job.dueAtMs as number, String(job.jobId));
 const noBytesIn = (row: Row, data: Buffer): boolean => { if (!row) return false; const text = JSON.stringify(row); return !text.includes(base64Of(data).slice(0, 40)) && !Object.values(row).some(value => Buffer.isBuffer(value) || value instanceof Uint8Array); };
 /** The wire form carries metadata only: no payload, key, version, owner or signed-URL parts. */
 const metadataOnly = (probe: Probe, ref: Ref, ownerId: string, data: Buffer): boolean => { const thumbnail = dtoOf(probe)?.thumbnail; return isRecord(thumbnail) && Object.keys(thumbnail).join(',') === 'imageId,mime,bytes,sha256' && thumbnail.imageId === ref.imageId && thumbnail.mime === ref.mime && thumbnail.bytes === data.length && thumbnail.sha256 === sha256Of(data) && UUID.test(String(thumbnail.imageId)) && ![base64Of(data).slice(0, 40), ref.key, ref.versionId, ownerId, 'X-Amz'].some(secret => probe.text.includes(secret)); };
@@ -89,11 +89,11 @@ const register = (id: string, body: (fixture: SuiteFixture, recorder: CaseRecord
   if (!definitions.some(def => def.id === id)) throw new Error('IMAGE_CASE_UNDEFINED');
   caseActions.set(id, async (fixture, recorder) => { const score = new Score(); await body(fixture, recorder, score); score.emit(id, recorder); });
 };
-const body = (id: string, thumbnail: unknown, extra: Record<string, unknown> = {}): string => JSON.stringify(makeInput({ id, title: `image ${id}`, ...extra, thumbnail }));
+export const body = (id: string, thumbnail: unknown, extra: Record<string, unknown> = {}): string => JSON.stringify(makeInput({ id, title: `image ${id}`, ...extra, thumbnail }));
 const bodyOmitting = (id: string): string => { const { thumbnail: _omitted, ...rest } = makeInput({ id, title: `image ${id}` }); return JSON.stringify(rest); };
 
 /** A setup create that must succeed; its result log is still checked. */
-async function setup(fixture: SuiteFixture, recorder: CaseRecorder, caseId: string, who: Actor, id: string, thumbnail: string | null, assertion = 'create-result-delivered'): Promise<{ probe: Probe; ref: Ref | undefined; etag: string }> {
+export async function setup(fixture: SuiteFixture, recorder: CaseRecorder, caseId: string, who: Actor, id: string, thumbnail: string | null, assertion = 'create-result-delivered'): Promise<{ probe: Probe; ref: Ref | undefined; etag: string }> {
   const probe = await createItem(fixture, who, body(id, thumbnail)); if (probe.status !== 201 || !dtoOf(probe) || !itemHeaders(probe)) throw new Error('IMAGE_SETUP_FAILED');
   track(recorder, caseId, assertion, probe, 201, 'create'); const row = await readReminder(fixture, who.ownerId, id) as unknown as Row;
   if (thumbnail !== null && !refOf(row)) throw new Error('IMAGE_SETUP_FAILED');

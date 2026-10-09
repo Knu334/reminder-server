@@ -1,4 +1,4 @@
-import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
+import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { loadConfig } from "../../src/config";
 import { createRemindersStore } from "../../src/reminders/dynamo-store";
 import { createOwnerStore } from "../../src/reminders/owner-store";
@@ -107,6 +107,7 @@ export function createHarness(config = harnessConfig) {
       const next = applyUpdate(row ?? { ...input.Key }, input.ExpressionAttributeNames ?? {}, input.ExpressionAttributeValues ?? {}, input.UpdateExpression ?? "");
       bucket.set(key, next); if (point) failure(point); return input.ReturnValues === "ALL_NEW" ? { Attributes: structuredClone(next) } : {};
     }
+    if (command instanceof DeleteCommand) { table(command.input.TableName).delete(rowKey(command.input.Key ?? {})); return {}; }
     if (command instanceof TransactWriteCommand) {
       transactions.push(command);
       if (faults.get("commit") === "before") failure("commit");
@@ -148,6 +149,10 @@ export function createHarness(config = harnessConfig) {
   const service = createRemindersService({ reminders, owners, jobs, images, config, clock: () => nowMs, uuid: () => `00000000-0000-4000-8000-${String(++sequence).padStart(12, "0")}` });
   return {
     service, reminders, owners, jobs, images, cleanupQueries, deletedKeys,
+    /** The command-level synthetic DynamoDB transport the stores above use (wire fakes and synthetic seeding reuse it). */
+    client,
+    /** Test-fixture collection of one synthetic prefix; unlike the product, this removes versions as well as markers. */
+    purgeImages(prefix: string): void { for (const key of [...objects.keys()]) if (key.startsWith(prefix)) objects.delete(key); for (const key of [...markers.keys()]) if (key.startsWith(prefix)) markers.delete(key); },
     get checkpointWrites(): number { return checkpointWrites; },
     /** Synthetic counter row set just below a cap; the reminders themselves are not created. */
     seedStorage(ownerId: string, itemCount: number, imageBytes: number): void { const row = { ...keys.storage(ownerId), itemCount, imageBytes }; table("owners").set(rowKey(row), row); },

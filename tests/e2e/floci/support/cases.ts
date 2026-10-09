@@ -243,6 +243,50 @@ export const imageDefinitions: CaseDefinition[] = [
 definitions.push(...imageDefinitions);
 
 /**
+ * Real cleanup (CLEAN-01..09). The E cases drive the same-ZIP cleanup alias through synchronous invokes against owned synthetic
+ * data: API registration, delete/replace, synthetic times and the invoke are one case where an API transition exists. The I cases are
+ * evidenced by named offline tests (fault transport over the real adapters, runtime limits) and are never an E action.
+ */
+function cleanCase(id: string, http: string[], ddb: string[], s3: string[], logs: string[], logsNa?: string): CaseDefinition {
+  return { id, requirementId: id.split('/')[0]!, layer: 'E', required: true, acceptance: 'behavior', suite: 'cleanup', source: `formal-e2e-coverage/${id.split('/')[0]!}`, outputs: [
+    { kind: 'http', assertions: http }, { kind: 'dynamodb', assertions: ddb }, { kind: 's3', assertions: s3 }, logs.length ? { kind: 'logs', assertions: logs } : { kind: 'logs', assertions: [], notApplicableReason: logsNa! },
+  ] };
+}
+const orphanApi = ['create-result-delivered', 'duplicate-result-delivered'];
+const published = (...extra: string[]): string[] => [...orphanApi, ...extra, 'delivered'];
+const invokeOk = (counts: string): string => `invoke-200-no-function-error-${counts}`;
+function cleanInteg(id: string, tests: string[]): CaseDefinition {
+  const na = (reason: string) => ({ assertions: [] as string[], notApplicableReason: reason });
+  return { id, requirementId: id.split('/')[0]!, layer: 'I', required: true, acceptance: 'behavior', suite: 'cleanup', source: `formal-e2e-coverage/${id.split('/')[0]!}`, outputs: [
+    { kind: 'http', ...na('service-and-adapter-boundary-no-gateway') }, { kind: 'dynamodb', assertions: tests }, { kind: 's3', ...na('injected-wire-fake-no-real-service-stop') }, { kind: 'logs', ...na('handler-boundary-no-delivery') },
+  ] };
+}
+export const cleanupDefinitions: CaseDefinition[] = [
+  cleanCase('CLEAN-01/unpublished', [invokeOk('skipped-unpublished'), 'skipped-unpublished-evaluated0-deletes0'], ['jobs-and-counters-unchanged', 'checkpoint-not-written'], ['owned-versions-unchanged-no-marker'], published()),
+  cleanCase('CLEAN-01/published-counts', [invokeOk('counts-1-1'), 'item-get-unchanged-after-cleanup'], ['due-orphan-done-committed-unchanged', 'checkpoint-saved-without-gsi-attributes'], ['marker-added-original-version-retained'], published('get-result-delivered')),
+  cleanCase('CLEAN-01/event-injection', ['every-injected-event-function-error-behind-200', 'control-event-processed-200-one-delete'], ['rejected-events-leave-all-rows-unchanged', 'control-completes-only-owned-orphan'], ['rejected-events-add-no-marker', 'control-marker-added-original-version-retained'], [], 'rejected-before-cleanup-start-no-application-log'),
+  cleanCase('CLEAN-02/pending-24h-both-sides', [invokeOk('counts-1-1'), 'committed-item-get-unchanged'], ['due-orphan-done-not-due-orphan-and-committed-unchanged'], ['only-due-orphan-marked-all-versions-retained'], [...orphanApi, 'duplicate-late-result-delivered', 'get-result-delivered', 'delivered']),
+  cleanCase('CLEAN-02/retired-origin-replace', ['both-replaces-200-and-retire-24h-after-transition', invokeOk('counts-1-1')], ['future-retired-kept-despite-old-creation-due-retired-done-new-images-unchanged'], ['only-due-retired-marked-all-versions-retained'], ['create-a-result-delivered', 'patch-a-result-delivered', 'create-b-result-delivered', 'patch-b-result-delivered', 'delivered']),
+  cleanCase('CLEAN-02/delete-tombstone', ['delete-200-then-get-404-after-cleanup', invokeOk('counts-1-1')], ['tombstone-job-done-counters-zero-row-deleted'], ['current-get-404-original-version-get-200-one-marker'], ['create-result-delivered', 'delete-result-delivered', 'get-404-result-delivered', 'delivered']),
+  cleanCase('CLEAN-03/active-lease', [invokeOk('counts-0-0')], ['active-lease-job-unchanged'], ['no-marker-current-object-intact'], published()),
+  cleanCase('CLEAN-03/expired-lease', [invokeOk('counts-1-1')], ['expired-lease-reclaimed-to-done-lease-removed'], ['marker-added-original-version-retained'], published()),
+  cleanCase('CLEAN-03/unrecorded-version', [invokeOk('counts-1-1')], ['unrecorded-pending-done-without-version-pin'], ['key-reconciled-marker-added-original-version-retained'], published()),
+  cleanCase('CLEAN-04/committed-protected', [invokeOk('counts-1-1'), 'item-get-and-thumbnail-url-still-served'], ['committed-job-and-counters-unchanged-orphan-done'], ['committed-current-bytes-exact-orphan-marked-only'], [...orphanApi, 'get-result-delivered', 'url-result-delivered', 'delivered']),
+  cleanCase('CLEAN-05/version-mismatch', [invokeOk('counts-1-0')], ['mismatched-version-job-left-leased-not-done'], ['no-marker-current-object-intact'], ['delivered']),
+  cleanCase('CLEAN-05/checksum-mismatch', [invokeOk('counts-1-0')], ['mismatched-checksum-job-left-leased-not-done'], ['no-marker-current-object-intact'], ['delivered']),
+  cleanCase('CLEAN-05/existing-marker-and-absent', [invokeOk('counts-2-0')], ['marker-and-absent-jobs-converge-to-done'], ['no-new-marker-no-version-deleted-original-readable'], ['delivered']),
+  cleanCase('CLEAN-06/same-shard-51-two-invokes', [invokeOk('counts-51-51'), 'second-invoke-no-delete-200'], ['all-51-done-checkpoint-without-gsi-attributes-rotation-reset'], ['51-markers-one-each-51-versions-retained-second-invoke-adds-none'], ['delivered']),
+  cleanCase('CLEAN-09/second-invoke-converges', ['both-invokes-synchronous-200-no-function-error', 'second-invoke-no-delete'], ['job-done-and-unchanged-by-second-invoke'], ['one-marker-total-original-version-retained'], published()),
+  cleanInteg('CLEAN-02/exact-boundary-i', ['clean_02_pending_due_exactly_at_created_plus_24h']),
+  cleanInteg('CLEAN-03/exact-lease-boundary-i', ['clean_03_deleting_lease_reclaimed_at_expiry_and_new_lease_20_minutes']),
+  cleanInteg('CLEAN-04/stale-gsi-and-claim-race-i', ['clean_04_stale_gsi_rows_skipped_without_claim_or_delete', 'clean_04_upload_during_claim_race_is_protected', 'stale_index_and_commit_race_cannot_delete']),
+  cleanInteg('CLEAN-07/page-abort-resume-i', ['clean_07_abort_mid_page_keeps_page_start_cursor_and_resume_has_one_marker_each', 'partial_page_replays_without_skipping', 'late_gsi_candidate_is_seen_next_invocation_after_partition_end']),
+  cleanInteg('CLEAN-08/limits-and-resume-i', ['clean_08_runtime_limit_tests_retained_by_name', 'clean_08_600_second_cap_stops_new_work_then_later_invoke_finishes', 'limits_candidates_deletes_time_and_parallelism']),
+  cleanInteg('CLEAN-09/fault-matrix-i', ['clean_09_marker_with_lost_response_found_by_head_not_repeated', 'clean_09_delete_never_sent_retried_once_with_one_marker', 'clean_09_checkpoint_failure_fails_invocation_without_heartbeat', 'clean_09_metric_failure_fails_invocation_after_checkpoint_saved', 'clean_09_heartbeat_only_after_saved_checkpoint_and_completed_run', 'no_permanent_version_delete_and_trace_can_see_one', 'unknown_claim_and_complete_outcomes_are_reconciled']),
+];
+definitions.push(...cleanupDefinitions);
+
+/**
  * Cases whose result the runner records itself because it may be `unsupported` (compatibility acceptance): the probe returns the
  * measured outcome and the runner maps it. The matching caseActions entry only makes the case selectable; it is never run through runCase.
  */

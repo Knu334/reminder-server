@@ -1,5 +1,6 @@
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
-import { GetObjectCommand, HeadObjectCommand, ListObjectVersionsCommand } from '@aws-sdk/client-s3';
+import type { CloudWatchClient } from '@aws-sdk/client-cloudwatch';
+import { DeleteObjectCommand, DeleteObjectsCommand, GetObjectCommand, HeadObjectCommand, ListObjectVersionsCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { createHash } from 'node:crypto';
 import type { Context } from 'aws-lambda';
 import { createApiHandler, withApiResultLogging } from '../../../src/api';
@@ -9,6 +10,11 @@ import { fixtureStates } from './support/fixture';
 import { suiteLogStates } from './support/logs';
 import { apiIo } from './support/api-cases';
 import { imageIo } from './support/image-fixtures';
+import { cleanupIo } from './support/cleanup-fixtures';
+import type { CleanupCompletion } from './support/logs';
+import { createCleanupHandler } from '../../../src/cleanup';
+import { runCleanup, type CleanupDeps } from '../../../src/cleanup/service';
+import { createBudget } from '../../../src/shared/budget';
 import type { AuthSession, HttpResult, SuiteFixture } from './support/types';
 
 /**
@@ -27,7 +33,7 @@ const SCOPES: Record<string, string | null> = {
 const part = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');
 
 export type Sim = ReturnType<typeof createSim>;
-export type SimOptions = { /** Replace the handler's answer to break one behavior (negative tests). */ tamper?: (method: string, path: string, result: HttpResult) => HttpResult; /** Alter the stored original as S3 would return it (negative tests). */ tamperObject?: (bytes: Buffer) => Buffer; /** Alter what the signed image URL serves (negative tests). */ tamperFetch?: (result: HttpResult) => HttpResult; /** How the double's image URLs treat a changed signature or an expired short URL (IMG-09). */ signature?: 'enforced' | 'lenient-tamper' | 'lenient-expiry' | 'control-fails' | 'unexpected-tamper' };
+export type SimOptions = { /** Replace the handler's answer to break one behavior (negative tests). */ tamper?: (method: string, path: string, result: HttpResult) => HttpResult; /** Alter the stored original as S3 would return it (negative tests). */ tamperObject?: (bytes: Buffer) => Buffer; /** Alter what the signed image URL serves (negative tests). */ tamperFetch?: (result: HttpResult) => HttpResult; /** How the double's image URLs treat a changed signature or an expired short URL (IMG-09). */ signature?: 'enforced' | 'lenient-tamper' | 'lenient-expiry' | 'control-fails' | 'unexpected-tamper'; /** Break one cleanup behaviour of the double's cleanup Lambda (negative tests). */ cleanup?: 'ignore-gate' | 'accept-injection' | 'function-error' | 'permanent-delete' | 'ignore-due' };
 export function createSim(options: SimOptions = {}) {
   const h = createHarness(); h.setPublication(true);
   // The store's synthetic clock starts in 2026-10; move it to now so DTO times (e.g. the 900 s URL end) are comparable with request times.
@@ -96,6 +102,8 @@ export function createSim(options: SimOptions = {}) {
     async setPublication(published: boolean) { h.setPublication(published); },
     clients: {
       dynamodb: { async send(command: unknown): Promise<unknown> {
+        // The image-jobs table (seed, rewrite, index query, delete, checkpoint) is served by the harness's command-level store.
+        if ((command as { input?: { TableName?: string } }).input?.TableName === 'jobs' && !(command instanceof ScanCommand)) return h.client.send(command as never);
         if (command instanceof GetCommand) { const input = command.input; const key = input.Key as Record<string, string>; const found = rows(String(input.TableName)).find(row => Object.entries(key).every(([name, value]) => row[name] === value)); return found ? { Item: structuredClone(found) } : {}; }
         if (command instanceof QueryCommand) { const values = command.input.ExpressionAttributeValues!; return { Items: structuredClone(rows(String(command.input.TableName)).filter(row => row.pk === values[':pk'] && String(row.sk).startsWith(String(values[':rate'])))) }; }
         if (command instanceof ScanCommand) return { Items: structuredClone(rows(String(command.input.TableName))) };
@@ -110,12 +118,18 @@ export function createSim(options: SimOptions = {}) {
       s3: { async send(command: unknown): Promise<unknown> {
         if (command instanceof ListObjectVersionsCommand) { const prefix = command.input.Prefix ?? ''; return { Versions: h.imageVersions().filter(item => item.key.startsWith(prefix)).map(item => ({ Key: item.key, VersionId: item.versionId, Size: item.bytes })), DeleteMarkers: h.imageDeleteMarkers().filter(item => item.key.startsWith(prefix)).map(item => ({ Key: item.key, VersionId: item.versionId })) }; }
         if (command instanceof HeadObjectCommand || command instanceof GetObjectCommand) {
-          const { Key, VersionId } = command.input; const stored = h.imageVersions().find(item => item.key === Key && item.versionId === VersionId); if (!stored) throw Object.assign(new Error('NoSuchVersion'), { name: 'NoSuchVersion', $metadata: { httpStatusCode: 404 } });
+          const { Key, VersionId } = command.input; const stored = h.imageVersions().find(item => item.key === Key && (VersionId === undefined || item.versionId === VersionId)); if (!stored || (VersionId === undefined && h.imageDeleteMarkers().some(marker => marker.key === Key))) throw Object.assign(new Error('NoSuchVersion'), { name: 'NoSuchVersion', $metadata: { httpStatusCode: 404 } });
           const data = Buffer.from(await h.images.get({ imageId: '', key: stored.key, versionId: stored.versionId, mime: '', bytes: stored.bytes, sha256: '' }, budget()));
           const served = command instanceof GetObjectCommand && options.tamperObject ? options.tamperObject(data) : data;
           const common = { VersionId: stored.versionId, ContentLength: served.length, ContentType: mimes.get(`${stored.key}#${stored.versionId}`), ChecksumSHA256: createHash('sha256').update(data).digest('base64') };
           return command instanceof GetObjectCommand ? { ...common, Body: { transformToByteArray: async () => new Uint8Array(served) } } : common;
         }
+        if (command instanceof PutObjectCommand) {
+          const { Key, Body, ContentType, ChecksumSHA256 } = command.input; const data = Buffer.from(Body as Buffer); const sha = createHash('sha256').update(data).digest('hex'); if (ChecksumSHA256 !== Buffer.from(sha, 'hex').toString('base64')) throw new Error('SIM_CHECKSUM_REJECTED');
+          const ref = await h.images.put({ jobId: String(Key).split('/').at(-1)!, key: String(Key) } as never, { data, mime: String(ContentType), bytes: data.length, sha256: sha }, budget()); return { VersionId: ref.versionId, ChecksumSHA256 };
+        }
+        if (command instanceof DeleteObjectCommand) { await h.images.markDeleted(String(command.input.Key), budget()); return { DeleteMarker: true, VersionId: h.imageDeleteMarkers().find(marker => marker.key === command.input.Key)?.versionId }; }
+        if (command instanceof DeleteObjectsCommand) { for (const object of command.input.Delete?.Objects ?? []) h.purgeImages(String(object.Key)); return {}; }
         throw new Error('SIM_COMMAND_UNSUPPORTED');
       } },
     },
@@ -132,8 +146,24 @@ export function createSim(options: SimOptions = {}) {
   };
   // Signature seams: the double's URLs carry a plain marker instead of SigV4; time is the simulated clock.
   imageIo.tamper = url => `${url}&sig=bad`; imageIo.shortUrl = async (_fixture, ref, seconds) => `https://synthetic.test/${ref.key}?versionId=${ref.versionId}&exp=${apiIo.now() + seconds * 1000}`; imageIo.sleep = ms => apiIo.sleep(ms);
-  fixtureStates.set(fixture, { disposed: false } as never);
-  suiteLogStates.set(fixture, { observer, pending: [], cleanup: new Map(), completions: [], lastInput: 0 });
+  const intervals: CleanupCompletion[] = [];
+  fixtureStates.set(fixture, { disposed: false, cleanupIntervals: intervals } as never);
+  suiteLogStates.set(fixture, { observer, pending: [], cleanup: new Map(), completions: intervals, lastInput: 0 });
+  // The double's cleanup Lambda: the real handler/service over the stateful store, with optional broken behaviours.
+  const noMetrics = { async send() { return {}; } } as unknown as CloudWatchClient; let cleanupRuns = 0;
+  async function invokeSimCleanup(payload: Buffer): Promise<{ status: number; functionError?: string; payload?: Buffer }> {
+    const mode = options.cleanup; const event: unknown = JSON.parse(payload.toString('utf8')); const run = ++cleanupRuns;
+    const deps: CleanupDeps = { jobs: mode === 'ignore-due' ? { ...h.jobs, queryDue: (partition, cutoff, after, b) => h.jobs.queryDue(partition, cutoff + 2 * 86_400_000, after, b) } : h.jobs,
+      images: mode === 'permanent-delete' ? { ...h.images, markDeleted: async (key, b) => { await h.images.markDeleted(key, b); h.purgeImages(key); } } : h.images,
+      owners: mode === 'ignore-gate' ? { ...h.owners, gate: async () => ({ published: true, runId: null }) } : h.owners, config: harnessConfig, clock, uuid: () => `sim-run-${run}`, metrics: noMetrics };
+    const original = console.log; const lines: string[] = []; console.log = (line: unknown) => { lines.push(String(line)); };
+    let outcome: { value?: unknown; failed: boolean };
+    try { outcome = { value: await (mode === 'accept-injection' && typeof event === 'object' && event !== null && Object.keys(event).length > 0 ? runCleanup(deps, createBudget(() => 660_000, 0)) : createCleanupHandler(deps)(event, { awsRequestId: `lambda-cleanup-${run}`, getRemainingTimeInMillis: () => 660_000 } as Context)), failed: false }; } catch { outcome = { failed: true }; } finally { console.log = original; }
+    observer.ingest(lines.map(message => ({ eventId: `c${++logId}`, message, logStreamName: `sim-cleanup-${run}`, group: 'cleanup-group', timestamp: Date.now() })));
+    if (outcome.failed) return { status: 200, functionError: 'Unhandled', payload: Buffer.from(JSON.stringify({ errorType: 'Error' })) };
+    return { status: 200, ...(mode === 'function-error' ? { functionError: 'Unhandled' } : {}), payload: Buffer.from(JSON.stringify(outcome.value)) };
+  }
+  cleanupIo.invoke = async (_fixture, payload) => invokeSimCleanup(payload); cleanupIo.stopped = async () => true; cleanupIo.ownedTable = () => true; cleanupIo.gsiDeadlineMs = 30_000; cleanupIo.sleep = async () => undefined;
   apiIo.raw = async (_fixture, _url, request) => request.headers.origin === ORIGIN ? { status: 200, headers: new Headers({ 'access-control-allow-origin': ORIGIN, 'access-control-allow-methods': 'GET,HEAD' }), bytes: Buffer.alloc(0) } : { status: 403, headers: new Headers(), bytes: Buffer.alloc(0) };
   return { fixture, observer, harness: h, authFor: (authId: string) => authFor(authId) as SuiteFixture['auth'], authIds, advance: (ms: number) => { offset += ms; } };
 }
