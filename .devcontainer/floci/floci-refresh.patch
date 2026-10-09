@@ -789,6 +789,29 @@ index 0000000..6fb06db
 +                hosted, deadline);
 +    }
 +}
+diff --git a/src/main/java/io/github/hectorvent/floci/services/lambda/LambdaService.java b/src/main/java/io/github/hectorvent/floci/services/lambda/LambdaService.java
+index 97fd19f..918fb6f 100644
+--- a/src/main/java/io/github/hectorvent/floci/services/lambda/LambdaService.java
++++ b/src/main/java/io/github/hectorvent/floci/services/lambda/LambdaService.java
+@@ -3556,10 +3556,15 @@ public class LambdaService implements ResourceProvider {
+             }
+             statement.put("Action", action);
+             statement.put("Resource", resourceArn);
++            Map<String, Object> condition = new java.util.LinkedHashMap<>();
+             if (sourceArn != null) {
+-                statement.put("Condition", Map.of("ArnLike", Map.of("AWS:SourceArn", sourceArn)));
+-            } else if (sourceAccount != null) {
+-                statement.put("Condition", Map.of("StringEquals", Map.of("AWS:SourceAccount", sourceAccount)));
++                condition.put("ArnLike", Map.of("AWS:SourceArn", sourceArn));
++            }
++            if (sourceAccount != null) {
++                condition.put("StringEquals", Map.of("AWS:SourceAccount", sourceAccount));
++            }
++            if (!condition.isEmpty()) {
++                statement.put("Condition", condition);
+             }
+ 
+             fn.getPolicies().add(statement);
 diff --git a/src/test/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2RouteSelectionTest.java b/src/test/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2RouteSelectionTest.java
 new file mode 100644
 index 0000000..6795752
@@ -1453,3 +1476,56 @@ index 0000000..0d70854
 +        }
 +    }
 +}
+diff --git a/src/test/java/io/github/hectorvent/floci/services/lambda/LambdaServiceTest.java b/src/test/java/io/github/hectorvent/floci/services/lambda/LambdaServiceTest.java
+index 21b1bb5..da41ece 100644
+--- a/src/test/java/io/github/hectorvent/floci/services/lambda/LambdaServiceTest.java
++++ b/src/test/java/io/github/hectorvent/floci/services/lambda/LambdaServiceTest.java
+@@ -1341,6 +1341,48 @@ class LambdaServiceTest {
+         assertEquals(expectedStatementIds, actualStatementIds);
+     }
+ 
++    @Test
++    @SuppressWarnings("unchecked")
++    void addPermissionKeepsSourceArnAndSourceAccountOnQualifiedPolicy() {
++        LambdaFunction function = service.createFunction(REGION, baseRequest("policy-source-account-fn"));
++        service.createAlias(REGION, function.getFunctionName(), "production", "$LATEST", null, null);
++        String sourceArn = "arn:aws:execute-api:us-east-1:000000000000:abc123/*/*/*";
++
++        service.addPermission(REGION, function.getFunctionName(), "production", Map.of(
++                "StatementId", "api-invoke",
++                "Action", "lambda:InvokeFunction",
++                "Principal", "apigateway.amazonaws.com",
++                "SourceArn", sourceArn,
++                "SourceAccount", "000000000000"));
++
++        Map<String, Object> policy = (Map<String, Object>) service
++                .getPolicy(REGION, function.getFunctionName(), "production")
++                .get("policy");
++        List<Map<String, Object>> statements = (List<Map<String, Object>>) policy.get("Statement");
++        assertEquals(1, statements.size());
++        Map<String, Object> statement = statements.get(0);
++        assertEquals(function.getFunctionArn() + ":production", statement.get("Resource"));
++        Map<String, Object> condition = (Map<String, Object>) statement.get("Condition");
++        assertEquals(Map.of("AWS:SourceArn", sourceArn), condition.get("ArnLike"));
++        assertEquals(Map.of("AWS:SourceAccount", "000000000000"), condition.get("StringEquals"));
++    }
++
++    @Test
++    @SuppressWarnings("unchecked")
++    void addPermissionWithOnlySourceAccountKeepsOnlyStringEquals() {
++        LambdaFunction function = service.createFunction(REGION, baseRequest("policy-account-only-fn"));
++
++        Map<String, Object> statement = service.addPermission(REGION, function.getFunctionName(), null, Map.of(
++                "StatementId", "account-only",
++                "Action", "lambda:InvokeFunction",
++                "Principal", "events.amazonaws.com",
++                "SourceAccount", "000000000000"));
++
++        Map<String, Object> condition = (Map<String, Object>) statement.get("Condition");
++        assertEquals(Set.of("StringEquals"), condition.keySet());
++        assertEquals(Map.of("AWS:SourceAccount", "000000000000"), condition.get("StringEquals"));
++    }
++
+     @Test
+     void publishVersionWaitsForAConcurrentHolderOfTheFunctionsConcurrencyLock() throws Exception {
+         // publishVersion reads codeLocalPath and persists a snapshot of it with no

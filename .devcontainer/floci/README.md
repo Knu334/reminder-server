@@ -12,11 +12,12 @@ Dockerfile内でも取得したコミットを照合する。上流のライセ�
 refresh token rotation、新tokenの発行、旧tokenの猶予期間後の拒否をFloci側で実装する。
 また、HTTP APIのroute選択で同じpath templateに`ANY`と具体的なmethodがある場合、実AWSと同じく
 具体的なmethodを優先する（上流は走査順で先に一致したrouteを返し、選択が実行ごとに変わる）。
+Lambda AddPermissionでは、`SourceArn`と`SourceAccount`の両方を指定した場合に両方の条件を保持する（実AWSと同じ。上流は`SourceArn`があると`SourceAccount`を捨てていた）。片方だけの場合の動作は変えない。回帰テストは`LambdaServiceTest`の`addPermissionKeepsSourceArnAndSourceAccountOnQualifiedPolicy`と`addPermissionWithOnlySourceAccountKeepsOnlyStringEquals`。
 このパッチでissuer/JWKS接続や全AWSサービスの互換性を保証するものではない。
 
 ## ビルドと起動
 
-Composeの`floci`は`floci-local:2.2.0-refresh.1-native`と、このディレクトリの`build`を指定している。
+Composeの`floci`は`floci-local:2.2.0-refresh.2-native`と、このディレクトリの`build`を指定している。
 native-imageのビルドは数分〜十数分かかる。heap上限はbuild引数`NATIVE_IMAGE_XMX`（既定`6g`）で固定している。
 未指定だとDocker VMのメモリを使い切り、開発コンテナのimage buildと並行した際に
 `cannot allocate memory`で失敗した（Docker VM約12GB）。失敗する場合は下の手順でFlociだけを先にbuildする。
@@ -67,11 +68,13 @@ Javaのローカル実行を検証する場合だけ`FLOCI_TEST_ENDPOINT=http://
 それ以外の接続先は試験が拒否する。実AWSには接続しない。
 
 Java回帰テストはパッチ内の`CognitoRefreshTokenServiceTest`と`ApiGatewayV2RouteSelectionTest`に含める。
+Lambda AddPermissionの回帰テストは上流既存の`LambdaServiceTest`へ追加している（`addPermission*`）。
 FlociのソースでJava 25を使い、次のコマンドで実行する。
 
 ```bash
 ./mvnw -B -Dtest=CognitoRefreshTokenServiceTest test
 ./mvnw -B -Dtest=ApiGatewayV2RouteSelectionTest test
+./mvnw -B -Dtest='LambdaServiceTest#addPermission*' test
 ./mvnw -B test
 ./mvnw -B checkstyle:check
 ```
@@ -83,11 +86,14 @@ Composeの`floci`を以前の公式イメージ設定へ戻す場合は、`build
 `./floci/local-jwt-command.sh:/usr/local/bin/local-jwt-command.sh:ro`のmountを削除する。
 `FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS`を削除し、環境変数を
 `FLOCI_HOSTNAME: floci`、`FLOCI_BASE_URL: http://floci:4566`へ戻してからFlociを再作成する。
-公式nativeイメージは`/app/application`を起動するため、Java/JVM jarを使う追加commandを残さない。
+公式nativeイメージは`/app/application`を起動するため、local issuer用の追加commandを残さない。
 この切り戻しではrefresh修正とprivate literal issuer設定も失われ、以前の認証検証上の制限に戻る。
 上流へのpushやPR、本番AWSへのデプロイは行わない。
 
-## 検証状態
+## 過去の記録（今回の再開では2,280件/84件の原ログ未確認）
+
+以下は以前の作業で記録された結果。今回のfresh検証は末尾の2026-10-08再確認節を参照する。
+2,280件/84件のJava試験の原ログは今回未確認であり、現行combined patchのfresh回帰結果として扱わない。
 
 2026-10-07にnativeビルドへ切り替え、ユーザーがDev Containersでリビルドした。
 `http://floci:4566`のhealthは`2.2.0-local-refresh.1-native`でHTTP200。
@@ -103,8 +109,10 @@ API Gateway関連2,280件のうち84件は失敗したが、修正前のコー�
 いずれもDocker Lambda/WebSocketを使う試験で、この開発コンテナにDocker socketがないことによる。
 修正入りnativeイメージ（`NATIVE_IMAGE_XMX=6g`）を再buildし、`local-transport` 2件、`refresh` 9件が成功した。
 `authenticated-crud`は10回連続で18チェックすべて成功し、cleanup errorは毎回0件だった（修正前は5回中1回のみ成功）。
-Docker Lambda/WebSocketを使う上流Java試験84件は、Docker socketのある環境では実行しておらず、このE2Eで代替確認した。
-同じパッチ適用ツリーのJVM（Temurin 25.0.4.1）でCognito/JWT回帰1,123件とcheckstyleは成功した。
+Docker Lambda/WebSocketを使う上流Java試験84件は、Docker socketのある環境では未実施。
+アプリの認証付きCRUD E2Eは別の検証範囲であり、これら84件の成功を証明しない。
+保存済みのCognito/JWT回帰1,123件とcheckstyleの原ログは2026-10-07付で、現行routing修正前の結果。
+現行combined patchでの1,123件のfresh成功は今回確認していない。
 以下はJVMイメージ時点の結果。
 
 ホストでの初回buildはMaven Wrapper用の`unzip`不足で停止した。
@@ -127,7 +135,7 @@ IPv4解決結果が1種類だけであることを確認し、`FLOCI_HOSTNAME`�
 同じIPへ設定して、公式nativeイメージと同じ引数で`/app/application`を起動する。
 ubi9-microにはpython3やgetentがないため、IPは`/etc/hosts`の自hostname行からBashだけで取得する。public、loopback、不正な値、複数IPは拒否する。
 IPやネットワークsubnetは固定しない。Lambdaコンテナも同じComposeネットワークから
-このIPに接続できる想定で、実Lambdaの到達性は再作成後のCRUD試験で確認する。
+このIPに接続する。2026-10-08の現行nativeコンテナで実Lambdaの認証付きCRUD成功を確認した。
 
 Flociだけに`FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true`を設定する。
 上流のJWT verifierはHTTPのdiscovery/JWKSにprivate literal IPを要求するため、
@@ -163,10 +171,10 @@ DynamoDB/S3を使い、access tokenによるCRUDとowner分離を検証する。
 回収する。cleanup errorが出た場合は成功と扱わず、試験の合成prefixの残存リソースだけを確認する。
 JWT、パスワードや個人データをログに出さない。
 
-### JWT設定の検証状態（2026-10-07）
+### JWT設定の診断履歴（2026-10-07）
 
-設定変更前の現行コンテナはauthenticated CRUDの6チェックを通過し、有効access tokenでの
-Gateway listが401となった。11 cleanup actionは成功した。変更後コンテナのCRUDは未実行。
+設定変更前のコンテナはauthenticated CRUDの6チェックを通過し、有効access tokenでの
+Gateway listが401となった。11 cleanup actionは成功した。この段階では変更後のCRUDは未実行だった。
 
 別の127.0.0.1:4567 JVM診断では、署名済みPKCE tokenと実discovery/JWKSを確認したうえで、
 DNS issuerは401、private literal issuer＋flagはHTTP_PROXY backendへ200で到達した。
@@ -174,6 +182,23 @@ DNS issuerは401、private literal issuer＋flagはHTTP_PROXY backendへ200で�
 この診断はDocker LambdaのアプリCRUD成功を示すものではない。
 起動scriptのIPv4/env/Java引数と拒否ケース、Compose YAML/mountを確認済み。
 この開発コンテナにDocker CLI/socketはないためnative `docker compose config`とホストの再作成は未実行。
+
+### 現行nativeコンテナの再確認（2026-10-08）
+
+`/_floci/health`はHTTP200、versionは`2.2.0-local-refresh.1-native`。
+Node.js 24.21.0でtransport 2件、refresh 9件、authenticated CRUD 1件の合計12件が成功した。
+CRUD内の18チェックはすべて成功し、cleanup 11 actionはすべて成功、errorは0件。
+missing/forged/wrong-client JWT、scope制限、owner分離、If-Match、refresh後read、delete/tombstoneを確認した。
+証拠は実装worktreeの`.superpowers/sdd/2026-10-07-floci-authenticated-e2e/logs/2026-10-08-current-native-e2e.log`。
+現在の設定について追加のホストリビルド待ちはない。
+
+現行`floci-refresh.patch`はOAuthと同一templateのmethod優先修正を含み、root/appのコピーは同一。
+SHA256は`2d01320d2d559f610992e807e05989c2b17a3a37690e03ebbc816cb3b40e954a`。
+固定2.2.0コミットのclean treeへ適用し、routing sourceが検証用worktreeと同一であることを確認した。
+既存patch内の`ApiGatewayV2RouteSelectionTest` 2件とは別に、worktreeの
+`ApiGatewayV2RoutingServiceTest`でGET/PATCH/DELETEの両走査順、未知method、literal/default/null、
+別template維持など14件が成功した。この追加unit testは現行combined patchに含めていない。
+Java 25のfresh checkstyleも成功した。今回、全Java suiteやJVM/native packageは再実行していない。
 
 詳細は実装worktreeの`docs/operations/local-e2e-floci-authenticated-results.md`を参照。
 full Terraform apply、実AWS、本番security policyとの同等性、Floci全Java suiteは検証対象外。

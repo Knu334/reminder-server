@@ -33,11 +33,10 @@ services:
       CONTEXT7_API_KEY: ${CONTEXT7_API_KEY:-}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://proxy.bar504.net}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      # Opt into the local emulator explicitly; do not set AWS_ENDPOINT_URL globally.
       FLOCI_ENDPOINT_URL: http://floci:4566
 
   floci:
-    image: floci-local:2.2.0-refresh.1-native
+    image: floci-local:2.2.0-refresh.2-native
     build:
       context: ./floci
       dockerfile: Dockerfile
@@ -46,18 +45,15 @@ services:
     ports:
       - "127.0.0.1:24566:4566"
     volumes:
-      # 承認済み: FlociがLambda実行用コンテナを起動するために共有する。
       - /var/run/docker.sock:/var/run/docker.sock
       - ./floci/local-jwt-command.sh:/usr/local/bin/local-jwt-command.sh:ro
+    tmpfs:
+      - /app/data
     environment:
-      # HTTP issuer/JWKS are allowed only for this local private literal IP.
       FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS: "true"
       FLOCI_STORAGE_MODE: memory
-    # Keep the upstream entrypoint; resolve the issuer before its native command.
     command: ["bash", "/usr/local/bin/local-jwt-command.sh"]
-    # Lambda実行用コンテナはFlociのComposeネットワークに自動接続される。
     healthcheck:
-      # Use the upstream Bash probe bundled in the custom native image.
       test: ["CMD", "/usr/local/bin/healthcheck.sh"]
       interval: 10s
       timeout: 5s
