@@ -222,7 +222,7 @@ async function readSettings(fixture: SuiteFixture): Promise<void> {
   state.readbackPhase = 'complete';
   state.settingsComplete = true;
 }
-const caseAuthRequired = (): FixtureAuth => { const rejected = async (): Promise<never> => { throw new Error('CASE_AUTH_REQUIRED'); }; return { login: rejected, refresh: rejected, authorize: rejected, exchangeCode: rejected, requestRefresh: rejected, revoke: rejected, disable: rejected, verifySession() { throw new Error('CASE_AUTH_REQUIRED'); }, verifiesAgainstPrimaryKeys() { throw new Error('CASE_AUTH_REQUIRED'); } }; };
+const caseAuthRequired = (): FixtureAuth => { const rejected = async (): Promise<never> => { throw new Error('CASE_AUTH_REQUIRED'); }; return { login: rejected, refresh: rejected, authorize: rejected, exchangeCode: rejected, requestRefresh: rejected, revoke: rejected, hostedRevoke: rejected, disable: rejected, verifySession() { throw new Error('CASE_AUTH_REQUIRED'); }, verifiesAgainstPrimaryKeys() { throw new Error('CASE_AUTH_REQUIRED'); } }; };
 export async function createRunFixture(stack: ProvisionedStack, evidence: Evidence, controls: { budget?: RunBudget; signal?: AbortSignal } = {}): Promise<E2EFixture> {
   if (stack.constructionOutputs.length !== 4) throw new Error('PREREQUISITE_FAILED');
   const s3 = localS3(stack.target); const originalHandler = s3.config.requestHandler;

@@ -74,8 +74,10 @@ export const authDefinitions: CaseDefinition[] = [
   authCase('AUTH-07/scope-and-id-token', 'E', ['read-only-post-403', 'write-only-get-403', 'id-token-403', 'valid-controls-200'], ['read-only-post-api-result-absent', 'write-only-get-api-result-absent', 'id-token-api-result-absent'], refusalStorage),
   authCase('AUTH-09/refresh-rotation', 'E', ['rotation-200', 'new-refresh-token-differs', 'access-lifetime-300s', 'grant-identity-scope-owner-preserved', 'renewed-api-get-200'], ['renewed-get-result-delivered'], { ddbReason: 'positive-control-no-reminder-write' }),
   authCase('AUTH-10/rotation-grace', 'E', ['grace-inner-reuse-200', 'grace-start-not-extended-invalid-grant', 'descendant-refresh-200'], 'token-endpoint-only-no-api-result'),
-  authCase('AUTH-11/revoke-disable', 'E', ['revoked-original-refresh-400', 'revoked-descendant-refresh-400', 'disabled-user-login-refused', 'disabled-user-refresh-refused'], 'token-endpoint-only-no-api-result'),
+  authCase('AUTH-11/revoke-disable', 'E', ['revoked-original-refresh-400', 'revoked-descendant-refresh-400', 'revocation-channel-revoke-token-api', 'disabled-user-login-refused', 'disabled-user-refresh-refused'], 'token-endpoint-only-no-api-result'),
   authCase('AUTH-12/refresh-negatives', 'E', ['missing-refresh-rejected', 'malformed-refresh-rejected', 'sibling-client-refresh-rejected', 'scope-not-expanded', 'valid-refresh-control-200'], 'token-endpoint-only-no-api-result'),
+  // Floci serves no hosted /oauth2/revoke route (measured live). AUTH-11 revokes through the RevokeToken API, so the hosted endpoint is a separate compatibility measurement.
+  { ...authCase('AUTH-11/hosted-revoke-endpoint', 'L', ['hosted-revoke-endpoint-measured'], 'token-endpoint-only-no-api-result'), acceptance: 'compatibility' },
   authCase('AUTH-06/token-expiry', 'E', ['valid-before-expiry-200', 'expired-401', 'refreshed-token-200'], ['expired-api-result-absent'], refusalStorage),
   // Independent product-handler cases run offline in tests/integration/formal-e2e/auth-claims.test.ts.
   authCase('AUTH-05/issuer-only', 'I', ['requireOwner-issuer-only-401'], 'handler-boundary-no-delivery', { ddbReason: 'handler-boundary-no-storage' }),
@@ -290,7 +292,10 @@ definitions.push(...cleanupDefinitions);
  * Cases whose result the runner records itself because it may be `unsupported` (compatibility acceptance): the probe returns the
  * measured outcome and the runner maps it. The matching caseActions entry only makes the case selectable; it is never run through runCase.
  */
-export const caseMeasurements = new Map<string, (fixture: import('./types.ts').SuiteFixture) => Promise<'pass' | 'unsupported' | 'fail'>>();
+export type MeasuredOutcome = 'pass' | 'unsupported' | 'fail';
+export const caseMeasurements = new Map<string, (fixture: import('./types.ts').SuiteFixture) => Promise<MeasuredOutcome | { outcome: MeasuredOutcome; httpStatus: number }>>();
+/** Fixed evidence reason of a measurement that ends unsupported; the default is signature-enforcement-unsupported. */
+export const measurementUnsupportedReasons = new Map<string, 'hosted-revoke-unsupported'>([['AUTH-11/hosted-revoke-endpoint', 'hosted-revoke-unsupported']]);
 /** A guard returns true when a prerequisite case has not passed; the runner then records not-run. */
 export const caseGuards = new Map<string, (fixture: import('./types.ts').SuiteFixture) => boolean>();
 /**

@@ -65,7 +65,7 @@ void test('case A/B users have independent synthetic identities and require comp
   const stack = { target: { endpoint: 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map([['floci', '172.18.0.2']]) }, bindings: { prefix, pool_id: pool, reminders_table: `${prefix}-production-reminders`, owner_state_table: `${prefix}-production-owner-state`, image_jobs_table: `${prefix}-production-image-jobs`, images_bucket: `${prefix}-000000000000-ap-northeast-1-images`, api_id: 'abcdefghij', cognito_issuer: `http://floci:4566/${pool}`, cognito_client_id: 'syntheticclient' }, artifact: {}, constructionOutputs: [{}, {}, {}, {}], setQuiescenceGuard() {}, async destroy() { return { attempted: 0, succeeded: 0, errors: 0, leaks: 0 }; }, manifest: evidenceContext(evidence).manifest, stateDirectory: directory } as unknown as import('./support/types.ts').ProvisionedStack;
   const fixture = await createRunFixture(stack, evidence); const state = fixtureState(fixture);
   const users: string[] = []; const revokeInputs: Record<string, string>[] = []; let sdkCalls = 0;
-  const deleted = new Set<string>(); let failPassword = false; let poolName = ''; let clientName = ''; let recovered = 0; let removedClient = false; let removedPool = false; let failDelete = false;
+  const deleted = new Set<string>(); let failPassword = false; let poolName = ''; let clientName = ''; let recovered = 0; let removedClient = false; let removedPool = false; let failDelete = false; let failRevoke = false;
   t.mock.method(state.cognito, 'send', async (command: { constructor: { name: string }; input: { Username: string; PoolName: string; ClientName: string; UserPoolId: string } }) => {
     sdkCalls++; const kind = command.constructor.name;
     const notFound = (name: string): never => { const error = new Error('not-found'); error.name = name; throw error; };
@@ -78,7 +78,7 @@ void test('case A/B users have independent synthetic identities and require comp
     if (kind === 'CreateUserPoolClientCommand') { clientName = command.input.ClientName; throw new Error('SYNTHETIC_CLIENT_TIMEOUT'); }
     if (kind === 'ListUserPoolClientsCommand') { recovered++; return { UserPoolClients: [{ ClientName: clientName, ClientId: 'ownedclient123' }] }; }
     if (kind === 'DescribeUserPoolClientCommand') { if (removedClient) notFound('ResourceNotFoundException'); return { UserPoolClient: { ClientName: clientName } }; }
-    if (kind === 'RevokeTokenCommand') revokeInputs.push(command.input as unknown as Record<string, string>);
+    if (kind === 'RevokeTokenCommand') { revokeInputs.push(command.input as unknown as Record<string, string>); if (failRevoke) throw new Error('RAW_SDK_SECRET_TEXT'); }
     if (kind === 'DeleteUserPoolClientCommand') removedClient = true;
     if (kind === 'DeleteUserPoolCommand') removedPool = true;
     return {};
@@ -88,6 +88,7 @@ void test('case A/B users have independent synthetic identities and require comp
   const firstAuth = await createCaseAuth(fixture, 'first'); await createCaseAuth(fixture, 'second'); await createCaseAuth(fixture, 'first'); assert.equal(users.length, 4); assert.equal(new Set(users).size, 4);
   assert.equal(evidenceContext(evidence).manifest.resources.filter(r => r.kind === 'sdk-user').length, 4);
   await firstAuth.revoke({ refreshToken: 'synthetic-refresh', claims: { client_id: 'ownedclient123' } } as never); assert.deepEqual(revokeInputs, [{ ClientId: 'ownedclient123', Token: 'synthetic-refresh' }]);
+  failRevoke = true; await assert.rejects(firstAuth.revoke({ refreshToken: 'synthetic-refresh', claims: { client_id: 'ownedclient123' } } as never), (error: Error) => error.message === 'TOKEN_REVOKE_FAILED' && !String(error.stack).includes('RAW_SDK_SECRET_TEXT')); failRevoke = false;
   failPassword = true; await assert.rejects(createCaseAuth(fixture, 'partial'), /SYNTHETIC_INITIALIZATION_FAILURE/);
   await assert.rejects(firstAuth.login('a', ['openid'], 'foreign'), /SYNTHETIC_CLIENT_TIMEOUT/); assert.equal(recovered, 1);
   await finalizeResults(evidence); failDelete = true; const partialCleanup = await cleanupOwnedSdk(fixture); assert.deepEqual(partialCleanup, { attempted: 7, succeeded: 6, errors: 1, leaks: 1 }); failDelete = false; await resetAuthControls(fixture);

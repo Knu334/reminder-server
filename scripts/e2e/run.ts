@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { createEvidence, recordProcess, terraformActions, finalizeResults, runCase, evidenceContext, flushPendingLogs } from '../../tests/e2e/floci/support/evidence.ts';
 import type { ProcessEvidence } from '../../tests/e2e/floci/support/evidence.ts';
 import type { CaseDefinition, Evidence, ProvisionedStack, E2EFixture } from '../../tests/e2e/floci/support/types.ts';
-import { definitions, caseActions, caseGuards, caseMeasurements, caseAuthId } from '../../tests/e2e/floci/support/cases.ts';
+import { definitions, caseActions, caseGuards, caseMeasurements, measurementUnsupportedReasons, caseAuthId } from '../../tests/e2e/floci/support/cases.ts';
 import '../../tests/e2e/floci/support/auth-cases.ts';
 import '../../tests/e2e/floci/support/api-cases.ts';
 import '../../tests/e2e/floci/support/storage-cases.ts';
@@ -212,11 +212,12 @@ export async function runSuiteCase(evidence: Evidence, def: CaseDefinition, suit
   const measure = caseMeasurements.get(def.id);
   if (measure) {
     // A compatibility measurement: pass/unsupported are both complete measurements (every assertion recorded), a failed control or unexpected answer is a fail.
-    let outcome: 'pass' | 'unsupported' | 'fail' = 'fail';
-    try { const view = { ...suite, auth: await wiring.createAuth(suite, caseAuthId(def)) }; wiring.bind(view, suite); outcome = await measure(view); } catch { outcome = 'fail'; }
+    let outcome: 'pass' | 'unsupported' | 'fail' = 'fail'; let observed: number | undefined;
+    try { const view = { ...suite, auth: await wiring.createAuth(suite, caseAuthId(def)) }; wiring.bind(view, suite); const measured = await measure(view); outcome = typeof measured === 'string' ? measured : measured.outcome; observed = typeof measured === 'string' ? undefined : measured.httpStatus; } catch { outcome = 'fail'; }
     const status = outcome === 'fail' ? 'fail' as const : 'pass' as const;
     const outputs = def.outputs.map(output => output.assertions.length ? { kind: output.kind, status, assertions: output.assertions.map(name => ({ name, status })) } : { kind: output.kind, status: 'not-applicable' as const, assertions: [], reason: output.notApplicableReason! });
-    await evidence.record(outcome === 'unsupported' ? { id: def.id, status: 'unsupported', phase: 'outputs', durationMs: 0, reason: 'signature-enforcement-unsupported', outputs } : outcome === 'pass' ? { id: def.id, status: 'pass', phase: 'complete', durationMs: 0, outputs } : { id: def.id, status: 'fail', phase: 'outputs', durationMs: 0, reason: 'action-failed', outputs });
+    const http = observed === undefined ? {} : { httpStatus: observed };
+    await evidence.record(outcome === 'unsupported' ? { id: def.id, status: 'unsupported', phase: 'outputs', durationMs: 0, reason: measurementUnsupportedReasons.get(def.id) ?? 'signature-enforcement-unsupported', ...http, outputs } : outcome === 'pass' ? { id: def.id, status: 'pass', phase: 'complete', durationMs: 0, ...http, outputs } : { id: def.id, status: 'fail', phase: 'outputs', durationMs: 0, reason: 'action-failed', ...http, outputs });
     return;
   }
   await runCase(def, evidence, async recorder => { const view = { ...suite, auth: await wiring.createAuth(suite, caseAuthId(def)) }; wiring.bind(view, suite); await caseActions.get(def.id)!(view, recorder); });

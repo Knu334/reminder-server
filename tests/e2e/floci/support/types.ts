@@ -38,7 +38,10 @@ export type FixtureAuth = {
   authorize(owner: 'a' | 'b', scopes: string[], client: 'primary' | 'sibling' | 'foreign', options?: { challengeMethod?: 'S256' | 'plain' }): Promise<{ code?: string; rejection?: { status?: number; error?: string }; verifier: string; callback: string; clientId: string }>;
   exchangeCode(fields: Record<string, string>): Promise<{ status: number; error?: string; session?: AuthSession }>;
   requestRefresh(token: string, client: 'primary' | 'sibling'): Promise<{ status: number; error?: string; session?: AuthSession }>;
+  /** Revokes through the Cognito RevokeToken API; any failure is the fixed code TOKEN_REVOKE_FAILED. */
   revoke(session: AuthSession): Promise<void>;
+  /** One POST to the hosted /oauth2/revoke endpoint through the guarded local transport; returns the observed status only. */
+  hostedRevoke(session: AuthSession): Promise<number>;
   disable(owner: 'a' | 'b'): Promise<void>;
   /** Verifies the real signature against the issuing pool's JWKS and the access-token claims; throws without echoing values. */
   verifySession(session: AuthSession): void;

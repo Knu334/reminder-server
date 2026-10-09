@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { caseActions, definitions } from './cases.ts';
+import { caseActions, caseMeasurements, definitions } from './cases.ts';
 import { tamperSignature } from './auth.ts';
 import { fixtureState } from './fixture.ts';
 import { snapshotOwnedStorage } from './storage.ts';
@@ -149,12 +149,22 @@ run('AUTH-11/revoke-disable', async (fixture, recorder, score) => {
   const original = await fixture.auth.login('a', [READ], 'primary'); const rotated = await fixture.auth.requestRefresh(original.refreshToken, 'primary'); if (!rotated.session) throw new Error('AUTH_ROTATION_FAILED');
   await fixture.auth.revoke(original);
   const originalAfter = await fixture.auth.requestRefresh(original.refreshToken, 'primary'); const descendantAfter = await fixture.auth.requestRefresh(rotated.session.refreshToken, 'primary'); recorder.recordInput({ httpStatus: descendantAfter.status });
+  score.ok('http', 'revocation-channel-revoke-token-api', true); // reached only when the RevokeToken API call succeeded; the hosted endpoint is measured by AUTH-11/hosted-revoke-endpoint
   score.ok('http', 'revoked-original-refresh-400', rejected(originalAfter, ['invalid_grant'])); score.ok('http', 'revoked-descendant-refresh-400', rejected(descendantAfter, ['invalid_grant']));
   const issued = await fixture.auth.login('b', [READ], 'primary'); await fixture.auth.disable('b');
   let loginRefused = false; try { await fixture.auth.login('b', [READ], 'primary'); } catch (error) { loginRefused = (error as Error).message === 'HOSTED_UI_FAILED'; }
   score.ok('http', 'disabled-user-login-refused', loginRefused);
   score.ok('http', 'disabled-user-refresh-refused', rejected(await fixture.auth.requestRefresh(issued.refreshToken, 'primary'), ['invalid_grant']));
 });
+
+// Compatibility measurement of the hosted /oauth2/revoke endpoint: any 4xx/5xx is unsupported; a 2xx must really invalidate the refresh token. Only the observed status is kept.
+caseMeasurements.set('AUTH-11/hosted-revoke-endpoint', async fixture => {
+  const session = await fixture.auth.login('a', [READ], 'primary'); const status = await fixture.auth.hostedRevoke(session);
+  if (status >= 400 && status <= 599) return { outcome: 'unsupported', httpStatus: status };
+  if (status < 200 || status > 299) return { outcome: 'fail', httpStatus: status };
+  return { outcome: rejected(await fixture.auth.requestRefresh(session.refreshToken, 'primary'), ['invalid_grant']) ? 'pass' : 'fail', httpStatus: status };
+});
+caseActions.set('AUTH-11/hosted-revoke-endpoint', async () => { throw new Error('MEASURED_CASE_RECORDED_BY_RUNNER'); });
 
 run('AUTH-12/refresh-negatives', async (fixture, recorder, score) => {
   const session = await fixture.auth.login('a', [READ], 'primary');

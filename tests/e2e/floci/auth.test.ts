@@ -67,3 +67,45 @@ void test('AUTH-05 records the observed signature classification as a value-free
   const composite = await runOnce('AUTH-05/foreign-issuer', authStub({ foreignVerifiable: false }), true); assert.equal(composite.status, 'pass'); assert.equal(composite.code, 'FOREIGN_KEY_COMPOSITE');
   const issuerOnly = await runOnce('AUTH-05/foreign-issuer', authStub({ foreignVerifiable: true }), true); assert.equal(issuerOnly.status, 'pass'); assert.equal(issuerOnly.code, 'FOREIGN_SIGNATURE_VERIFIABLE');
 });
+
+// AUTH-11 revocation channel and the separate hosted-endpoint compatibility measurement.
+async function savedAuth11(id: string, auth: Record<string, unknown>): Promise<{ status: string; reason?: string; httpStatus?: number; outputs?: { kind: string; status: string; assertions: { name: string; status: string }[] }[] }> {
+  const { runSuiteCase } = await import('../../../scripts/e2e/run.ts'); const { fixture } = stub(401);
+  const directory = await mkdtemp(join(tmpdir(), 'auth-11-')); try {
+    const def = definitions.find(item => item.id === id)!; const evidence = await createEvidence([def], join(directory, 'run'));
+    await runSuiteCase(evidence, def, fixture, { createAuth: async () => auth as never, bind(view, source) { fixtureStates.set(view, fixtureStates.get(source)!); } });
+    await finalizeResults(evidence);
+    const saved = JSON.parse(await readFile(join(evidenceContext(evidence).directory, 'results.json'), 'utf8')) as { cases: { result: never }[] };
+    return saved.cases[0]!.result;
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}
+async function savedAuth11Run(fixture: SuiteFixture): Promise<{ name: string; status: string }[]> {
+  const directory = await mkdtemp(join(tmpdir(), 'auth-11-run-')); try {
+    const def = definitions.find(item => item.id === 'AUTH-11/revoke-disable')!; const evidence = await createEvidence([def], join(directory, 'run'));
+    await runCase(def, evidence, async recorder => { await caseActions.get(def.id)!(fixture, recorder); }); await finalizeResults(evidence);
+    const saved = JSON.parse(await readFile(join(evidenceContext(evidence).directory, 'results.json'), 'utf8')) as { cases: { result: { outputs?: { kind: string; assertions: { name: string; status: string }[] }[] } }[] };
+    return saved.cases[0]!.result.outputs!.find(output => output.kind === 'http')!.assertions;
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}
+const hostedAuth = (hostedStatus: number | 'throw', refreshAfter: { status: number; error?: string }) => ({ login: async () => session('valid'), hostedRevoke: async () => { if (hostedStatus === 'throw') throw new Error('RAW'); return hostedStatus; }, requestRefresh: async () => refreshAfter });
+void test('AUTH-11 states the revocation channel it used and the hosted endpoint is a separate compatibility case', async () => {
+  const main = definitions.find(def => def.id === 'AUTH-11/revoke-disable')!; assert.ok(main.outputs[0]!.assertions.includes('revocation-channel-revoke-token-api'));
+  const hosted = definitions.find(def => def.id === 'AUTH-11/hosted-revoke-endpoint')!; assert.equal(hosted.acceptance, 'compatibility'); assert.equal(hosted.layer, 'L'); assert.equal(hosted.suite, 'auth');
+  assert.equal(definitions.findIndex(def => def.id === hosted.id) < definitions.findIndex(def => def.id === 'AUTH-06/token-expiry'), true, 'the long expiry case stays last');
+  let revoked = false; const { fixture } = stub(401); let disabled = false;
+  (fixture as unknown as { auth: unknown }).auth = {
+    login: async (owner: string) => { if (owner === 'b' && disabled) throw new Error('HOSTED_UI_FAILED'); return session('valid'); },
+    requestRefresh: async () => revoked ? { status: 400, error: 'invalid_grant' } : { status: 200, session: session('valid') },
+    revoke: async () => { revoked = true; }, disable: async () => { disabled = true; } };
+  const saved = await savedAuth11Run(fixture); assert.ok(saved.every(item => item.status === 'pass')); assert.ok(saved.some(item => item.name === 'revocation-channel-revoke-token-api' && item.status === 'pass'));
+});
+void test('hosted revoke measurement: 404 is unsupported with a fixed reason, 2xx with a rejected refresh passes, anything else fails', async () => {
+  const unsupported = await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(404, { status: 200 }));
+  assert.equal(unsupported.status, 'unsupported'); assert.equal(unsupported.reason, 'hosted-revoke-unsupported'); assert.equal(unsupported.httpStatus, 404);
+  assert.deepEqual(unsupported.outputs?.find(output => output.kind === 'http')?.assertions, [{ name: 'hosted-revoke-endpoint-measured', status: 'pass' }]);
+  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(501, { status: 200 }))).status, 'unsupported');
+  const works = await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(200, { status: 400, error: 'invalid_grant' })); assert.equal(works.status, 'pass'); assert.equal(works.httpStatus, 200);
+  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(200, { status: 200 }))).status, 'fail', 'a 200 that leaves the token usable is a failure');
+  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth('throw', { status: 200 }))).status, 'fail');
+  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(302, { status: 200 }))).status, 'fail');
+});
