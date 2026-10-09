@@ -164,6 +164,17 @@ void test('fixture HTTP preserves the actual owned Gateway endpoint path and rej
   assert.throws(() => gatewayRequestUrl('http://floci:4566/owned-api/abcdefghij', '//foreign.test/'), /LOCAL_TARGET_REJECTED/);
 });
 
+void test('Floci Gateway invocation maps the AWS-shaped owned endpoint onto the pinned local execute-api host', async () => {
+  const { localGatewayInvocation } = await import('./support/fixture.ts');
+  const target = { endpoint: 'http://floci:4566' as const, region: 'ap-northeast-1' as const, addresses: new Map([['floci', '172.18.0.2']]) };
+  const mapped = localGatewayInvocation('https://abcdefghij.execute-api.ap-northeast-1.amazonaws.com', 'abcdefghij', target);
+  assert.equal(mapped.base, 'http://abcdefghij.execute-api.ap-northeast-1.localhost:4566/');
+  assert.equal(mapped.target.addresses.get('abcdefghij.execute-api.ap-northeast-1.localhost'), '172.18.0.2');
+  assert.equal(mapped.target.addresses.has('abcdefghij.execute-api.ap-northeast-1.amazonaws.com'), false);
+  for (const bad of ['https://zzzzzzzzzz.execute-api.ap-northeast-1.amazonaws.com', 'https://abcdefghij.execute-api.ap-northeast-1.amazonaws.com/x', 'https://abcdefghij.execute-api.ap-northeast-1.amazonaws.com.evil.test']) assert.throws(() => localGatewayInvocation(bad, 'abcdefghij', target), /LOCAL_TARGET_REJECTED/);
+  assert.equal(localGatewayInvocation('http://floci:4566/owned-api/abcdefghij', 'abcdefghij', target).base, 'http://floci:4566/owned-api/abcdefghij');
+});
+
 void test('Lambda response observation preserves SDK bytes and projects only alias and qualified policy fields', async () => {
   const { observeLambdaResponse } = await import('./support/fixture.ts'); const { Readable } = await import('node:stream');
   const bytes = Buffer.from(JSON.stringify({ FunctionVersion: '$LATEST', Secret: 'SECRET_CANARY' }));
