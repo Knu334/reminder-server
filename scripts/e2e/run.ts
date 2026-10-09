@@ -7,6 +7,7 @@ import { createEvidence, recordProcess, terraformActions, finalizeResults, runCa
 import type { ProcessEvidence } from '../../tests/e2e/floci/support/evidence.ts';
 import type { CaseDefinition, Evidence, ProvisionedStack, E2EFixture } from '../../tests/e2e/floci/support/types.ts';
 import { definitions, caseActions } from '../../tests/e2e/floci/support/cases.ts';
+import '../../tests/e2e/floci/support/auth-cases.ts';
 
 export const deadlines = { run: 75 * 60_000, cleanup: 15 * 60_000, total: 90 * 60_000, http: 30_000, terraform: 10 * 60_000, authExpiry: 330_000, logs: 60_000, scheduler: 90_000, cleanupInvoke: 700_000 } as const;
 export class RunBudget {
