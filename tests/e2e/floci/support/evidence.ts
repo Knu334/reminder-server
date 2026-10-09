@@ -293,6 +293,6 @@ export async function finalizeResults(evidence: Evidence): Promise<void> {
 /** End only suite SDK ownership after every executed case has resolved logs. */
 export async function finalizeSuiteResources(evidence: Evidence, suite: string): Promise<void> {
   const state = stateOf(evidence);
-  if (!label.test(suite) || state.finalized || state.active.size || state.pending.size || [...state.results.values()].some(result => state.definitions.find(def => def.id === result.id)?.suite === suite && ['logs-pending', 'implementation-pending'].includes(result.reason ?? ''))) throw new Error('RESOURCE_REJECTED');
+  if (!label.test(suite) || state.finalized || state.active.size || state.pending.size || [...state.results.values()].some(result => { const def = state.definitions.find(item => item.id === result.id); return def?.suite === suite && (result.reason === 'logs-pending' || (result.reason === 'implementation-pending' && def.layer !== 'I')); })) throw new Error('RESOURCE_REJECTED');
   state.finalizedSuites.add(suite);
 }

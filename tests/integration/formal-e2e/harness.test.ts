@@ -328,6 +328,16 @@ for (const position of ['before', 'after'] as const) {
   }
 }
 
+void test('suite finalization ignores unexecuted integration-layer cases but not unexecuted live cases', async t => {
+  const { finalizeSuiteResources } = await import('../../e2e/floci/support/evidence.ts');
+  const integration = { ...definition('SAFE-01/integration-only'), layer: 'I' as const };
+  const live = { ...definition('SAFE-01/live-unrun'), layer: 'E' as const };
+  const onlyIntegration = await createEvidence([integration], await temporary(t));
+  await finalizeSuiteResources(onlyIntegration, 'harness');
+  const withLive = await createEvidence([integration, live], await temporary(t));
+  await assert.rejects(finalizeSuiteResources(withLive, 'harness'), /RESOURCE_REJECTED/);
+});
+
 void test('suite SDK manifest allows only bound owned verified absence after log finalization', async t => {
   const { reserveResource, markResource, bindResourceIdentities, finalizeSuiteResources, evidenceContext } = await import('../../e2e/floci/support/evidence.ts');
   const evidence = await createEvidence([definition()], await temporary(t));
