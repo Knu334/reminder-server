@@ -3,8 +3,8 @@ import type { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import type { CleanupResult } from '../../../../src/images/types.ts';
 import type { LogExpectation, PendingLogCheck, LogCheckResult, SuiteFixture, OutputResult } from './types.ts';
 export type ObservedEvent = { eventId: string; message: string; logStreamName: string; group: string; timestamp: number };
-export type CleanupCompletion = { since: number; until: number; completed: boolean; failed?: string; status?: number; result?: CleanupResult; storageUnchanged?: boolean };
-export type CleanupExpectation = { since: number; until: number; status?: number; evaluated?: number; deletes?: number; skippedUnpublished?: boolean };
+export type CleanupCompletion = { since: number; until: number; completed: boolean; lambdaRequestId?: string; failed?: string; status?: number; result?: CleanupResult; storageUnchanged?: boolean };
+export type CleanupExpectation = { since: number; until: number; nextSince?: number; status?: number; evaluated?: number; deletes?: number; skippedUnpublished?: boolean };
 /** Floci stamps Lambda log events when it ingests them, slightly after the HTTP response returns. */
 export const LOG_TIMESTAMP_GRACE_MS = 500;
 type Parsed = ObservedEvent & { invokeId?: string; doc: Record<string, unknown> };
@@ -25,11 +25,13 @@ export class LogObserver {
     }
   }
   safeCounts(): Record<LogExpectation['service'], number> { return Object.fromEntries(Object.entries(this.groups).map(([service, group]) => [service, [...this.events.values()].filter(e => e.group === group).length])) as Record<LogExpectation['service'], number>; }
-  private window(expect: LogExpectation, graceMs = 0): Parsed[] { return [...this.events.values()].filter(event => event.group === this.groups[expect.service] && event.timestamp >= expect.since && event.timestamp <= (expect.until === undefined ? Infinity : expect.until + graceMs)); }
+  /** Upper bound of the lag grace: LOG_TIMESTAMP_GRACE_MS past `until`, but never at or beyond the harness-known start of the next tracked input. */
+  private limit(until: number, graceMs: number, notAfter?: number): number { return Math.min(until + graceMs, notAfter === undefined ? Infinity : Math.max(until, notAfter - 1)); }
+  private window(expect: LogExpectation, graceMs = 0): Parsed[] { const limit = expect.until === undefined ? Infinity : this.limit(expect.until, graceMs, expect.notAfter); return [...this.events.values()].filter(event => event.group === this.groups[expect.service] && event.timestamp >= expect.since && event.timestamp <= limit); }
   match(expect: LogExpectation): boolean {
     if (expect.service === 'api' && (!expect.requestId || expect.status === undefined)) return false;
     const present = expect.mode === 'present';
-    const matched = this.window(expect, present && expect.requestId ? LOG_TIMESTAMP_GRACE_MS : 0).filter(({ doc }) => (!expect.requestId || doc.requestId === expect.requestId) && (!expect.lambdaRequestId || doc.lambdaRequestId === expect.lambdaRequestId) && (expect.status === undefined || Number(doc.status) === expect.status) && (!expect.operation || doc.operation === expect.operation) && (!expect.code || doc.code === expect.code));
+    const matched = this.window(expect, present ? LOG_TIMESTAMP_GRACE_MS : 0).filter(({ doc }) => (!expect.requestId || doc.requestId === expect.requestId) && (!expect.lambdaRequestId || doc.lambdaRequestId === expect.lambdaRequestId) && (expect.status === undefined || Number(doc.status) === expect.status) && (!expect.operation || doc.operation === expect.operation) && (!expect.code || doc.code === expect.code));
     if (present) return matched.length === 1;
     // A refused request must have no result log at all, however late Floci stamps it.
     return matched.length === 0 && !(expect.requestId && [...this.events.values()].some(e => e.group === this.groups[expect.service] && e.doc.requestId === expect.requestId));
@@ -39,17 +41,20 @@ export class LogObserver {
     let matched = this.match(check.expectation);
     if (check.expectation.mode === 'absent') {
       // Any owned-window API result is extra: normal controls sit outside this window.
-      matched = matched && !!check.controls && before && after && this.window(check.expectation).filter(e => typeof e.doc.requestId === 'string' && typeof e.doc.status === 'number' && ![check.controls?.before.requestId, check.controls?.after.requestId].includes(e.doc.requestId)).length === 0;
+      matched = matched && !!check.controls && before && after && this.window({ ...check.expectation, notAfter: check.controls.after.since }, LOG_TIMESTAMP_GRACE_MS).filter(e => typeof e.doc.requestId === 'string' && typeof e.doc.status === 'number' && ![check.controls?.before.requestId, check.controls?.after.requestId].includes(e.doc.requestId)).length === 0;
     }
     return { caseId: check.caseId, assertion: check.assertion, matched, ...(check.controls ? { controlsMatched: { before, after } } : {}) };
   }
   cleanupMatch(expected: CleanupExpectation, completion?: CleanupCompletion): boolean {
-    // Floci stamps events at ingestion, after the invoke returned: accept a bounded lag, but never another invoke's start.
-    const events = [...this.events.values()].filter(e => e.group === this.groups.cleanup && e.timestamp >= expected.since && e.timestamp <= expected.until + LOG_TIMESTAMP_GRACE_MS);
+    // Floci stamps events at ingestion, after the invoke returned: accept a bounded lag, capped at the next tracked invoke's harness-known start.
+    const limit = this.limit(expected.until, LOG_TIMESTAMP_GRACE_MS, expected.nextSince);
+    const events = [...this.events.values()].filter(e => e.group === this.groups.cleanup && e.timestamp >= expected.since && e.timestamp <= limit);
     const isStart = (e: Parsed): boolean => e.doc.operation === 'cleanup_start' && typeof e.doc.lambdaRequestId === 'string';
-    const strictStarts = events.filter(e => isStart(e) && e.timestamp <= expected.until);
-    // A start stamped after the response belongs to this invoke only if it is the earliest one in the lag window.
-    const starts = strictStarts.length > 0 ? strictStarts : events.filter(isStart).sort((a, b) => a.timestamp - b.timestamp).slice(0, 1);
+    const wantedId = completion?.lambdaRequestId;
+    // With the invoke's own Lambda request id, the start is identified by id alone (time only bounds the search); otherwise by time.
+    const identified = wantedId === undefined ? events.filter(isStart) : events.filter(e => isStart(e) && e.doc.lambdaRequestId === wantedId);
+    const strictStarts = identified.filter(e => e.timestamp <= expected.until);
+    const starts = strictStarts.length > 0 ? strictStarts : identified.sort((a, b) => a.timestamp - b.timestamp).slice(0, 1);
     if (starts.length !== 1) return false;
     const start = starts[0]!;
     const nextStart = Math.min(Infinity, ...events.filter(e => isStart(e) && e !== start && e.timestamp >= start.timestamp).map(e => e.timestamp));
@@ -88,6 +93,11 @@ export const suiteLogStates = new WeakMap<SuiteFixture, SuiteLogState>();
 export function registerLogCheck(fixture: SuiteFixture, caseId: string, expected: LogExpectation): PendingLogCheck { const state = suiteLogStates.get(fixture); if (!state) throw new Error('FIXTURE_REJECTED'); const check = { caseId, assertion: 'delivered', expectation: expected }; state.pending.push(check); state.lastInput = Math.max(state.lastInput, expected.until ?? expected.since); return check; }
 /** One case may register several cleanup expectations, each bound to its own tracked invoke window (first 'delivered', then 'delivered-2', ...). A window already registered, or an overlapping one, is rejected. */
 export function expectCleanupLogs(fixture: SuiteFixture, caseId: string, expected: CleanupExpectation): PendingLogCheck { const state = suiteLogStates.get(fixture); if (!state || [...state.cleanup.values()].some(other => expected.since <= other.until && other.since <= expected.until)) throw new Error('FIXTURE_REJECTED'); const own = [...state.cleanup.keys()].filter(key => key === caseId || key.startsWith(`${caseId}#`)).length; const check = registerLogCheck(fixture, caseId, { service: 'cleanup', since: expected.since, until: expected.until, mode: 'present', operation: expected.skippedUnpublished ? 'cleanup_start' : 'cleanup' }); if (own > 0) check.assertion = `delivered-${own + 1}`; state.cleanup.set(own === 0 ? caseId : `${caseId}#${own + 1}`, expected); return check; }
-export function cleanupChecksMatch(state: SuiteLogState): boolean { return [...state.cleanup.values()].every(expected => { const completion = state.completions.find(completion => completion.since === expected.since && completion.until === expected.until); return !!completion && state.observer.cleanupMatch(expected, completion); }); }
-export function cleanupCaseMatches(state: SuiteLogState, caseId: string): boolean { return [...state.cleanup.entries()].filter(([key]) => key === caseId || key.startsWith(`${caseId}#`)).every(([, expected]) => { const completion = state.completions.find(c => c.since === expected.since && c.until === expected.until); return !!completion && state.observer.cleanupMatch(expected, completion); }); }
-export async function flushSuiteLogs(fixture: SuiteFixture): Promise<Map<string, OutputResult>> { const state = suiteLogStates.get(fixture); if (!state) throw new Error('FIXTURE_REJECTED'); const checks = await state.observer.flush(state.pending, state.lastInput, 60_000, () => cleanupChecksMatch(state)); const result = new Map<string, OutputResult>(); for (const check of checks) { const matched = check.matched && cleanupCaseMatches(state, check.caseId); const output = result.get(check.caseId) ?? { kind: 'logs', status: 'pass', assertions: [] }; if (output.assertions.some(a => a.name === check.assertion)) throw new Error('INVALID_LOG_CHECK'); output.assertions.push({ name: check.assertion, status: matched ? 'pass' : 'fail' }); if (!matched) output.status = 'fail'; result.set(check.caseId, output); } return result; }
+/** The harness-known `since` of the next tracked input (pending check, control or cleanup invoke) that starts at or after `until` and after its own `since`. */
+export function nextSinceAfter(state: SuiteLogState, until: number, since: number): number | undefined { const sinces = [...state.pending.flatMap(c => [c.expectation.since, ...(c.controls ? [c.controls.before.since, c.controls.after.since] : [])]), ...state.completions.map(c => c.since), ...[...state.cleanup.values()].map(c => c.since)].filter(next => next >= until && next > since); return sinces.length ? Math.min(...sinces) : undefined; }
+/** Binds every check's lag grace to the next tracked input; call on the checks about to be flushed. */
+export function capCleanupGrace(state: SuiteLogState, checks: PendingLogCheck[]): void { for (const check of checks) { const notAfter = check.expectation.notAfter ?? nextSinceAfter(state, check.expectation.until ?? check.expectation.since, check.expectation.since); if (notAfter !== undefined) check.expectation.notAfter = notAfter; } }
+const capped = (state: SuiteLogState, expected: CleanupExpectation): CleanupExpectation => { const nextSince = expected.nextSince ?? nextSinceAfter(state, expected.until, expected.since); return nextSince === undefined ? expected : { ...expected, nextSince }; };
+export function cleanupChecksMatch(state: SuiteLogState): boolean { return [...state.cleanup.values()].every(expected => { const completion = state.completions.find(completion => completion.since === expected.since && completion.until === expected.until); return !!completion && state.observer.cleanupMatch(capped(state, expected), completion); }); }
+export function cleanupCaseMatches(state: SuiteLogState, caseId: string): boolean { return [...state.cleanup.entries()].filter(([key]) => key === caseId || key.startsWith(`${caseId}#`)).every(([, expected]) => { const completion = state.completions.find(c => c.since === expected.since && c.until === expected.until); return !!completion && state.observer.cleanupMatch(capped(state, expected), completion); }); }
+export async function flushSuiteLogs(fixture: SuiteFixture): Promise<Map<string, OutputResult>> { const state = suiteLogStates.get(fixture); if (!state) throw new Error('FIXTURE_REJECTED'); capCleanupGrace(state, state.pending); const checks = await state.observer.flush(state.pending, state.lastInput, 60_000, () => cleanupChecksMatch(state)); const result = new Map<string, OutputResult>(); for (const check of checks) { const matched = check.matched && cleanupCaseMatches(state, check.caseId); const output = result.get(check.caseId) ?? { kind: 'logs', status: 'pass', assertions: [] }; if (output.assertions.some(a => a.name === check.assertion)) throw new Error('INVALID_LOG_CHECK'); output.assertions.push({ name: check.assertion, status: matched ? 'pass' : 'fail' }); if (!matched) output.status = 'fail'; result.set(check.caseId, output); } return result; }

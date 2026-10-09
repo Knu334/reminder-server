@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { definitions, caseActions, caseGuards, cleanupDefinitions, caseAuthId } from './support/cases.ts';
 import './support/cleanup-cases.ts';
 import { createEvidence, evidenceContext, flushPendingLogs, finalizeResults } from './support/evidence.ts';
-import { cleanupChecksMatch, cleanupCaseMatches, suiteLogStates } from './support/logs.ts';
+import { capCleanupGrace, cleanupChecksMatch, cleanupCaseMatches, suiteLogStates } from './support/logs.ts';
 import { createSim } from './api-sim.ts';
 import type { SimOptions } from './api-sim.ts';
 import { cleanupIo, invokeCleanup, makeCleanupJob, seedCleanupJobs, validateSeedJob } from './support/cleanup-fixtures.ts';
@@ -43,7 +43,7 @@ async function runSuite(ids: string[] | undefined, options: SimOptions = {}, see
     const selected = e.filter(def => !ids || ids.includes(def.id)); const evidence = await createEvidence(selected, join(directory, 'run'));
     for (const def of selected) await runSuiteCase(evidence, def, sim.fixture, { createAuth: async (_suite, authId) => sim.authFor(authId), bind(view, source) { fixtureStates.set(view, fixtureStates.get(source)!); suiteLogStates.set(view, suiteLogStates.get(source)!); } });
     const state = suiteLogStates.get(sim.fixture)!;
-    await flushPendingLogs(evidence, async checks => (await sim.observer.flush(checks, Date.now(), 60_000, () => cleanupChecksMatch(state))).map(result => ({ ...result, matched: result.matched && cleanupCaseMatches(state, result.caseId) })));
+    await flushPendingLogs(evidence, async checks => (capCleanupGrace(state, checks), await sim.observer.flush(checks, Date.now(), 60_000, () => cleanupChecksMatch(state))).map(result => ({ ...result, matched: result.matched && cleanupCaseMatches(state, result.caseId) })));
     await finalizeResults(evidence);
     const saved = JSON.parse(await readFile(join(evidenceContext(evidence).directory, 'results.json'), 'utf8')) as { cases: { id: string; result: Saved }[] };
     const results = new Map(saved.cases.map(item => [item.id, item.result]));
@@ -141,4 +141,13 @@ void test('a thrown invoke keeps quiescence unsatisfied and later invokes name t
   try { await assert.rejects(invokeCleanup(sim.fixture), (error: Error) => error.message === 'CLEANUP_INVOKE_TIMEOUT'); } finally { cleanupIo.invoke = original; }
   assert.equal(state.cleanupIntervals.at(-1)?.completed, false, 'an unknown outcome never satisfies quiescence'); assert.equal(state.cleanupIntervals.every(interval => interval.completed), false);
   await assert.rejects(invokeCleanup(sim.fixture), (error: Error) => error.message === 'CLEANUP_PREVIOUS_INVOKE_FAILED');
+});
+
+void test('the tracked interval records the invoke response request id only when the response provides one', async () => {
+  const sim = createSim(); const state = fixtureStates.get(sim.fixture) as unknown as { cleanupIntervals: { lambdaRequestId?: string }[] }; const original = cleanupIo.invoke;
+  try {
+    cleanupIo.invoke = async (fixture, payload) => ({ ...(await original(fixture, payload)), requestId: 'req-from-metadata' });
+    await invokeCleanup(sim.fixture); assert.equal(state.cleanupIntervals.at(-1)?.lambdaRequestId, 'req-from-metadata');
+    cleanupIo.invoke = original; await invokeCleanup(sim.fixture); assert.equal(state.cleanupIntervals.at(-1)?.lambdaRequestId, undefined);
+  } finally { cleanupIo.invoke = original; }
 });

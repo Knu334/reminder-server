@@ -167,11 +167,11 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
         if (ready && executable.length) {
           const { createFixture, fixtureState, fixtureStates } = await import('../../tests/e2e/floci/support/fixture.ts');
           const { createCaseAuth } = await import('../../tests/e2e/floci/support/auth.ts');
-          const { suiteLogStates, cleanupChecksMatch, cleanupCaseMatches } = await import('../../tests/e2e/floci/support/logs.ts');
+          const { suiteLogStates, cleanupChecksMatch, cleanupCaseMatches, capCleanupGrace } = await import('../../tests/e2e/floci/support/logs.ts');
           const suiteResult = await executeSuites(executable, {
             create: suite => createFixture({ suite, publication: true }, fixture!),
             action: (def, suite) => runSuiteCase(evidence, def, suite, { createAuth: createCaseAuth, bind(view, source) { fixtureStates.set(view, fixtureState(source)); suiteLogStates.set(view, suiteLogStates.get(source)!); } }),
-            async flush(suite) { const state = suiteLogStates.get(suite)!; await flushPendingLogs(evidence, async checks => { const results = await state.observer.flush(checks, Math.max(state.lastInput, fixtureState(suite).lastInput), 60_000, () => cleanupChecksMatch(state)); return results.map(result => ({ ...result, matched: result.matched && cleanupCaseMatches(state, result.caseId) })); }); },
+            async flush(suite) { const state = suiteLogStates.get(suite)!; await flushPendingLogs(evidence, async checks => { capCleanupGrace(state, checks); const results = await state.observer.flush(checks, Math.max(state.lastInput, fixtureState(suite).lastInput), 60_000, () => cleanupChecksMatch(state)); return results.map(result => ({ ...result, matched: result.matched && cleanupCaseMatches(state, result.caseId) })); }); },
             reset: suite => suite.resetSuite(),
             blocked: def => evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'prerequisite-failed' }),
           });

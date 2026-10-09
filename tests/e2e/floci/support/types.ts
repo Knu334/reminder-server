@@ -69,7 +69,7 @@ export type ProvisionedStack = {
   constructionOutputs: OutputResult[];
   destroy(): Promise<CleanupSummary>;
 };
-export type LogExpectation = { service: 'api' | 'gateway' | 'cleanup'; requestId?: string; lambdaRequestId?: string; since: number; mode: 'present' | 'absent'; until?: number; status?: number; operation?: string; code?: string };
+export type LogExpectation = { service: 'api' | 'gateway' | 'cleanup'; requestId?: string; lambdaRequestId?: string; since: number; mode: 'present' | 'absent'; until?: number; status?: number; operation?: string; code?: string; /** Exclusive harness-known start of the next tracked input: the lag grace never reaches it. */ notAfter?: number };
 export type SafeLogMatch = { service: LogExpectation['service']; events: number; status?: number; operation?: string; code?: string };
 export type PendingLogCheck = { caseId: string; assertion: string; expectation: LogExpectation; controls?: { before: LogExpectation; after: LogExpectation } };
 export type LogCheckResult = { caseId: string; assertion: string; matched: boolean; controlsMatched?: { before: boolean; after: boolean } };

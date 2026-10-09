@@ -144,3 +144,43 @@ void test('cleanup pair stamped shortly after the invoke returned still matches,
   assert.equal(observer.cleanupMatch({ since: 126, until: 140, status: 200, evaluated: 0, deletes: 0 }), true);
   assert.equal(new LogObserver(groups).cleanupMatch(expected), false);
 });
+void test('a missing own cleanup start is not masked by the next sequential invoke start inside the grace', () => {
+  const end = (id: string, ts: number) => event(id, { requestId: `svc-${id}`, operation: 'cleanup', status: 200, evaluated: 0, deletes: 0 }, 'invoke-1', 'owned-cleanup', ts);
+  const start = (id: string, ts: number) => event(id, { lambdaRequestId: id, operation: 'cleanup_start' }, 'invoke-1', 'owned-cleanup', ts);
+  const a = { since: 90, until: 120, status: 200, evaluated: 0, deletes: 0 }; const doneA = { since: 90, until: 120, completed: true, status: 200, result: { evaluated: 0, deletes: 0, incomplete: false, skippedUnpublished: false }, storageUnchanged: true };
+  // A's own start/end are lost; B (since 130, harness-known) logs inside A's 500 ms grace.
+  const observer = new LogObserver(groups); observer.ingest([start('lb', 140), end('eb', 145)]);
+  assert.equal(observer.cleanupMatch({ ...a, nextSince: 130 }, doneA), false, 'cap at the next harness since');
+  assert.equal(observer.cleanupMatch({ ...a, nextSince: 130 }), false);
+  // Own late start still matches under the cap; the next invoke's later logs are excluded.
+  const ok = new LogObserver(groups); ok.ingest([start('la', 125), end('ea', 128), start('lb', 140), end('eb', 145)]);
+  assert.equal(ok.cleanupMatch({ ...a, nextSince: 130 }, doneA), true);
+});
+void test('cleanup start must carry the tracked invoke request id', () => {
+  const observer = new LogObserver(groups); const a = { since: 90, until: 120, status: 200, evaluated: 0, deletes: 0 };
+  const done = (lambdaRequestId?: string) => ({ since: 90, until: 120, completed: true, ...(lambdaRequestId ? { lambdaRequestId } : {}), status: 200, result: { evaluated: 0, deletes: 0, incomplete: false, skippedUnpublished: false }, storageUnchanged: true });
+  observer.ingest([event('s', { lambdaRequestId: 'lambda-1', operation: 'cleanup_start' }, 'i', 'owned-cleanup', 100), event('e', { requestId: 'svc', operation: 'cleanup', status: 200, evaluated: 0, deletes: 0 }, 'i', 'owned-cleanup', 105)]);
+  assert.equal(observer.cleanupMatch(a, done('lambda-1')), true);
+  assert.equal(observer.cleanupMatch(a, done('lambda-other')), false, 'request id mismatch');
+  assert.equal(observer.cleanupMatch(a, done()), true, 'no id: time only');
+  const late = new LogObserver(groups); late.ingest([event('s2', { lambdaRequestId: 'lambda-2', operation: 'cleanup_start' }, 'i', 'owned-cleanup', 125), event('e2', { requestId: 'svc2', operation: 'cleanup', status: 200, evaluated: 0, deletes: 0 }, 'i', 'owned-cleanup', 128)]);
+  assert.equal(late.cleanupMatch(a, done('lambda-1')), false, 'a late start of another request is not ours');
+  assert.equal(late.cleanupMatch(a, done('lambda-2')), true);
+});
+void test('an uncorrelated refusal is failed by a late-stamped extra result log but not by the next control', () => {
+  const absent = { service: 'api' as const, requestId: 'uncorrelated-gateway-refusal', status: 401, since: 95, until: 105, mode: 'absent' as const };
+  const before = { service: 'api' as const, requestId: 'before', status: 200, since: 90, until: 94, mode: 'present' as const };
+  const after = { ...before, requestId: 'after', since: 150, until: 160 };
+  const build = (extra: ReturnType<typeof event>[]) => { const o = new LogObserver(groups); o.ingest([event('b', { requestId: 'before', status: 200 }, 'i', 'owned-api', 92), event('a', { requestId: 'after', status: 200 }, 'i', 'owned-api', 152), ...extra]); return o.check({ caseId: 'c', assertion: 'absent', expectation: absent, controls: { before, after } }).matched; };
+  assert.equal(build([]), true);
+  assert.equal(build([event('x', { requestId: 'late-extra', status: 200 }, 'i', 'owned-api', 115)]), false, 'late-stamped extra result');
+  assert.equal(build([event('y', { requestId: 'way-later', status: 200 }, 'i', 'owned-api', 105 + 600)]), true, 'beyond grace and after the next control');
+});
+void test('present checks keyed only by lambdaRequestId or operation get the capped grace', () => {
+  const observer = new LogObserver(groups); observer.ingest([event('g', { lambdaRequestId: 'l1', operation: 'gw' }, 'i', 'owned-gateway', 112)]);
+  const base = { service: 'gateway' as const, since: 90, until: 110, mode: 'present' as const };
+  assert.equal(observer.match({ ...base, lambdaRequestId: 'l1' }), true);
+  assert.equal(observer.match({ ...base, operation: 'gw' }), true);
+  assert.equal(observer.match({ ...base, operation: 'gw', notAfter: 111 }), false, 'capped at the next input');
+  assert.equal(observer.match({ ...base, operation: 'gw', since: 113, until: 120 }), false);
+});
