@@ -198,6 +198,50 @@ export const storageDefinitions: CaseDefinition[] = [
 ];
 definitions.push(...storageDefinitions);
 
+/**
+ * Original-image cases (IMG-01..IMG-09). Each E case owns its synthetic users (own RATE, storage and owned S3 prefix) and starts from
+ * a fresh owner; there are no dependency groups. IMG-08 is an offline I case (named tests/runtime tests), IMG-09 is the conditional
+ * signature-enforcement compatibility probe that cannot run until the settings gate passes and is never recorded as pass by a valid GET.
+ */
+function imgCase(id: string, http: string[], ddb: string[], s3: string[], logs: string[]): CaseDefinition {
+  return { id, requirementId: id.split('/')[0]!, layer: 'E', required: true, acceptance: 'behavior', suite: 'images', source: `formal-e2e-coverage/${id.split('/')[0]!}`, outputs: [
+    { kind: 'http', assertions: http }, { kind: 'dynamodb', assertions: ddb }, { kind: 's3', assertions: s3 }, { kind: 'logs', assertions: logs },
+  ] };
+}
+const imageAccepted = (id: string): CaseDefinition => imgCase(id, ['created-201-metadata-only-dto', 'readback-identical-bytes-etag', 'no-secret-fields-in-dto'], ['stored-ref-metadata-and-no-bytes', 'counters-and-committed-job-exact'], ['original-bytes-mime-length-checksum-version-exact', 'owned-key-single-version-no-marker'], ['create-result-delivered', 'readback-result-delivered']);
+const imageNone = (id: string): CaseDefinition => imgCase(id, ['created-201-thumbnail-null', 'readback-identical-bytes-etag'], ['row-thumbnail-null-counters-no-job'], ['no-owned-image-version'], ['create-result-delivered', 'readback-result-delivered']);
+const imageRejected = (id: string): CaseDefinition => imgCase(id, ['rejected-as-expected', 'body-within-json-limit', 'valid-control-200-empty-list'], ['no-row-no-job-counters-unchanged'], ['no-owned-image-version'], ['rejection-result-delivered', 'control-result-delivered']);
+const imageRefusedUrl = (id: string, logs: string[]): CaseDefinition => imgCase(id, ['404-expected-code-no-url-field', 'control-200'], ['storage-jobs-rows-unchanged'], ['owned-versions-unchanged'], logs);
+const imageClear = (id: string): CaseDefinition => imgCase(id, ['patch-200-thumbnail-null-revision-2', 'thumbnail-url-404-thumbnail-not-found'], ['image-ref-removed-job-retired-due-plus-24h-counter-zero'], ['original-version-retained-bytes-intact'], ['create-result-delivered', 'patch-result-delivered', 'url-result-delivered']);
+export const imageDefinitions: CaseDefinition[] = [
+  ...(['png', 'jpeg', 'gif', 'webp'] as const).flatMap(format => [`IMG-01/${format}-base64`, `IMG-01/${format}-dataurl`].map(imageAccepted)),
+  ...['IMG-01/null', 'IMG-01/empty', 'IMG-01/omitted'].map(imageNone),
+  ...['bad-alphabet', 'bad-pad-bits', 'bad-padding', 'bad-length', 'mime-mismatch', 'unsupported-mime', 'not-an-image', 'missing-base64-marker'].map(label => imageRejected(`IMG-02/${label}`)),
+  imageAccepted('IMG-03/bytes-1048575'), imageAccepted('IMG-03/bytes-1048576'), imageRejected('IMG-03/bytes-1048577'),
+  imgCase('IMG-04/issue-and-fetch', ['issue-200-no-store-no-etag-dto', 'expires-900-and-expires-at', 'get-original-bytes-no-bearer', 'item-body-and-etag-unchanged', 'reissue-same-image'], ['row-job-counters-unchanged-by-issue'], ['url-pins-owned-key-and-version', 'original-version-unchanged'],
+    ['create-result-delivered', 'item-get-before-result-delivered', 'url-result-delivered', 'reissue-result-delivered', 'item-get-after-result-delivered']),
+  imageRefusedUrl('IMG-05/other-owner', ['create-result-delivered', 'refusal-result-delivered', 'control-result-delivered']),
+  imageRefusedUrl('IMG-05/no-image', ['create-result-delivered', 'refusal-result-delivered', 'control-result-delivered']),
+  imageRefusedUrl('IMG-05/deleted-item', ['create-result-delivered', 'delete-result-delivered', 'refusal-result-delivered', 'control-result-delivered']),
+  imgCase('IMG-06/replace', ['patch-200-new-thumbnail-metadata-revision-2', 'get-current-reference-matches-patch', 'url-serves-new-original-bytes'], ['new-committed-old-retired-due-plus-24h', 'row-reference-and-counter-delta'], ['both-versions-retained-original-bytes'], ['create-result-delivered', 'patch-result-delivered', 'get-result-delivered', 'url-result-delivered']),
+  imgCase('IMG-06/omit-keeps', ['patch-200-thumbnail-unchanged-revision-2'], ['image-ref-job-and-counter-unchanged'], ['no-new-version-original-bytes-intact'], ['create-result-delivered', 'patch-result-delivered']),
+  imageClear('IMG-06/clear-null'), imageClear('IMG-06/clear-empty'),
+  imgCase('IMG-06/delete', ['delete-200-exact-body', 'thumbnail-url-404-reminder-not-found'], ['tombstone-job-retired-due-plus-24h-counters-zero'], ['original-version-retained-bytes-intact'], ['create-result-delivered', 'delete-result-delivered', 'url-result-delivered']),
+  imgCase('IMG-07/duplicate-id-with-image', ['409-already-exists', 'original-get-bytes-and-etag-unchanged'], ['original-row-counters-and-committed-job-unchanged', 'one-new-pending-orphan-job-due-plus-24h-unique-key'], ['orphan-version-holds-new-original-bytes-original-retained'], ['create-result-delivered', 'duplicate-result-delivered', 'get-result-delivered']),
+  imgCase('IMG-07/duplicate-after-delete', ['409-already-exists', 'get-still-404'], ['original-row-counters-and-committed-job-unchanged', 'one-new-pending-orphan-job-due-plus-24h-unique-key'], ['orphan-version-holds-new-original-bytes-original-retained'], ['create-result-delivered', 'delete-result-delivered', 'duplicate-result-delivered', 'get-404-result-delivered']),
+  { id: 'IMG-08/pending-and-unknown-results-i', requirementId: 'IMG-08', layer: 'I', required: true, acceptance: 'behavior', suite: 'images', source: 'formal-e2e-coverage/IMG-08', outputs: [
+    { kind: 'http', assertions: [], notApplicableReason: 'service-and-adapter-boundary-no-gateway' },
+    { kind: 'dynamodb', assertions: ['s3_success_db_reject_leaves_pending', 'unknown_put_result_leaves_unique_pending_key', 'unknown_commit_failed_reconciliation_keeps_committed_image', 'expired_budget_after_put_leaves_unrecorded_pending_without_transaction'] },
+    { kind: 's3', assertions: [], notApplicableReason: 'injected-adapter-no-real-service-stop' }, { kind: 'logs', assertions: [], notApplicableReason: 'handler-boundary-no-delivery' },
+  ] },
+  { id: 'IMG-09/signature-enforcement', requirementId: 'IMG-09', layer: 'L', required: true, acceptance: 'compatibility', suite: 'images', source: 'formal-e2e-coverage/IMG-09', outputs: [
+    { kind: 'http', assertions: ['valid-control-200', 'signature-only-tamper-rejected', 'short-lived-url-rejected-after-expiry'] },
+    { kind: 'dynamodb', assertions: [], notApplicableReason: 'direct-s3-request-no-storage-effect' },
+    { kind: 's3', assertions: ['owned-key-version-pinned-independent-short-url'] }, { kind: 'logs', assertions: [], notApplicableReason: 'direct-s3-request-no-api-result' },
+  ] },
+];
+definitions.push(...imageDefinitions);
+
 /** A guard returns true when a prerequisite case has not passed; the runner then records not-run. */
 export const caseGuards = new Map<string, (fixture: import('./types.ts').SuiteFixture) => boolean>();
 /**

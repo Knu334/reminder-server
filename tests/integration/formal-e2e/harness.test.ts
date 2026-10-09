@@ -409,3 +409,66 @@ void test('local transport bounds a slow response and closes active request on a
   const controller = new AbortController(); const pending = localRequest(target, new URL(target.endpoint), { signal: controller.signal }); controller.abort(); await assert.rejects(pending, /LOCAL_REQUEST_FAILED/);
   assert.equal(upstream, 2); assert.equal(destroyed, 2); assert.ok(signals.every(signal => signal.aborted));
 });
+
+// Task 8: owned image URL transport. The signed URL is a secret held in memory only; every rejection happens before a socket opens.
+const imageOwner = 'a'.repeat(64);
+const imageRef = { imageId: '00000000-0000-4000-8000-000000000001', key: `images/${imageOwner}/00000000-0000-4000-8000-000000000001`, versionId: 'ver-1', mime: 'image/png', bytes: 12, sha256: 'b'.repeat(64) };
+const imageFixture = { target, config: { imagesBucket: 'owned-images' } } as unknown as import('../../e2e/floci/support/types.ts').SuiteFixture;
+const signed = (host: string, path: string, query = `versionId=ver-1&X-Amz-Expires=900&X-Amz-Signature=${'c'.repeat(64)}`): string => `http://${host}:4566${path}?${query}`;
+
+void test('image_url_guard_rejects_unowned_targets_before_any_socket', async t => {
+  const { fetchOwnedImage } = await import('../../e2e/floci/support/image-fixtures.ts');
+  let sockets = 0; t.mock.method(http, 'request', () => { sockets++; throw new Error('socket must not open'); });
+  const good = `/${imageRef.key}`;
+  const rejected = [
+    signed('other-bucket.floci', good), signed('floci', `/other-bucket/${imageRef.key}`), signed('example.com', good), signed('169.254.169.254', good),
+    signed('owned-images.floci', `/images/${'d'.repeat(64)}/00000000-0000-4000-8000-000000000001`), signed('owned-images.floci', good, `versionId=ver-2&X-Amz-Signature=${'c'.repeat(64)}`),
+    signed('owned-images.floci', good, `X-Amz-Signature=${'c'.repeat(64)}`), signed('owned-images.floci', good, `versionId=ver-1&versionId=ver-2&X-Amz-Signature=${'c'.repeat(64)}`),
+    signed('owned-images.floci', good, 'versionId=ver-1'),
+    `https://owned-images.floci:4566${good}?versionId=ver-1&X-Amz-Signature=${'c'.repeat(64)}`, `http://owned-images.floci:80${good}?versionId=ver-1&X-Amz-Signature=${'c'.repeat(64)}`,
+    `http://user:pw@owned-images.floci:4566${good}?versionId=ver-1&X-Amz-Signature=${'c'.repeat(64)}`, `${signed('owned-images.floci', good)}#fragment`, 'not a url',
+  ];
+  for (const url of rejected) await assert.rejects(fetchOwnedImage(imageFixture, url, imageRef), /IMAGE_URL_REJECTED/);
+  await assert.rejects(fetchOwnedImage(imageFixture, signed('owned-images.floci', good), { ...imageRef, key: 'images/not-an-owner/x' }), /IMAGE_URL_REJECTED/);
+  await assert.rejects(fetchOwnedImage({ ...imageFixture, target: { ...target, addresses: new Map([['floci', '8.8.8.8']]) } } as never, signed('owned-images.floci', good), imageRef), /IMAGE_URL_REJECTED|LOCAL_TARGET_REJECTED/);
+  assert.equal(sockets, 0);
+});
+
+void test('image_url_fetch_pins_the_owned_bucket_host_sends_no_credentials_and_never_follows_redirects', async t => {
+  const { fetchOwnedImage } = await import('../../e2e/floci/support/image-fixtures.ts');
+  const seen: { host: string; headers: Record<string, string>; address: string[]; method: string }[] = []; let status = 200;
+  t.mock.method(http, 'request', (url: URL, options: http.RequestOptions, callback: (response: http.IncomingMessage) => void) => {
+    const lookupAddresses: string[] = [];
+    (options.lookup as (host: string, options: { all: boolean }, callback: (error: null, addresses: { address: string; family: number }[]) => void) => void)(url.hostname, { all: true }, (_error, addresses) => lookupAddresses.push(...addresses.map(item => item.address)));
+    seen.push({ host: String((options.headers as Record<string, string>).host), headers: { ...(options.headers as Record<string, string>) }, address: lookupAddresses, method: String(options.method) });
+    const response = Readable.from([Buffer.from('original-bytes')]) as http.IncomingMessage; response.statusCode = status; response.rawHeaders = status === 302 ? ['location', 'http://example.com:4566/'] : ['content-type', 'image/png'];
+    process.nextTick(() => callback(response)); return new PassThrough();
+  });
+  for (const [host, path] of [['owned-images.floci', `/${imageRef.key}`], ['floci', `/owned-images/${imageRef.key}`]] as const) {
+    const result = await fetchOwnedImage(imageFixture, signed(host, path), imageRef);
+    assert.equal(result.status, 200); assert.equal(result.bytes.toString(), 'original-bytes');
+  }
+  assert.deepEqual(seen.map(item => item.host), ['owned-images.floci:4566', 'floci:4566']);
+  assert.deepEqual(seen.map(item => item.address), [['172.18.0.2'], ['172.18.0.2']]);
+  assert.ok(seen.every(item => item.method === 'GET' && !Object.keys(item.headers).some(name => ['authorization', 'cookie'].includes(name.toLowerCase()))));
+  status = 302; await assert.rejects(fetchOwnedImage(imageFixture, signed('floci', `/owned-images/${imageRef.key}`), imageRef), /IMAGE_REDIRECT_REJECTED/);
+  assert.equal(seen.length, 3);
+});
+
+void test('image_url_signature_helpers_alter_only_the_signature_and_the_probe_separates_enforcement_from_leniency', async () => {
+  const { tamperUrlSignature, probeSignatureEnforcement } = await import('../../e2e/floci/support/image-fixtures.ts');
+  const url = signed('floci', `/owned-images/${imageRef.key}`); const changed = tamperUrlSignature(url);
+  const [left, right] = [new URL(url), new URL(changed)];
+  assert.notEqual(left.searchParams.get('X-Amz-Signature'), right.searchParams.get('X-Amz-Signature'));
+  assert.equal(right.searchParams.get('X-Amz-Signature')?.length, 64);
+  for (const name of ['versionId', 'X-Amz-Expires']) assert.equal(left.searchParams.get(name), right.searchParams.get(name));
+  assert.equal(left.pathname, right.pathname); assert.equal(left.host, right.host);
+  assert.throws(() => tamperUrlSignature('http://floci:4566/x?versionId=1'), /IMAGE_URL_REJECTED/);
+  const make = (control: number, tampered: number, early: number, late: number) => { const answers = new Map([['control', control], ['tampered', tampered], ['short', 0]]); let phase = 0;
+    return { control: 'control', tampered: 'tampered', shortLived: 'short', fetch: async (name: string) => name === 'short' ? (phase++ === 0 ? early : late) : answers.get(name)!, waitUntilExpired: async () => undefined }; };
+  assert.equal(await probeSignatureEnforcement(make(200, 403, 200, 403)), 'enforced');
+  assert.equal(await probeSignatureEnforcement(make(200, 200, 200, 403)), 'unsupported');
+  assert.equal(await probeSignatureEnforcement(make(200, 403, 200, 200)), 'unsupported');
+  assert.equal(await probeSignatureEnforcement(make(403, 403, 200, 403)), 'control-failed');
+  assert.equal(await probeSignatureEnforcement(make(200, 403, 403, 403)), 'control-failed');
+});

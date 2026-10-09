@@ -1,5 +1,6 @@
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
-import { ListObjectVersionsCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, ListObjectVersionsCommand } from '@aws-sdk/client-s3';
+import { createHash } from 'node:crypto';
 import type { Context } from 'aws-lambda';
 import { createApiHandler, withApiResultLogging } from '../../../src/api';
 import { createHarness, harnessConfig } from '../../support/stateful-store';
@@ -7,6 +8,7 @@ import { LogObserver } from './support/logs';
 import { fixtureStates } from './support/fixture';
 import { suiteLogStates } from './support/logs';
 import { apiIo } from './support/api-cases';
+import { imageIo } from './support/image-fixtures';
 import type { AuthSession, HttpResult, SuiteFixture } from './support/types';
 
 /**
@@ -25,12 +27,18 @@ const SCOPES: Record<string, string | null> = {
 const part = (value: unknown): string => Buffer.from(JSON.stringify(value)).toString('base64url');
 
 export type Sim = ReturnType<typeof createSim>;
-export type SimOptions = { /** Replace the handler's answer to break one behavior (negative tests). */ tamper?: (method: string, path: string, result: HttpResult) => HttpResult };
+export type SimOptions = { /** Replace the handler's answer to break one behavior (negative tests). */ tamper?: (method: string, path: string, result: HttpResult) => HttpResult; /** Alter the stored original as S3 would return it (negative tests). */ tamperObject?: (bytes: Buffer) => Buffer; /** Alter what the signed image URL serves (negative tests). */ tamperFetch?: (result: HttpResult) => HttpResult };
 export function createSim(options: SimOptions = {}) {
   const h = createHarness(); h.setPublication(true);
+  // The store's synthetic clock starts in 2026-10; move it to now so DTO times (e.g. the 900 s URL end) are comparable with request times.
+  h.advanceMs(Date.now() - Date.parse('2026-10-03T00:00:00.000Z'));
   let offset = 0; const clock = () => Date.now() + offset;
   apiIo.now = clock; apiIo.sleep = async ms => { offset += ms; };
   const observer = new LogObserver({ api: 'api-group', gateway: 'gateway-group', cleanup: 'cleanup-group' });
+  const mimes = new Map<string, string>(); const budget = () => ({ signal: new AbortController().signal, remainingMs: () => 10_000 });
+  // The double records the content type the upload carried, as S3 would store it with the object. The service holds this same object.
+  const rawPut = h.images.put.bind(h.images);
+  h.images.put = async (job, image, b) => { const ref = await rawPut(job, image, b); mimes.set(`${ref.key}#${ref.versionId}`, image.mime); return ref; };
   const handler = withApiResultLogging(createApiHandler({ config: harnessConfig, service: h.service, owners: h.owners, images: h.images, clock }));
   let counter = 0; let logId = 0; let sequence = 0;
   const authIds: string[] = [];
@@ -99,9 +107,25 @@ export function createSim(options: SimOptions = {}) {
         if (command instanceof DeleteCommand) return {};
         throw new Error('SIM_COMMAND_UNSUPPORTED');
       } },
-      s3: { async send(command: unknown): Promise<unknown> { if (command instanceof ListObjectVersionsCommand) return { Versions: h.imageVersions().map(item => ({ Key: item.key, VersionId: item.versionId, Size: item.bytes })), DeleteMarkers: h.imageDeleteMarkers().map(item => ({ Key: item.key, VersionId: item.versionId })) }; throw new Error('SIM_COMMAND_UNSUPPORTED'); } },
+      s3: { async send(command: unknown): Promise<unknown> {
+        if (command instanceof ListObjectVersionsCommand) { const prefix = command.input.Prefix ?? ''; return { Versions: h.imageVersions().filter(item => item.key.startsWith(prefix)).map(item => ({ Key: item.key, VersionId: item.versionId, Size: item.bytes })), DeleteMarkers: h.imageDeleteMarkers().filter(item => item.key.startsWith(prefix)).map(item => ({ Key: item.key, VersionId: item.versionId })) }; }
+        if (command instanceof HeadObjectCommand || command instanceof GetObjectCommand) {
+          const { Key, VersionId } = command.input; const stored = h.imageVersions().find(item => item.key === Key && item.versionId === VersionId); if (!stored) throw Object.assign(new Error('NoSuchVersion'), { name: 'NoSuchVersion', $metadata: { httpStatusCode: 404 } });
+          const data = Buffer.from(await h.images.get({ imageId: '', key: stored.key, versionId: stored.versionId, mime: '', bytes: stored.bytes, sha256: '' }, budget()));
+          const served = command instanceof GetObjectCommand && options.tamperObject ? options.tamperObject(data) : data;
+          const common = { VersionId: stored.versionId, ContentLength: served.length, ContentType: mimes.get(`${stored.key}#${stored.versionId}`), ChecksumSHA256: createHash('sha256').update(data).digest('base64') };
+          return command instanceof GetObjectCommand ? { ...common, Body: { transformToByteArray: async () => new Uint8Array(served) } } : common;
+        }
+        throw new Error('SIM_COMMAND_UNSUPPORTED');
+      } },
     },
   } as unknown as SuiteFixture;
+  imageIo.expirySeconds = url => { try { return Number(new URL(url).searchParams.get('expires')); } catch { return Number.NaN; } };
+  imageIo.fetch = async (_fixture, url, ref) => {
+    const parsed = new URL(url); if (parsed.hostname !== 'synthetic.test' || parsed.pathname !== `/${ref.key}` || parsed.searchParams.get('versionId') !== ref.versionId) throw new Error('IMAGE_URL_REJECTED');
+    const bytes = Buffer.from(await h.images.get(ref, budget())); const result = { status: 200, headers: new Headers({ 'content-type': mimes.get(`${ref.key}#${ref.versionId}`) ?? 'application/octet-stream' }), bytes };
+    return options.tamperFetch ? options.tamperFetch(result) : result;
+  };
   fixtureStates.set(fixture, { disposed: false } as never);
   suiteLogStates.set(fixture, { observer, pending: [], cleanup: new Map(), completions: [], lastInput: 0 });
   apiIo.raw = async (_fixture, _url, request) => request.headers.origin === ORIGIN ? { status: 200, headers: new Headers({ 'access-control-allow-origin': ORIGIN, 'access-control-allow-methods': 'GET,HEAD' }), bytes: Buffer.alloc(0) } : { status: 403, headers: new Headers(), bytes: Buffer.alloc(0) };

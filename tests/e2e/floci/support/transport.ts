@@ -8,6 +8,16 @@ export function isPrivateIPv4(address: string): boolean {
   return a === 10 || (a === 172 && b! >= 16 && b! <= 31) || (a === 192 && b === 168);
 }
 
+/**
+ * The discovery snapshot extended with exactly one run-owned bucket host (virtual-hosted S3 form), pinned to the same private
+ * address as the primary host. Nothing is resolved here or at socket time; unowned names stay unknown to the transport.
+ */
+export function withOwnedBucketHost(target: LocalTarget, bucket: string): LocalTarget {
+  const primary = target.addresses.get('floci');
+  if (!/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket) || isIP(bucket) !== 0 || !primary || !isPrivateIPv4(primary)) throw new Error('LOCAL_TARGET_REJECTED');
+  return { ...target, addresses: new Map([...target.addresses, [`${bucket}.floci`, primary]]) };
+}
+
 export async function localRequest(target: LocalTarget, url: URL, options: { method?: string; headers?: Record<string, string>; body?: string | Buffer; timeoutMs?: number; signal?: AbortSignal }): Promise<HttpResult> {
   // The map is a discovery snapshot. Never resolve again at socket creation.
   const address = target.addresses.get(url.hostname);
