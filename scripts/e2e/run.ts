@@ -6,8 +6,9 @@ import { tmpdir } from 'node:os';
 import { createEvidence, recordProcess, terraformActions, finalizeResults, runCase, evidenceContext, flushPendingLogs } from '../../tests/e2e/floci/support/evidence.ts';
 import type { ProcessEvidence } from '../../tests/e2e/floci/support/evidence.ts';
 import type { CaseDefinition, Evidence, ProvisionedStack, E2EFixture } from '../../tests/e2e/floci/support/types.ts';
-import { definitions, caseActions } from '../../tests/e2e/floci/support/cases.ts';
+import { definitions, caseActions, caseGuards, sharedCaseAuth } from '../../tests/e2e/floci/support/cases.ts';
 import '../../tests/e2e/floci/support/auth-cases.ts';
+import '../../tests/e2e/floci/support/api-cases.ts';
 
 export const deadlines = { run: 75 * 60_000, cleanup: 15 * 60_000, total: 90 * 60_000, http: 30_000, terraform: 10 * 60_000, authExpiry: 330_000, logs: 60_000, scheduler: 90_000, cleanupInvoke: 700_000 } as const;
 export class RunBudget {
@@ -166,14 +167,14 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
           const { suiteLogStates, cleanupChecksMatch, cleanupCaseMatches } = await import('../../tests/e2e/floci/support/logs.ts');
           const suiteResult = await executeSuites(executable, {
             create: suite => createFixture({ suite, publication: true }, fixture!),
-            async action(def, suite) { await runCase(def, evidence, async recorder => { const view = { ...suite, auth: await createCaseAuth(suite, def.id) }; fixtureStates.set(view, fixtureState(suite)); suiteLogStates.set(view, suiteLogStates.get(suite)!); await caseActions.get(def.id)!(view, recorder); }); },
+            async action(def, suite) { if (caseGuards.get(def.id)?.(suite)) { await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'prerequisite-failed' }); return; } await runCase(def, evidence, async recorder => { const view = { ...suite, auth: await createCaseAuth(suite, sharedCaseAuth.has(def.suite) ? `${def.suite}-default` : def.id) }; fixtureStates.set(view, fixtureState(suite)); suiteLogStates.set(view, suiteLogStates.get(suite)!); await caseActions.get(def.id)!(view, recorder); }); },
             async flush(suite) { const state = suiteLogStates.get(suite)!; await flushPendingLogs(evidence, async checks => { const results = await state.observer.flush(checks, Math.max(state.lastInput, fixtureState(suite).lastInput), 60_000, () => cleanupChecksMatch(state)); return results.map(result => ({ ...result, matched: result.matched && cleanupCaseMatches(state, result.caseId) })); }); },
             reset: suite => suite.resetSuite(),
             blocked: def => evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'prerequisite-failed' }),
           });
           suiteErrors += suiteResult.errors;
         }
-        for (const def of remaining.filter(def => !ready || !caseActions.has(def.id))) await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: ready ? 'implementation-pending' : 'prerequisite-failed' });
+        await recordUnstarted(evidence, remaining, ready);
         const finalSettings = selected.find(def => def.id === 'TF-03/settings-final');
         const { fixtureState } = await import('../../tests/e2e/floci/support/fixture.ts');
         if (fixtureState(fixture).settingsComplete) {
@@ -200,6 +201,11 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
 }
 if (require.main === module) {
   void runMain(process.argv.slice(2)).then(code => { process.exitCode = code; }, () => { console.error('E2E_HARNESS_FAILED'); process.exitCode = 1; });
+}
+
+/** Cases never started stay not-run: prerequisite-failed when the settings/smoke gate failed, implementation-pending when no action exists. */
+export async function recordUnstarted(evidence: Evidence, remaining: CaseDefinition[], ready: boolean): Promise<void> {
+  for (const def of remaining.filter(def => !ready || !caseActions.has(def.id))) await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: ready ? 'implementation-pending' : 'prerequisite-failed' });
 }
 
 /** The one run-end disposal: the fixture owns SDK recovery and Terraform teardown, so it is called exactly once. */

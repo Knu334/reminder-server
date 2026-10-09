@@ -11,7 +11,7 @@ const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 async function waitUntil(epochMs: number): Promise<void> { for (let left = epochMs - Date.now(); left > 0; left = epochMs - Date.now()) await sleep(Math.min(30_000, left)); }
 
 /** Collects named boolean assertions; only names, never values, reach evidence. */
-class Score {
+export class Score {
   private readonly results = new Map<string, boolean>();
   ok(kind: OutputKind, name: string, value: boolean): void { const key = `${kind}:${name}`; this.results.set(key, (this.results.get(key) ?? true) && value); }
   emit(caseId: string, recorder: CaseRecorder): void {
