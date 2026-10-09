@@ -187,7 +187,7 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
       await finalizeResults(evidence);
       budget.beginCleanup();
       let cleanup = { attempted: 0, succeeded: 0, errors: 0, leaks: 0 };
-      if (stack) { try { cleanup = fixture ? await fixture.dispose() : await stack.destroy(); } catch { cleanup = { attempted: 1, succeeded: 0, errors: 1, leaks: 0 }; } }
+      if (stack) cleanup = await disposeRunOwned(stack, fixture);
       cleanup.errors += suiteErrors + (driverFailed ? 1 : 0);
       const summary = await evidence.finish(cleanup);
       if (exit !== 2) exit = driverFailed ? 1 : summary.exitCode;
@@ -199,6 +199,11 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
 }
 if (require.main === module) {
   void runMain(process.argv.slice(2)).then(code => { process.exitCode = code; }, () => { console.error('E2E_HARNESS_FAILED'); process.exitCode = 1; });
+}
+
+/** The one run-end disposal: the fixture owns SDK recovery and Terraform teardown, so it is called exactly once. */
+export async function disposeRunOwned(stack: ProvisionedStack, fixture: E2EFixture | undefined): Promise<{ attempted: number; succeeded: number; errors: number; leaks: number }> {
+  try { return fixture ? await fixture.dispose() : await stack.destroy(); } catch { return { attempted: 1, succeeded: 0, errors: 1, leaks: 0 }; }
 }
 
 /** Settings and real delivery are prerequisites even for a filtered case selection. */

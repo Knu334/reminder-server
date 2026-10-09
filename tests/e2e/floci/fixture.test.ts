@@ -1,17 +1,41 @@
 import assert from 'node:assert/strict';
 import type { FunctionConfiguration } from '@aws-sdk/client-lambda';
 import { test } from 'node:test';
-import { assertRuntimeSettings, executeFixtureLifecycle } from './support/fixture.ts';
-void test('settings mismatch blocks synthetic inputs but finalized owned cleanup still runs', async () => {
-  const order: string[] = [];
-  await assert.rejects(executeFixtureLifecycle({ readback: async () => { order.push('readback'); throw new Error('SETTINGS_MISMATCH'); }, smoke: async () => { order.push('smoke'); }, cases: async () => { order.push('cases'); }, finalReadback: async () => { order.push('final-readback'); }, finalize: async () => { order.push('finalize'); }, dispose: async () => { order.push('dispose'); } }), /SETTINGS_MISMATCH/);
-  assert.deepEqual(order, ['readback', 'finalize', 'dispose']);
+import { assertRuntimeSettings } from './support/fixture.ts';
+void test('real runner prerequisite path: settings failure sends zero inputs and marks dependents not-run', async t => {
+  const { createEvidence, finalizeResults, evidenceContext } = await import('./support/evidence.ts');
+  const { fixtureStates } = await import('./support/fixture.ts');
+  const { runFixturePrerequisites } = await import('../../../scripts/e2e/run.ts');
+  const { definitions } = await import('./support/cases.ts');
+  const { mkdtemp, rm } = await import('node:fs/promises'); const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
+  const directory = await mkdtemp(join(tmpdir(), 'fixture-prereq-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  const ids = ['TF-03/settings', 'OBS-02/smoke', 'OBS-03/gateway-refusal', 'OBS-04/gateway-delivery'];
+  const selected = ids.map(id => definitions.find(def => def.id === id)!);
+  const evidence = await createEvidence(selected, join(directory, 'run'));
+  let inputs = 0;
+  const fixture = { request: async () => { inputs++; throw new Error('UNEXPECTED_INPUT'); }, setPublication: async () => { inputs++; }, clients: {}, stack: undefined } as unknown as import('./support/types.ts').E2EFixture;
+  fixtureStates.set(fixture, { settingsComplete: false, smokeComplete: false, readbackPhase: '', readbackObserved: {}, outstanding: 0, cleanupIntervals: [], disposed: false } as unknown as import('./support/fixture.ts').RunFixtureState);
+  assert.equal(await runFixturePrerequisites(evidence, selected, fixture), false);
+  assert.equal(inputs, 0);
+  await finalizeResults(evidence);
+  const { readFile } = await import('node:fs/promises');
+  const saved = JSON.parse(await readFile(join(evidenceContext(evidence).directory, 'results.json'), 'utf8')) as { cases: { id: string; result: { status: string } }[] };
+  const byId = new Map(saved.cases.map(item => [item.id, item.result.status]));
+  assert.equal(byId.get('TF-03/settings'), 'fail');
+  for (const id of ids.slice(1)) assert.equal(byId.get(id), 'not-run', id);
 });
-void test('actual smoke precedes inputs and results precede quiescence/protection cleanup', async () => {
-  const order: string[] = [];
-  const step = (name: string) => async () => { order.push(name); };
-  await executeFixtureLifecycle({ readback: step('readback'), smoke: step('smoke'), cases: step('cases'), finalReadback: step('final-readback'), finalize: step('finalize'), dispose: step('dispose') });
-  assert.deepEqual(order, ['readback', 'smoke', 'cases', 'final-readback', 'finalize', 'dispose']);
+
+void test('real runner disposes the owned fixture exactly once and never falls back to bare destroy', async () => {
+  const { disposeRunOwned } = await import('../../../scripts/e2e/run.ts');
+  let disposed = 0; let destroyed = 0;
+  const stack = { destroy: async () => { destroyed++; return { attempted: 1, succeeded: 1, errors: 0, leaks: 0 }; } } as unknown as import('./support/types.ts').ProvisionedStack;
+  const fixture = { dispose: async () => { disposed++; return { attempted: 3, succeeded: 3, errors: 0, leaks: 0 }; } } as unknown as import('./support/types.ts').E2EFixture;
+  assert.deepEqual(await disposeRunOwned(stack, fixture), { attempted: 3, succeeded: 3, errors: 0, leaks: 0 });
+  assert.deepEqual([disposed, destroyed], [1, 0]);
+  assert.equal((await disposeRunOwned(stack, undefined)).attempted, 1); assert.equal(destroyed, 1);
+  const failing = { dispose: async () => { disposed++; throw new Error('x'); } } as unknown as import('./support/types.ts').E2EFixture;
+  assert.deepEqual(await disposeRunOwned(stack, failing), { attempted: 1, succeeded: 0, errors: 1, leaks: 0 });
+  assert.deepEqual([disposed, destroyed], [2, 1]);
 });
 void test('current ZIP runtime handler alias concurrency and default limits must match independently', () => {
   const expected = { sha: 'current-zip', handler: 'dist/api.handler', timeout: 10, concurrency: 10, logGroup: 'owned-api', role: 'owned-role', env: { EXPECTED_API_STAGE: '$default' } };
@@ -189,4 +213,34 @@ void test('dispose retains SDK cleanup errors and independently counts final par
     assert.deepEqual(cleanup, { attempted: scenario === 'unknown-id' ? 21 : 20, succeeded: scenario === 'parent-remains' ? 18 : 20, errors: scenario === 'unknown-id' ? 3 : 2, leaks: scenario === 'parent-remains' ? 2 : 0 });
     assert.ok(sdkCalls > 0); assert.equal(evidenceContext(evidence).manifest.resources.filter(r => r.kind === 'sdk-user' && r.removed).length, scenario === 'parent-remains' ? 0 : 2);
   }
+});
+
+void test('failed fixture request or unfinished cleanup invoke still lets SDK-owned controls be recovered', async t => {
+  const { createEvidence, reserveResource, bindResourceIdentities, evidenceContext, finalizeResults } = await import('./support/evidence.ts');
+  const { createRunFixture, fixtureState } = await import('./support/fixture.ts');
+  const { createCaseAuth } = await import('./support/auth.ts');
+  const { mkdtemp, rm } = await import('node:fs/promises'); const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
+  const { definitions } = await import('./support/cases.ts'); const directory = await mkdtemp(join(tmpdir(), 'fixture-guard-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  const evidence = await createEvidence([definitions[0]!], join(directory, 'run')); const prefix = `e2e-${evidence.runId.slice(4, 12)}`; const pool = 'ap-northeast-1_OwnedPool';
+  const intent = `${evidence.runId}/platform/aws_cognito_user_pool.production`; await reserveResource(evidence, { kind: 'terraform-address', name: 'platform/aws_cognito_user_pool.production', id: intent }); await bindResourceIdentities(evidence, intent, [{ type: 'aws_cognito_user_pool', identity: pool }]);
+  let guard: (() => Promise<void>) | undefined;
+  const stack = { target: { endpoint: 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map([['floci', '172.18.0.2']]) }, bindings: { prefix, pool_id: pool, api_base_url: 'http://foreign.invalid:4566/', reminders_table: `${prefix}-production-reminders`, owner_state_table: `${prefix}-production-owner-state`, image_jobs_table: `${prefix}-production-image-jobs`, images_bucket: `${prefix}-000000000000-ap-northeast-1-images`, api_id: 'abcdefghij', cognito_issuer: `http://floci:4566/${pool}`, cognito_client_id: 'syntheticclient' }, artifact: {}, constructionOutputs: [{}, {}, {}, {}], setQuiescenceGuard(check: () => Promise<void>) { guard = check; }, async destroy() { await guard!(); return { attempted: 0, succeeded: 0, errors: 0, leaks: 0 }; }, manifest: evidenceContext(evidence).manifest, stateDirectory: directory } as unknown as import('./support/types.ts').ProvisionedStack;
+  const fixture = await createRunFixture(stack, evidence); const state = fixtureState(fixture);
+  const deleted = new Set<string>(); const users: string[] = [];
+  t.mock.method(state.cognito, 'send', async (command: { constructor: { name: string }; input: { Username: string } }) => {
+    const kind = command.constructor.name;
+    if (kind === 'AdminCreateUserCommand') users.push(command.input.Username);
+    if (kind === 'AdminDeleteUserCommand') deleted.add(command.input.Username);
+    if (kind === 'AdminGetUserCommand') { if (deleted.has(command.input.Username)) { const error = new Error('gone'); error.name = 'UserNotFoundException'; throw error; } return { UserStatus: 'CONFIRMED', UserAttributes: [{ Name: 'sub', Value: 'sub-x' }] }; }
+    return {};
+  });
+  state.settingsComplete = true; state.smokeComplete = true;
+  await createCaseAuth(fixture, 'owned'); assert.equal(users.length, 2);
+  await assert.rejects(fixture.request('/healthz'), /LOCAL_TARGET_REJECTED/);
+  assert.equal(state.outstanding, 0, 'a settled failed request releases its accounting');
+  state.cleanupIntervals.push({ since: Date.now(), until: 0, completed: false }); // a cleanup invoke that failed and may still be running
+  await finalizeResults(evidence);
+  await assert.rejects(fixture.dispose(), /SETTINGS_MISMATCH/, 'unfinished invoke must not satisfy quiescence');
+  assert.equal(deleted.size, 2, 'SDK controls are still deleted even though quiescence failed');
+  assert.deepEqual(state.sdkCleanup, { attempted: 2, succeeded: 2, errors: 0, leaks: 0 });
 });
