@@ -157,10 +157,10 @@ run('AUTH-11/revoke-disable', async (fixture, recorder, score) => {
   score.ok('http', 'disabled-user-refresh-refused', rejected(await fixture.auth.requestRefresh(issued.refreshToken, 'primary'), ['invalid_grant']));
 });
 
-// Compatibility measurement of the hosted /oauth2/revoke endpoint: only 404/405 (route not served) is unsupported; every other non-2xx is a failure; a 2xx must really invalidate the refresh token. Only the observed status is kept.
+// Compatibility measurement of the hosted /oauth2/revoke endpoint: only 404/405, or a 400 carrying Floci's S3 catch-all InvalidArgument error (route not served), is unsupported; every other non-2xx is a failure; a 2xx must really invalidate the refresh token. Only the observed status is kept.
 caseMeasurements.set('AUTH-11/hosted-revoke-endpoint', async fixture => {
-  const session = await fixture.auth.login('a', [READ], 'primary'); const status = await fixture.auth.hostedRevoke(session);
-  if (status === 404 || status === 405) return { outcome: 'unsupported', httpStatus: status };
+  const session = await fixture.auth.login('a', [READ], 'primary'); const { status, s3CatchAll } = await fixture.auth.hostedRevoke(session);
+  if (status === 404 || status === 405 || (status === 400 && s3CatchAll)) return { outcome: 'unsupported', httpStatus: status };
   if (status < 200 || status > 299) return { outcome: 'fail', httpStatus: status };
   return { outcome: rejected(await fixture.auth.requestRefresh(session.refreshToken, 'primary'), ['invalid_grant']) ? 'pass' : 'fail', httpStatus: status };
 });

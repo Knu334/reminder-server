@@ -40,8 +40,8 @@ export type FixtureAuth = {
   requestRefresh(token: string, client: 'primary' | 'sibling'): Promise<{ status: number; error?: string; session?: AuthSession }>;
   /** Revokes through the Cognito RevokeToken API; any failure is the fixed code TOKEN_REVOKE_FAILED. */
   revoke(session: AuthSession): Promise<void>;
-  /** One POST to the hosted /oauth2/revoke endpoint through the guarded local transport; returns the observed status only. */
-  hostedRevoke(session: AuthSession): Promise<number>;
+  /** One POST to the hosted /oauth2/revoke endpoint through the guarded local transport; returns the observed status and whether the body was the S3 catch-all InvalidArgument error (matched in memory, never stored). */
+  hostedRevoke(session: AuthSession): Promise<{ status: number; s3CatchAll: boolean }>;
   disable(owner: 'a' | 'b'): Promise<void>;
   /** Verifies the real signature against the issuing pool's JWKS and the access-token claims; throws without echoing values. */
   verifySession(session: AuthSession): void;

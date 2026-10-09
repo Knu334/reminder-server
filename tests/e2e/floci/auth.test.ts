@@ -87,7 +87,7 @@ async function savedAuth11Run(fixture: SuiteFixture): Promise<{ name: string; st
     return saved.cases[0]!.result.outputs!.find(output => output.kind === 'http')!.assertions;
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
-const hostedAuth = (hostedStatus: number | 'throw', refreshAfter: { status: number; error?: string }) => ({ login: async () => session('valid'), hostedRevoke: async () => { if (hostedStatus === 'throw') throw new Error('RAW'); return hostedStatus; }, requestRefresh: async () => refreshAfter });
+const hostedAuth = (hostedStatus: number | 'throw', s3CatchAll = false, refreshAfter: { status: number; error?: string }) => ({ login: async () => session('valid'), hostedRevoke: async () => { if (hostedStatus === 'throw') throw new Error('RAW'); return { status: hostedStatus, s3CatchAll }; }, requestRefresh: async () => refreshAfter });
 void test('AUTH-11 states the revocation channel it used and the hosted endpoint is a separate compatibility case', async () => {
   const main = definitions.find(def => def.id === 'AUTH-11/revoke-disable')!; assert.ok(main.outputs[0]!.assertions.includes('revocation-channel-revoke-token-api'));
   const hosted = definitions.find(def => def.id === 'AUTH-11/hosted-revoke-endpoint')!; assert.equal(hosted.acceptance, 'compatibility'); assert.equal(hosted.layer, 'L'); assert.equal(hosted.suite, 'auth');
@@ -100,13 +100,25 @@ void test('AUTH-11 states the revocation channel it used and the hosted endpoint
   const saved = await savedAuth11Run(fixture); assert.ok(saved.every(item => item.status === 'pass')); assert.ok(saved.some(item => item.name === 'revocation-channel-revoke-token-api' && item.status === 'pass'));
 });
 void test('hosted revoke measurement: 404 is unsupported with a fixed reason, 2xx with a rejected refresh passes, anything else fails', async () => {
-  const unsupported = await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(404, { status: 200 }));
+  const unsupported = await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(404, false, { status: 200 }));
   assert.equal(unsupported.status, 'unsupported'); assert.equal(unsupported.reason, 'hosted-revoke-unsupported'); assert.equal(unsupported.httpStatus, 404);
   assert.deepEqual(unsupported.outputs?.find(output => output.kind === 'http')?.assertions, [{ name: 'hosted-revoke-endpoint-measured', status: 'pass' }]);
-  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(405, { status: 200 }))).status, 'unsupported');
-  for (const code of [400, 401, 403, 500, 501, 503]) { const failed = await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(code, { status: 200 })); assert.equal(failed.status, 'fail', String(code)); assert.equal(failed.httpStatus, code, 'a failed measurement still records the observed status'); assert.equal(failed.reason, 'action-failed'); }
-  const works = await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(200, { status: 400, error: 'invalid_grant' })); assert.equal(works.status, 'pass'); assert.equal(works.httpStatus, 200);
-  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(200, { status: 200 }))).status, 'fail', 'a 200 that leaves the token usable is a failure');
-  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth('throw', { status: 200 }))).status, 'fail');
-  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(302, { status: 200 }))).status, 'fail');
+  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(405, false, { status: 200 }))).status, 'unsupported');
+  for (const code of [400, 401, 403, 500, 501, 503]) { const failed = await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(code, false, { status: 200 })); assert.equal(failed.status, 'fail', String(code)); assert.equal(failed.httpStatus, code, 'a failed measurement still records the observed status'); assert.equal(failed.reason, 'action-failed'); }
+  const works = await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(200, false, { status: 400, error: 'invalid_grant' })); assert.equal(works.status, 'pass'); assert.equal(works.httpStatus, 200);
+  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(200, false, { status: 200 }))).status, 'fail', 'a 200 that leaves the token usable is a failure');
+  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth('throw', false, { status: 200 }))).status, 'fail');
+  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(302, false, { status: 200 }))).status, 'fail');
+});
+
+void test('hosted revoke: a 400 is absence only with the S3 catch-all InvalidArgument signature', async () => {
+  const { isS3InvalidArgument } = await import('./support/auth.ts');
+  const s3 = '<?xml version="1.0" encoding="UTF-8"?><Error><Code>InvalidArgument</Code><Message>POST requires either ?uploads, ?uploadId, ?restore or ?select parameter.</Message></Error>';
+  assert.equal(isS3InvalidArgument(Buffer.from(s3)), true);
+  assert.equal(isS3InvalidArgument(Buffer.from('<Error><Code>InvalidArgument</Code></Error>')), true);
+  for (const body of ['', '{"error":"invalid_request"}', '<Error><Code>NoSuchBucket</Code></Error>', '<Error><Code>InvalidArgumentX</Code></Error>', 'InvalidArgument']) assert.equal(isS3InvalidArgument(Buffer.from(body)), false, body);
+  const absent = await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(400, true, { status: 200 }));
+  assert.equal(absent.status, 'unsupported'); assert.equal(absent.reason, 'hosted-revoke-unsupported'); assert.equal(absent.httpStatus, 400);
+  const other = await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(400, false, { status: 200 })); assert.equal(other.status, 'fail'); assert.equal(other.httpStatus, 400);
+  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(500, true, { status: 200 }))).status, 'fail', 'the signature never rescues a non-400');
 });
