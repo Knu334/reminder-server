@@ -150,6 +150,7 @@ async function readSettings(fixture: SuiteFixture): Promise<void> {
   state.readbackPhase = 'gateway-api';
   const api = await read(options => state.api.send(new GetApiCommand({ ApiId: b.api_id! }), options)); same(api.ApiEndpoint, b.api_base_url, 'ApiEndpoint'); state.readbackObserved.protocolHttp = api.ProtocolType === 'HTTP'; state.readbackObserved.endpointEnabled = api.DisableExecuteApiEndpoint === false; same([api.ProtocolType, api.DisableExecuteApiEndpoint], ['HTTP', false], 'ProtocolType-DisableExecuteApiEndpoint');
   state.readbackPhase = 'gateway-cors'; state.readbackObserved.corsCredentials = api.CorsConfiguration?.AllowCredentials ?? null; state.readbackObserved.corsOrigins = api.CorsConfiguration?.AllowOrigins?.length ?? -1; state.readbackObserved.corsMethods = api.CorsConfiguration?.AllowMethods?.length ?? -1; state.readbackObserved.corsHeaders = api.CorsConfiguration?.AllowHeaders?.length ?? -1; state.readbackObserved.corsExpose = api.CorsConfiguration?.ExposeHeaders?.length ?? -1; state.readbackObserved.corsMaxAge = api.CorsConfiguration?.MaxAge ?? null;
+  { const c = api.CorsConfiguration; const lc = (v?: string[]): string => (v ?? []).map(x => x.toLowerCase()).sort().join(','); state.readbackObserved.corsOriginsMatch = lc(c?.AllowOrigins) === 'https://extension.example.test'; state.readbackObserved.corsHeadersLowerMatch = lc(c?.AllowHeaders) === 'authorization,content-type,if-match'; state.readbackObserved.corsExposeLowerMatch = lc(c?.ExposeHeaders) === 'allow,etag,location,retry-after,x-request-id'; state.readbackObserved.corsMethodsMatch = lc(c?.AllowMethods) === 'delete,get,options,patch,post,put'; }
   state.readbackField = 'CorsConfiguration'; assertGatewayCors(api.CorsConfiguration);
   state.readbackPhase = 'gateway-routes';
   const routes = await read(options => state.api.send(new GetRoutesCommand({ ApiId: b.api_id! }), options)); requireSetting(!routes.NextToken && routes.Items?.length === 16, 'NextToken-Items');
@@ -291,7 +292,7 @@ export async function fixtureSmoke(fixture: E2EFixture, input?: (status: number)
 }
 
 export function assertGatewayCors(actual: Cors | undefined): void {
-same({ ...actual, AllowCredentials: actual?.AllowCredentials ?? false, MaxAge: actual?.MaxAge ?? 0, AllowMethods: actual?.AllowMethods?.slice().sort(), ExposeHeaders: actual?.ExposeHeaders?.slice().sort() }, { AllowOrigins: ['https://extension.example.test'], AllowMethods: ['DELETE', 'GET', 'OPTIONS', 'PATCH', 'POST', 'PUT'], AllowHeaders: ['authorization', 'content-type', 'if-match'], ExposeHeaders: ['Allow', 'ETag', 'Location', 'Retry-After', 'X-Request-Id'], AllowCredentials: false, MaxAge: 0 });
+same({ ...actual, AllowCredentials: actual?.AllowCredentials ?? false, MaxAge: actual?.MaxAge ?? 0, AllowOrigins: actual?.AllowOrigins?.slice().sort(), AllowHeaders: actual?.AllowHeaders?.slice().sort(), AllowMethods: actual?.AllowMethods?.slice().sort(), ExposeHeaders: actual?.ExposeHeaders?.slice().sort() }, { AllowOrigins: ['https://extension.example.test'], AllowMethods: ['DELETE', 'GET', 'OPTIONS', 'PATCH', 'POST', 'PUT'], AllowHeaders: ['authorization', 'content-type', 'if-match'], ExposeHeaders: ['Allow', 'ETag', 'Location', 'Retry-After', 'X-Request-Id'], AllowCredentials: false, MaxAge: 0 });
 }
 
 export function gatewayRequestUrl(base: string, path: string): URL {
