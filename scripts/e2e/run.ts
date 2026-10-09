@@ -1,12 +1,12 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, readFile, readdir, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { createEvidence, recordProcess, terraformActions, finalizeResults, runCase, evidenceContext } from '../../tests/e2e/floci/support/evidence.ts';
+import { createEvidence, recordProcess, terraformActions, finalizeResults, runCase, evidenceContext, flushPendingLogs } from '../../tests/e2e/floci/support/evidence.ts';
 import type { ProcessEvidence } from '../../tests/e2e/floci/support/evidence.ts';
-import type { CaseDefinition, Evidence, ProvisionedStack } from '../../tests/e2e/floci/support/types.ts';
-import { definitions } from '../../tests/e2e/floci/support/cases.ts';
+import type { CaseDefinition, Evidence, ProvisionedStack, E2EFixture } from '../../tests/e2e/floci/support/types.ts';
+import { definitions, caseActions } from '../../tests/e2e/floci/support/cases.ts';
 
 export const deadlines = { run: 75 * 60_000, cleanup: 15 * 60_000, total: 90 * 60_000, http: 30_000, terraform: 10 * 60_000, authExpiry: 330_000, logs: 60_000, scheduler: 90_000, cleanupInvoke: 700_000 } as const;
 export class RunBudget {
@@ -37,9 +37,20 @@ export function childEnvironment(): NodeJS.ProcessEnv {
     NPM_CONFIG_USERCONFIG: '/dev/null', NPM_CONFIG_GLOBALCONFIG: '/dev/null', PYTHONNOUSERSITE: '1',
   };
 }
-export async function runChild(tool: ProcessEvidence['tool'], args: string[], options: { cwd: string; timeoutMs: number; expectedOutput?: string; terraformProxy?: string; signal?: AbortSignal; record?: (result: ProcessEvidence) => Promise<void> }): Promise<ProcessEvidence> {
+export async function runChild(tool: ProcessEvidence['tool'], args: string[], options: { cwd: string; timeoutMs: number; expectedOutput?: string; stdin?: string; captureStdout?: (text: string) => void; captureStderr?: (text: string) => void; terraformProxy?: string; signal?: AbortSignal; record?: (result: ProcessEvidence) => Promise<void> }): Promise<ProcessEvidence> {
   if (!['node', 'npm', 'python3', 'terraform'].includes(tool) || !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0 || options.timeoutMs > deadlines.terraform) throw new Error('CHILD_REJECTED');
   if (options.terraformProxy && (tool !== 'terraform' || !/^http:\/\/e2e:[a-f0-9]{48}@127\.0\.0\.1:[1-9][0-9]{0,4}$/.test(options.terraformProxy))) throw new Error('CHILD_REJECTED');
+  if ((options.stdin !== undefined || options.captureStdout || options.captureStderr) && (tool !== 'terraform' || args.join(' ') !== 'console -state=empty.tfstate -no-color' || options.stdin !== 'local.expected\n' || !options.captureStdout)) throw new Error('CHILD_REJECTED');
+  if (options.stdin !== undefined) {
+    const prefix = join(process.cwd(), '.superpowers/tools/aws-sdd/expected-iam/eval-');
+    if (!options.cwd.startsWith(prefix) || !/^[A-Za-z0-9]{6}$/.test(options.cwd.slice(prefix.length)) || (await lstat(options.cwd)).isSymbolicLink()) throw new Error('CHILD_REJECTED');
+    const files = await readdir(options.cwd); if (files.sort().join(',') !== 'empty.tfstate,expectations.tf') throw new Error('CHILD_REJECTED');
+    for (const name of files) { const file = await lstat(join(options.cwd, name)); if (!file.isFile() || file.isSymbolicLink() || file.size > 262144) throw new Error('CHILD_REJECTED'); }
+    const state = JSON.parse(await readFile(join(options.cwd, 'empty.tfstate'), 'utf8')) as { resources?: unknown[]; outputs?: object };
+    if (state.resources?.length !== 0 || !state.outputs || Object.keys(state.outputs).length !== 0) throw new Error('CHILD_REJECTED');
+    const config = await readFile(join(options.cwd, 'expectations.tf'), 'utf8');
+    if (/\b(resource|data|provider|module|terraform|backend)\s+"?/.test(config.replace(/#[^\n]*/g, '').replace(/"(?:\\.|[^"\\])*"/g, '""')) || /\b(file[a-z0-9_]*|templatefile|pathexpand)\s*\(/.test(config)) throw new Error('CHILD_REJECTED');
+  }
   const started = performance.now();
   const env = childEnvironment();
   if (options.terraformProxy) { env.HTTP_PROXY = options.terraformProxy; env.HTTPS_PROXY = options.terraformProxy; env.NO_PROXY = ''; }
@@ -55,18 +66,19 @@ export async function runChild(tool: ProcessEvidence['tool'], args: string[], op
     env.NPM_CONFIG_LOGS_MAX = '0';
   }
   const result = await new Promise<ProcessEvidence>(resolve => {
-    let timedOut = false; let stdout = ''; let overflow = false; let settled = false; let failedAction: string | undefined;
-    const child = spawn(tool, args, { cwd: options.cwd, env, stdio: ['ignore', 'pipe', 'pipe'], shell: false, detached: true });
+    let timedOut = false; let stdout = ''; let stderr = ''; let overflow = false; let settled = false; let failedAction: string | undefined;
+    const child = spawn(tool, args, { cwd: options.cwd, env, stdio: [options.stdin !== undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'], shell: false, detached: true });
     const kill = () => { timedOut = true; if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } } };
     const timer = setTimeout(kill, options.timeoutMs);
     options.signal?.addEventListener('abort', kill, { once: true });
     if (options.signal?.aborted) kill();
-    child.stdout.on('data', (chunk: Buffer) => {
-      if (options.expectedOutput !== undefined && !overflow) {
-        if (stdout.length + chunk.length > 4096) { overflow = true; stdout = ''; } else stdout += chunk.toString('utf8');
+    child.stdout!.on('data', (chunk: Buffer) => {
+      if ((options.expectedOutput !== undefined || options.captureStdout) && !overflow) {
+        if (stdout.length + chunk.length > (options.captureStdout ? 262144 : 4096)) { overflow = true; stdout = ''; } else stdout += chunk.toString('utf8');
       }
     });
-    child.stderr.on('data', (chunk: Buffer) => {
+    child.stderr!.on('data', (chunk: Buffer) => {
+      if (options.captureStderr && stderr.length + chunk.length <= 262144) stderr += chunk.toString('utf8');
       // Match only fixed API action names; raw Terraform diagnostics are discarded.
       const action = /operation error [A-Za-z0-9 ]+: ([A-Za-z0-9]+)/.exec(chunk.toString('utf8'))?.[1];
       if (action && terraformActions.has(action)) failedAction ??= action;
@@ -77,7 +89,8 @@ export async function runChild(tool: ProcessEvidence['tool'], args: string[], op
         durationMs: Math.round(performance.now() - started), timeoutMs: options.timeoutMs,
         ...(failedAction ? { failedAction } : {}), expectedOutputMatched: options.expectedOutput !== undefined && !overflow && stdout.trim() === options.expectedOutput });
     };
-    child.on('error', () => finish(null)); child.on('close', finish);
+    child.on('error', () => finish(null)); child.on('close', code => { options.captureStderr?.(stderr); if (code === 0 && !timedOut && !overflow) options.captureStdout?.(stdout); finish(code); });
+    if (options.stdin !== undefined) { child.stdin?.on('error', () => undefined); child.stdin?.end(options.stdin); }
   });
   if (configDirectory) await rm(configDirectory, { recursive: true, force: true });
   await options.record?.(result);
@@ -109,45 +122,76 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
   }
   const layer = flags.get('--layer') ?? 'floci';
   const suite = flags.get('--suite'); const caseId = flags.get('--case');
-  const selected = definitions.filter(def => (layer !== 'terraform' || (def.suite === 'terraform' && def.layer === 'L')) && (!suite || def.suite === suite) && (!caseId || def.id === caseId));
+  const inventory = definitions.map(def => structuredClone(def));
+  const selected = inventory.filter(def => (layer !== 'terraform' || (def.suite === 'terraform' && def.layer === 'L')) && (!suite || def.suite === suite) && (!caseId || def.id === caseId));
   if (!['floci', 'terraform'].includes(layer) || !selected.length) { console.error('E2E_INVALID_SELECTION'); return 2; }
   const partial = selected.length !== definitions.length || suite !== undefined || caseId !== undefined || layer === 'terraform';
   console.log(partial ? 'E2E_PARTIAL_SELECTION' : 'E2E_FOUNDATION_INVENTORY');
   const budget = new RunBudget();
-  let exit: 0 | 1 | 2 = 1;
+  let exit: 0 | 1 | 2 = 1; let driverFailed = false; let suiteErrors = 0;
   const controller = new AbortController(); const cancel = () => controller.abort();
   process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
   try {
     const evidence = await createEvidence(selected, join(process.cwd(), 'artifacts', 'formal-e2e', `e2e-${randomUUID()}`));
-    let stack: ProvisionedStack | undefined; let phase = 'preflight';
+    await writeFile(join(evidenceContext(evidence).directory, 'inventory.json'), JSON.stringify(inventory, null, 2) + '\n', { mode: 0o600 });
+    let stack: ProvisionedStack | undefined; let fixture: E2EFixture | undefined; let phase = 'preflight';
     try {
       const { preflight } = await import('./preflight.ts');
       const target = await preflight(result => recordProcess(evidence, result));
-      const definition = selected.find(def => def.id === 'TF-01/apply');
+      const definition = layer === 'terraform' ? selected.find(def => def.id === 'TF-01/apply') : inventory.find(def => def.id === 'TF-01/apply');
       if (definition) {
         phase = 'provision';
         if (!budget.allow('terraform') || controller.signal.aborted) await evidence.record({ id: definition.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'budget-exhausted' });
-        else stack = await runConstruction(evidence, definition, async () => {
+        else {
+          const construct = async () => {
           const { prepareArtifact } = await import('./prepare-artifact.ts');
           const artifact = await prepareArtifact(evidenceContext(evidence).directory, { budget, signal: controller.signal, record: result => recordProcess(evidence, result) });
           const { provisionStack } = await import('./terraform.ts');
           return provisionStack(target, { publication: false, budget, signal: controller.signal }, artifact, evidence);
-        });
+          };
+          if (selected.some(def => def.id === definition.id)) stack = await runConstruction(evidence, definition, construct);
+          else { try { stack = await construct(); } catch (error) { const { ProvisioningFailure } = await import('./terraform.ts'); if (error instanceof ProvisioningFailure) stack = error.ownedStack; } }
+        }
       }
-      // Task4 attaches sequential fixture/suite execution here. Construction is
-      // shared once per run; unrelated foundation actions remain unimplemented.
-      await recordConstructionDependents(evidence, selected, stack);
+      if (layer !== 'terraform' && stack?.constructionOutputs.length === 4) {
+        phase = 'fixture'; const { createRunFixture, readDeployedSettings } = await import('../../tests/e2e/floci/support/fixture.ts');
+        fixture = await createRunFixture(stack, evidence, { budget, signal: controller.signal });
+        const ready = await runFixturePrerequisites(evidence, selected, fixture);
+        const remaining = selected.filter(def => !['TF-01/apply', 'TF-03/settings', 'TF-03/settings-final', 'OBS-02/smoke', 'OBS-03/gateway-refusal', 'OBS-04/gateway-delivery'].includes(def.id));
+        const executable = remaining.filter(def => caseActions.has(def.id));
+        if (ready && executable.length) {
+          const { createFixture, fixtureState, fixtureStates } = await import('../../tests/e2e/floci/support/fixture.ts');
+          const { createCaseAuth } = await import('../../tests/e2e/floci/support/auth.ts');
+          const { suiteLogStates, cleanupChecksMatch, cleanupCaseMatches } = await import('../../tests/e2e/floci/support/logs.ts');
+          const suiteResult = await executeSuites(executable, {
+            create: suite => createFixture({ suite, publication: true }, fixture!),
+            async action(def, suite) { await runCase(def, evidence, async recorder => { const view = { ...suite, auth: await createCaseAuth(suite, def.id) }; fixtureStates.set(view, fixtureState(suite)); suiteLogStates.set(view, suiteLogStates.get(suite)!); await caseActions.get(def.id)!(view, recorder); }); },
+            async flush(suite) { const state = suiteLogStates.get(suite)!; await flushPendingLogs(evidence, async checks => { const results = await state.observer.flush(checks, Math.max(state.lastInput, fixtureState(suite).lastInput), 60_000, () => cleanupChecksMatch(state)); return results.map(result => ({ ...result, matched: result.matched && cleanupCaseMatches(state, result.caseId) })); }); },
+            reset: suite => suite.resetSuite(),
+            blocked: def => evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'prerequisite-failed' }),
+          });
+          suiteErrors += suiteResult.errors;
+        }
+        for (const def of remaining.filter(def => !ready || !caseActions.has(def.id))) await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: ready ? 'implementation-pending' : 'prerequisite-failed' });
+        const finalSettings = selected.find(def => def.id === 'TF-03/settings-final');
+        const { fixtureState } = await import('../../tests/e2e/floci/support/fixture.ts');
+        if (fixtureState(fixture).settingsComplete) {
+          if (finalSettings) await runCase(finalSettings, evidence, async recorder => { await readDeployedSettings(fixture!); for (const output of finalSettings.outputs) recorder.recordOutput({ kind: output.kind, status: 'pass', assertions: output.assertions.map(name => ({ name, status: 'pass' })) }); });
+          else await readDeployedSettings(fixture);
+        } else if (finalSettings) await evidence.record({ id: finalSettings.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'prerequisite-failed' });
+      } else await recordConstructionDependents(evidence, selected, stack);
     } catch {
-      exit = phase === 'preflight' ? 2 : 1;
-      for (const def of selected) await evidence.record({ id: def.id, status: 'not-run', phase: phase === 'preflight' ? 'preflight' : 'provision', durationMs: 0, reason: phase === 'preflight' ? 'preflight-failed' : 'prerequisite-failed' });
+      driverFailed = true; exit = phase === 'preflight' ? 2 : 1;
+      for (const def of selected) { try { await evidence.record({ id: def.id, status: 'not-run', phase: phase === 'preflight' ? 'preflight' : 'provision', durationMs: 0, reason: phase === 'preflight' ? 'preflight-failed' : 'prerequisite-failed' }); } catch (error) { if (!(error instanceof Error) || error.message !== 'INVALID_CASE_TRANSITION') throw error; } }
     } finally {
       await finalizeResults(evidence);
       budget.beginCleanup();
       let cleanup = { attempted: 0, succeeded: 0, errors: 0, leaks: 0 };
-      if (stack) { try { cleanup = await stack.destroy(); } catch { cleanup = { attempted: 1, succeeded: 0, errors: 1, leaks: 0 }; } }
+      if (stack) { try { cleanup = fixture ? await fixture.dispose() : await stack.destroy(); } catch { cleanup = { attempted: 1, succeeded: 0, errors: 1, leaks: 0 }; } }
+      cleanup.errors += suiteErrors + (driverFailed ? 1 : 0);
       const summary = await evidence.finish(cleanup);
-      if (exit !== 2) exit = summary.exitCode;
-      console.log(JSON.stringify({ runId: evidence.runId, partial, foundationOnly: layer !== 'terraform', ...summary, exitCode: exit }));
+      if (exit !== 2) exit = driverFailed ? 1 : summary.exitCode;
+      console.log(JSON.stringify({ runId: evidence.runId, partial, foundationOnly: false, ...summary, exitCode: exit }));
     }
   } catch { console.error('E2E_HARNESS_FAILED'); exit = 1; }
   finally { process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel); }
@@ -155,4 +199,45 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
 }
 if (require.main === module) {
   void runMain(process.argv.slice(2)).then(code => { process.exitCode = code; }, () => { console.error('E2E_HARNESS_FAILED'); process.exitCode = 1; });
+}
+
+/** Settings and real delivery are prerequisites even for a filtered case selection. */
+export async function runFixturePrerequisites(evidence: Evidence, selected: CaseDefinition[], fixture: import('../../tests/e2e/floci/support/types.ts').E2EFixture): Promise<boolean> {
+  const { readDeployedSettings, fixtureSmoke, fixtureState } = await import('../../tests/e2e/floci/support/fixture.ts');
+  const settings = selected.find(def => def.id === 'TF-03/settings');
+  let settingsFailed = false;
+  if (settings) await runCase(settings, evidence, async recorder => { await readDeployedSettings(fixture); for (const output of settings.outputs) recorder.recordOutput({ kind: output.kind, status: 'pass', assertions: output.assertions.map(name => ({ name, status: 'pass' })) }); });
+  else { try { await readDeployedSettings(fixture); } catch { settingsFailed = true; } }
+  await writeFile(join(evidenceContext(evidence).directory, 'fixture-settings.json'), JSON.stringify({ complete: fixtureState(fixture).settingsComplete, phase: fixtureState(fixture).readbackPhase, error: fixtureState(fixture).readbackError, wire: fixtureState(fixture).readbackWirePrimary, independentReadback: fixtureState(fixture).independentReadback, failedCheck: fixtureState(fixture).readbackFailed, observed: fixtureState(fixture).readbackObserved, expectedSourceDigest: fixtureState(fixture).expectedIam?.sourceDigest }, null, 2) + '\n', { mode: 0o600 });
+  if (settingsFailed || !fixtureState(fixture).settingsComplete) { for (const def of selected.filter(d => ['OBS-02/smoke', 'OBS-03/gateway-refusal', 'OBS-04/gateway-delivery'].includes(d.id))) await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'prerequisite-failed' }); return false; }
+  const smokeDefinition = selected.find(def => def.id === 'OBS-02/smoke');
+  let smoke: import('../../tests/e2e/floci/support/fixture.ts').SmokeResult | undefined;
+  if (smokeDefinition) await runCase(smokeDefinition, evidence, async recorder => { smoke = await fixtureSmoke(fixture, status => recorder.recordInput({ httpStatus: status }));
+    for (const output of smokeDefinition.outputs) { const matched = output.kind === 'http' ? smoke.statuses.every((status, index) => status === [503, 200, 200, 401, 200][index]) : output.kind === 'logs' ? smoke.logs && smoke.cleanupLogs : smoke.unchanged; recorder.recordOutput({ kind: output.kind, status: matched ? 'pass' : 'fail', assertions: output.assertions.map(name => ({ name, status: matched ? 'pass' : 'fail' })) }); }
+  }); else smoke = await fixtureSmoke(fixture);
+  smoke ??= fixtureState(fixture).smokeObserved;
+  await writeFile(join(evidenceContext(evidence).directory, 'fixture-smoke.json'), JSON.stringify(smoke ?? { started: false }, null, 2) + '\n', { mode: 0o600 });
+  for (const def of selected.filter(d => ['OBS-03/gateway-refusal', 'OBS-04/gateway-delivery'].includes(d.id))) {
+    if (!smoke || smoke.statuses.length < (def.id.startsWith('OBS-03') ? 4 : 2)) { await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'prerequisite-failed' }); continue; }
+    if (def.id === 'OBS-04/gateway-delivery' && smoke?.logs && smoke.gatewayObserved === 0) {
+      await evidence.record({ id: def.id, status: 'unsupported', phase: 'logs', durationMs: 0, reason: 'gateway-delivery-unsupported', httpStatus: smoke.statuses[1]!, outputs: def.outputs.map(output => output.assertions.length ? { kind: output.kind, status: 'pass', assertions: output.assertions.map(name => ({ name, status: 'pass' })) } : { kind: output.kind, status: 'not-applicable', assertions: [], reason: output.notApplicableReason! }) }); continue;
+    }
+    await runCase(def, evidence, async recorder => {
+      recorder.recordInput({ httpStatus: smoke!.statuses[def.id.startsWith('OBS-03') ? 3 : 1]! });
+      for (const output of def.outputs) { if (!output.assertions.length) recorder.recordOutput({ kind: output.kind, status: 'not-applicable', assertions: [], reason: output.notApplicableReason! }); else { const matched = def.id.startsWith('OBS-03') ? output.kind === 'logs' ? smoke!.rejection : output.kind === 'http' ? smoke!.statuses[3] === 401 : smoke!.unchanged : smoke!.gatewayLogs; recorder.recordOutput({ kind: output.kind, status: matched ? 'pass' : 'fail', assertions: output.assertions.map(name => ({ name, status: matched ? 'pass' : 'fail' })) }); } }
+    });
+  }
+  return fixtureState(fixture).smokeComplete;
+}
+
+export async function executeSuites<T>(selected: CaseDefinition[], hooks: { create(suite: string): Promise<T>; action(def: CaseDefinition, suite: T): Promise<void>; flush(suite: T): Promise<void>; reset(suite: T): Promise<unknown>; blocked(def: CaseDefinition): Promise<void> }): Promise<{ errors: number }> {
+  let blocked = false; let errors = 0;
+  for (const name of new Set(selected.map(def => def.suite))) {
+    const definitions = selected.filter(def => def.suite === name);
+    if (blocked) { for (const def of definitions) await hooks.blocked(def); continue; }
+    let suite: T | undefined; let started = 0; let flushAttempted = false;
+    try { suite = await hooks.create(name); for (const def of definitions) { started++; await hooks.action(def, suite); } flushAttempted = true; await hooks.flush(suite); const cleanup = await hooks.reset(suite) as { errors?: number; leaks?: number } | undefined; if (cleanup?.errors || cleanup?.leaks) throw new Error('RESET_FAILED'); }
+    catch { blocked = true; errors++; if (suite && !flushAttempted) { try { await hooks.flush(suite); } catch { /* executed cases retain their failure */ } } for (const def of definitions.slice(started)) await hooks.blocked(def); }
+  }
+  return { errors };
 }

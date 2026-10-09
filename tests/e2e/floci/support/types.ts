@@ -2,6 +2,7 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import type { S3Client } from '@aws-sdk/client-s3';
 import type { LambdaClient } from '@aws-sdk/client-lambda';
 import type { CloudWatchClient } from '@aws-sdk/client-cloudwatch';
+import type { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import type { STSClient } from '@aws-sdk/client-sts';
 import type { Config } from '../../../../src/config.ts';
 
@@ -27,11 +28,8 @@ export type ArtifactSnapshot = { zipPath: string; sha256Hex: string; sha256Base6
 export type FixtureOptions = { publication: boolean; budget?: { allow(phase: 'terraform'): number; beginCleanup(): void; cleanupRemaining(): number }; signal?: AbortSignal };
 export type SuiteOptions = { suite: string; publication: boolean };
 export type OwnedIdentity = { type: string; identity: string; parent?: string };
-export type OwnedManifest = { runId: string; resources: { kind: string; name: string; id: string; created: boolean; removed: boolean; identities?: OwnedIdentity[] }[] };
-// Task4 replaces this temporary structural port with the pinned CloudWatchLogsClient.
-// No implementation or fallback client is supplied by the Task1 foundation.
-export interface CloudWatchLogsPort { send(command: unknown): Promise<unknown> }
-export type LocalClients = { dynamodb: DynamoDBDocumentClient; s3: S3Client; lambda: LambdaClient; cloudwatch: CloudWatchClient; logs: CloudWatchLogsPort; sts: STSClient };
+export type OwnedManifest = { runId: string; resources: { kind: string; name: string; id: string; created: boolean; removed: boolean; suite?: string; identities?: OwnedIdentity[] }[] };
+export type LocalClients = { dynamodb: DynamoDBDocumentClient; s3: S3Client; lambda: LambdaClient; cloudwatch: CloudWatchClient; logs: CloudWatchLogsClient; sts: STSClient };
 export type AuthSession = { accessToken: string; idToken?: string; refreshToken: string; claims: { iss: string; sub: string; client_id: string; iat: number; exp: number; scope: string } };
 export type FixtureAuth = {
   login(owner: 'a' | 'b', scopes: string[], client: 'primary' | 'sibling' | 'foreign'): Promise<AuthSession>;

@@ -3,6 +3,7 @@ export { withTerraformTransport } from './terraform-transport.ts';
 import { mkdir, readFile, writeFile, unlink, lstat } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
+import type { HttpHandlerOptions } from '@smithy/types';
 import { S3Client, ListObjectVersionsCommand, DeleteObjectsCommand, DeleteBucketPolicyCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
 import type { ArtifactSnapshot, CleanupSummary, Evidence, FixtureOptions, LocalTarget, PreparedTerraformRoots, ProvisionedStack, RequiredReadApi } from '../../tests/e2e/floci/support/types.ts';
 import { localRequest } from '../../tests/e2e/floci/support/transport.ts';
@@ -40,13 +41,14 @@ export async function assertOidcAbsent(target: LocalTarget): Promise<void> {
 export function localS3(target: LocalTarget): S3Client {
   assertLocalTarget(target);
   return new S3Client({ endpoint: target.endpoint, region: target.region, credentials: { accessKeyId: 'local', secretAccessKey: 'local' }, forcePathStyle: true, maxAttempts: 1,
-    requestHandler: { async handle(request: { protocol: string; hostname: string; port?: number; path: string; query?: Record<string, string | string[] | null>; method: string; headers: Record<string, string>; body?: unknown }) {
+    requestHandler: { async handle(request: { protocol: string; hostname: string; port?: number; path: string; query?: Record<string, string | string[] | null>; method: string; headers: Record<string, string>; body?: unknown }, options: HttpHandlerOptions = {}) {
+      if (options.abortSignal && !('addEventListener' in options.abortSignal)) throw new Error('LOCAL_SIGNAL_REJECTED');
       const url = new URL(`${request.protocol}//${request.hostname}:${request.port ?? 4566}${request.path}`);
       for (const [key, value] of Object.entries(request.query ?? {})) for (const item of Array.isArray(value) ? value : [value ?? '']) url.searchParams.append(key, item);
       const headers = Object.fromEntries(Object.entries(request.headers).filter(([key]) => key.toLowerCase() !== 'host'));
       if (request.body !== undefined && typeof request.body !== 'string' && !Buffer.isBuffer(request.body) && !(request.body instanceof Uint8Array)) throw new Error('LOCAL_BODY_REJECTED');
-      const body = request.body instanceof Uint8Array ? Buffer.from(request.body) : request.body as string | Buffer | undefined;
-      const response = await localRequest(target, url, { method: request.method, headers, ...(body !== undefined ? { body } : {}) });
+      const body = request.body instanceof Uint8Array ? Buffer.from(request.body.buffer, request.body.byteOffset, request.body.byteLength) : request.body as string | Buffer | undefined;
+      const response = await localRequest(target, url, { method: request.method, headers, ...(body !== undefined ? { body } : {}), ...(options.abortSignal ? { signal: options.abortSignal as AbortSignal } : {}), ...(options.requestTimeout !== undefined ? { timeoutMs: options.requestTimeout } : {}) });
       return { response: { statusCode: response.status, headers: Object.fromEntries(response.headers), body: Readable.from([response.bytes]) } };
     } },
   });
@@ -423,6 +425,7 @@ export async function provisionStack(target: LocalTarget, options: FixtureOption
     ];
     for (const name of ['api_id', 'api_base_url', 'api_alias_arn', 'cleanup_alias_arn']) bindings[name] = value(finalApplication, name);
     for (const [name, value] of Object.entries(application)) if (typeof value === 'string') bindings[name] = value;
+    for (const [key, value] of Object.entries(application.artifact as { bucket: string; key: string; version_id: string; sha256_base64: string })) bindings[`artifact_${key}`] = value;
     bindings.pool_id = pool; bindings.prefix = prefix; bindings.account_id = account;
     await writeFile(join(context.directory, 'terraform-snapshot.json'), JSON.stringify({ sourceDigest: roots.sourceDigest, transformedDigest: roots.transformedDigest, validationDiffs: roots.validationDiffs, generatedChanges: roots.generatedChanges }, null, 2), { mode: 0o600 });
     stack.manifest = evidenceContext(evidence).manifest;

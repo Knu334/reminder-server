@@ -14,7 +14,7 @@ type PendingCase = { definition: CaseDefinition; result: CaseResult; checks: Pen
 export const blockedEndpointClasses = new Set(['proxy-authentication', 'invalid-url', 'aws-s3', 'aws-s3-regional', 'aws-s3-control', 'aws-sts', 'aws-iam', 'aws-tagging', 'terraform-registry', 'owned-host-https', 'synthetic-account-floci-alias', 'unverified-floci-alias', 'unverified-localstack-alias', 'public-xml-schema', 'aws-other', 'unowned-host', 'redirect']);
 export const terraformActions = new Set(['ListTagsForResource', 'CreateOpenIDConnectProvider', 'GetOpenIDConnectProvider', 'ListOpenIDConnectProviders', 'CreateRole', 'GetRole', 'CreatePolicy', 'GetPolicy', 'PutRolePolicy', 'GetRolePolicy', 'ListRolePolicies', 'ListAttachedRolePolicies', 'CreateBucket', 'GetBucketVersioning', 'GetBucketPolicy', 'GetBucketTagging', 'GetBucketAcl', 'GetBucketCors', 'GetBucketLogging', 'GetBucketRequestPayment', 'GetBucketWebsite', 'GetBucketLifecycleConfiguration', 'GetBucketEncryption', 'GetBucketPolicyStatus', 'GetBucketOwnershipControls', 'PutBucketVersioning', 'PutBucketPolicy', 'PutBucketEncryption', 'PutPublicAccessBlock', 'CreateUserPool', 'DescribeUserPool', 'CreateUserPoolClient', 'CreateUserPoolDomain', 'DescribeUserPoolDomain', 'SetUserPoolMfaConfig', 'CreateTable', 'DescribeTable', 'UpdateContinuousBackups', 'DescribeContinuousBackups', 'CreateLogGroup', 'PutRetentionPolicy', 'CreateApi', 'CreateFunction', 'GetFunction', 'PutMetricAlarm', 'CreateScheduleGroup', 'DeleteOpenIDConnectProvider', 'DeleteBucket', 'DeleteRole']);
 export type ProcessEvidence = { tool: 'node' | 'npm' | 'python3' | 'terraform'; status: 'succeeded' | 'failed' | 'timeout'; durationMs: number; timeoutMs: number; exitCode: number | null; expectedOutputMatched: boolean; failedAction?: string; blockedEndpoints?: string[]; blockedEndpointCounts?: Record<string, number>; forwarded?: number };
-type State = { directory: string; definitions: CaseDefinition[]; results: Map<string, CaseResult>; pending: Map<string, PendingCase>; active: Set<string>; processes: ProcessEvidence[]; resources: OwnedManifest['resources']; finalized: boolean; closed: boolean };
+type State = { directory: string; definitions: CaseDefinition[]; results: Map<string, CaseResult>; pending: Map<string, PendingCase>; active: Set<string>; processes: ProcessEvidence[]; resources: OwnedManifest['resources']; finalized: boolean; closed: boolean; finalizedSuites: Set<string> };
 const states = new WeakMap<Evidence, State>();
 const measuredNonSupport = new WeakSet<RequiredApiNonSupport>();
 export class MeasuredRequiredApiUnsupported extends Error {
@@ -145,7 +145,7 @@ export async function createEvidence(definitions: CaseDefinition[], runDirectory
     outputs: def.outputs.map(output => ({ kind: output.kind, assertions: [...output.assertions], ...(output.notApplicableReason ? { notApplicableReason: output.notApplicableReason } : {}) })),
   }));
   const directoryId = basename(runDirectory);
-  const state: State = { directory: runDirectory, definitions: safeDefinitions, results: new Map(), pending: new Map(), active: new Set(), processes: [], resources: [], finalized: false, closed: false };
+  const state: State = { directory: runDirectory, definitions: safeDefinitions, results: new Map(), pending: new Map(), active: new Set(), processes: [], resources: [], finalized: false, closed: false, finalizedSuites: new Set<string>() };
   const evidence: Evidence = {
     runId: /^e2e-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(directoryId) ? directoryId : `e2e-${randomUUID()}`,
     async record(result) {
@@ -247,16 +247,17 @@ export async function flushPendingLogs(evidence: Evidence, observe: (checks: Pen
 }
 
 /** Persist intent before a create request; only safe synthetic identities belong here. */
-export async function reserveResource(evidence: Evidence, resource: { kind: string; name: string; id: string }): Promise<void> {
+export async function reserveResource(evidence: Evidence, resource: { kind: string; name: string; id: string; suite?: string }): Promise<void> {
   const state = stateOf(evidence);
   if (state.finalized || ![resource.kind, resource.name, resource.id].every(value => label.test(value)) ||
+      (resource.suite !== undefined && (!label.test(resource.suite) || !['sdk-control', 'sdk-user'].includes(resource.kind))) ||
       !resource.id.startsWith(`${evidence.runId}/`) || state.resources.some(item => item.id === resource.id)) throw new Error('RESOURCE_REJECTED');
-  state.resources.push({ kind: resource.kind, name: resource.name, id: resource.id, created: false, removed: false });
+  state.resources.push({ kind: resource.kind, name: resource.name, id: resource.id, ...(resource.suite ? { suite: resource.suite } : {}), created: false, removed: false });
   await save(evidence, state);
 }
 export async function markResource(evidence: Evidence, id: string, status: 'created' | 'removed'): Promise<void> {
   const state = stateOf(evidence); const resource = state.resources.find(item => item.id === id);
-  if (!resource || resource.removed || (status === 'created' && state.finalized) || (status === 'removed' && !state.finalized)) throw new Error('RESOURCE_REJECTED');
+  if (!resource || resource.removed || (status === 'created' && state.finalized) || (status === 'removed' && !state.finalized && !(resource.suite && ['sdk-user', 'sdk-control'].includes(resource.kind) && state.finalizedSuites.has(resource.suite) && state.pending.size === 0 && state.active.size === 0 && resource.identities?.length))) throw new Error('RESOURCE_REJECTED');
   resource[status] = true; await save(evidence, state);
 }
 export function evidenceContext(evidence: Evidence): { directory: string; finalized: boolean; manifest: OwnedManifest } {
@@ -266,9 +267,19 @@ export function evidenceContext(evidence: Evidence): { directory: string; finali
 export async function bindResourceIdentities(evidence: Evidence, id: string, identities: OwnedIdentity[]): Promise<void> {
   const state = stateOf(evidence); const resource = state.resources.find(item => item.id === id);
   const identifier = /^[a-zA-Z0-9/$][a-zA-Z0-9:/_.@$+-]{0,2047}$/;
-  if (state.finalized || !resource || resource.kind !== 'terraform-address' || resource.removed || identities.some(item => !/^aws_[a-z0-9_]+$/.test(item.type) || !identifier.test(item.identity) || (item.parent !== undefined && !identifier.test(item.parent)))) throw new Error('RESOURCE_REJECTED');
+  if (state.finalized || !resource || !['terraform-address', 'sdk-control', 'sdk-user'].includes(resource.kind) || resource.removed || identities.some(item => !/^aws_[a-z0-9_]+$/.test(item.type) || !identifier.test(item.identity) || (item.parent !== undefined && !identifier.test(item.parent)))) throw new Error('RESOURCE_REJECTED');
   const retained = new Map((resource.identities ?? []).map(item => [JSON.stringify(item), item]));
   for (const item of identities) { const safe = { type: item.type, identity: item.identity, ...(item.parent ? { parent: item.parent } : {}) }; retained.set(JSON.stringify(safe), safe); }
+  if (resource.kind !== 'terraform-address') {
+    const prefix = `e2e-${evidence.runId.slice(4, 12)}-`;
+    if (!resource.suite || !resource.name.startsWith(prefix) || identities.length !== 1) throw new Error('RESOURCE_REJECTED');
+    const identity = identities[0]!;
+    const ownsPool = (pool: string | undefined) => !!pool && state.resources.some(r => r.identities?.some(i => i.type === 'aws_cognito_user_pool' && i.identity === pool));
+    const valid = resource.kind === 'sdk-user' ? identity.type === 'aws_cognito_user' && identity.identity === resource.name && ownsPool(identity.parent)
+      : identity.type === 'aws_cognito_user_pool' ? /^ap-northeast-1_[A-Za-z0-9]+$/.test(identity.identity) && identity.parent === undefined
+      : identity.type === 'aws_cognito_user_pool_client' && /^[A-Za-z0-9]{1,128}$/.test(identity.identity) && ownsPool(identity.parent);
+    if (!valid) throw new Error('RESOURCE_REJECTED');
+  }
   resource.identities = [...retained.values()];
   if (identities.length) resource.created = true;
   await save(evidence, state);
@@ -277,4 +288,11 @@ export async function finalizeResults(evidence: Evidence): Promise<void> {
   const state = stateOf(evidence);
   if (state.active.size) throw new Error('CASE_STILL_ACTIVE');
   if (!state.finalized) { await flushPendingLogs(evidence, async () => []); state.finalized = true; await save(evidence, state); }
+}
+
+/** End only suite SDK ownership after every executed case has resolved logs. */
+export async function finalizeSuiteResources(evidence: Evidence, suite: string): Promise<void> {
+  const state = stateOf(evidence);
+  if (!label.test(suite) || state.finalized || state.active.size || state.pending.size || [...state.results.values()].some(result => state.definitions.find(def => def.id === result.id)?.suite === suite && ['logs-pending', 'implementation-pending'].includes(result.reason ?? ''))) throw new Error('RESOURCE_REJECTED');
+  state.finalizedSuites.add(suite);
 }

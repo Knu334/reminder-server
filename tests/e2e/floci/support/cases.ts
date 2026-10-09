@@ -26,3 +26,28 @@ export const definitions: CaseDefinition[] = [
     { kind: 'logs', assertions: ['three-log-groups-retention30'] },
   ] },
 ];
+
+export const fixtureDefinitions: CaseDefinition[] = [
+  { id: 'TF-03/settings', requirementId: 'TF-03', layer: 'L', required: true, acceptance: 'behavior', suite: 'fixture', source: 'formal-e2e-coverage/TF-03', outputs: [
+    { kind: 'http', assertions: ['cognito-gateway-lambda-iam-scheduler-alarms'] },
+    { kind: 'dynamodb', assertions: ['keys-gsi-ttl-pitr35-protection'] },
+    { kind: 's3', assertions: ['version-encryption-public-block-lifecycle-cors-policy-pinned-zip'] },
+    { kind: 'logs', assertions: ['three-owned-groups-retention30'] },
+  ] },
+  { id: 'OBS-02/smoke', requirementId: 'OBS-02', layer: 'E', required: true, acceptance: 'behavior', suite: 'fixture', source: 'formal-e2e-coverage/OBS-02', outputs: [
+    { kind: 'http', assertions: ['ready503-health200-ready200-unauth401'] },
+    { kind: 'dynamodb', assertions: ['refusal-rate-storage-unchanged'] },
+    { kind: 's3', assertions: ['refusal-versions-unchanged'] },
+    { kind: 'logs', assertions: ['real-api-results-and-cleanup-delivered'] },
+  ] },
+  { id: 'OBS-03/gateway-refusal', requirementId: 'OBS-03', layer: 'E', required: true, acceptance: 'behavior', suite: 'fixture', source: 'formal-e2e-coverage/OBS-03', outputs: [
+    { kind: 'http', assertions: ['gateway401'] }, { kind: 'dynamodb', assertions: ['refusal-rate-storage-unchanged'] }, { kind: 's3', assertions: ['refusal-versions-unchanged'] }, { kind: 'logs', assertions: ['delivered-controls-no-extra-api-results'] },
+  ] },
+  { id: 'OBS-04/gateway-delivery', requirementId: 'OBS-04', layer: 'L', required: true, acceptance: 'compatibility', suite: 'fixture', source: 'formal-e2e-coverage/OBS-04', outputs: checks(['measured-owned-gateway-delivery'], 'gateway-log-probe') },
+];
+definitions.push(...fixtureDefinitions);
+
+/** Later task suites register concrete actions; absent actions remain explicit not-run. */
+export const caseActions = new Map<string, (fixture: import('./types.ts').SuiteFixture, recorder: import('./types.ts').CaseRecorder) => Promise<void>>();
+
+definitions.push({ ...fixtureDefinitions[0]!, id: 'TF-03/settings-final' });

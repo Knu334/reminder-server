@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test, type TestContext } from 'node:test';
 import http from 'node:http';
 import { PassThrough, Readable } from 'node:stream';
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createEvidence, runCase, flushPendingLogs, recordProcess } from '../../e2e/floci/support/evidence.ts';
@@ -327,3 +327,85 @@ for (const position of ['before', 'after'] as const) {
     });
   }
 }
+
+void test('suite SDK manifest allows only bound owned verified absence after log finalization', async t => {
+  const { reserveResource, markResource, bindResourceIdentities, finalizeSuiteResources, evidenceContext } = await import('../../e2e/floci/support/evidence.ts');
+  const evidence = await createEvidence([definition()], await temporary(t));
+  const name = `e2e-${evidence.runId.slice(4, 12)}-synthetic-user`;
+  const id = `${evidence.runId}/sdk-user/${name}`;
+  const poolId = `${evidence.runId}/platform/aws_cognito_user_pool.production`;
+  await reserveResource(evidence, { kind: 'terraform-address', name: 'platform/aws_cognito_user_pool.production', id: poolId });
+  await bindResourceIdentities(evidence, poolId, [{ type: 'aws_cognito_user_pool', identity: 'ap-northeast-1_OwnedPool' }]);
+  await reserveResource(evidence, { kind: 'sdk-user', name, id, suite: 'harness' });
+  await bindResourceIdentities(evidence, id, [{ type: 'aws_cognito_user', identity: name, parent: 'ap-northeast-1_OwnedPool' }]);
+  await markResource(evidence, id, 'created');
+  await assert.rejects(markResource(evidence, id, 'removed'), /RESOURCE_REJECTED/);
+  await deferred(evidence);
+  await assert.rejects(finalizeSuiteResources(evidence, 'harness'), /RESOURCE_REJECTED/);
+  await flushPendingLogs(evidence, async checks => checks.map(check => ({ caseId: check.caseId, assertion: check.assertion, matched: true })));
+  await finalizeSuiteResources(evidence, 'harness');
+  await markResource(evidence, id, 'removed');
+  assert.equal(evidenceContext(evidence).manifest.resources.find(r => r.id === id)?.removed, true);
+  const rootId = `${evidence.runId}/root`;
+  await reserveResource(evidence, { kind: 'terraform-root', name: 'root', id: rootId });
+  await assert.rejects(markResource(evidence, rootId, 'removed'), /RESOURCE_REJECTED/);
+});
+
+void test('suite SDK rejects foreign names parents unsupported types and raw canary bindings', async t => {
+  const { reserveResource, bindResourceIdentities } = await import('../../e2e/floci/support/evidence.ts');
+  const evidence = await createEvidence([definition()], await temporary(t));
+  const name = `e2e-${evidence.runId.slice(4, 12)}-control`;
+  const id = `${evidence.runId}/sdk-control/${name}`;
+  await reserveResource(evidence, { kind: 'sdk-control', name, id, suite: 'harness' });
+  for (const binding of [{ type: 'aws_cognito_user_pool_client', identity: 'client', parent: 'ap-northeast-1_Foreign' }, { type: 'aws_lambda_function', identity: name }, { type: 'aws_cognito_user_pool', identity: 'SECRET_CANARY' }, { type: 'aws_cognito_user_pool', identity: 'ap-northeast-1_Owned', parent: 'foreign' }]) await assert.rejects(bindResourceIdentities(evidence, id, [binding]), /RESOURCE_REJECTED/);
+  await assert.rejects(reserveResource(evidence, { kind: 'terraform-root', name: 'root', id: `${evidence.runId}/root`, suite: 'harness' }), /RESOURCE_REJECTED/);
+});
+
+void test('bounded Terraform console input/output stays in memory and rejects other tools', async t => {
+  const directory = await temporary(t); let captured = '';
+  await assert.rejects(runChild('node', ['-e', 'process.exit(0)'], { cwd: directory, timeoutMs: 1000, stdin: 'secret-canary', captureStdout: text => { captured = text; } }), /CHILD_REJECTED/);
+  assert.equal(captured, '');
+});
+
+void test('stateless public evaluator permits only its fixed expression before console spawn', async t => {
+  const parent = join(process.cwd(), '.superpowers/tools/aws-sdd/expected-iam'); await mkdir(parent, { recursive: true, mode: 0o700 }); const directory = await mkdtemp(join(parent, 'eval-')); t.after(() => rm(directory, { recursive: true, force: true }));
+  await writeFile(join(directory, 'expectations.tf'), 'locals { expected = "synthetic" }', { mode: 0o600 }); await writeFile(join(directory, 'empty.tfstate'), '{"version":4,"terraform_version":"1.16.5","serial":0,"lineage":"00000000-0000-0000-0000-000000000000","outputs":{},"resources":[]}', { mode: 0o600 }); let capturedBytes = 0;
+  await assert.rejects(runChild('terraform', ['console', '-state=empty.tfstate', '-no-color'], { cwd: directory, timeoutMs: 1000, stdin: '"SECRET_CANARY"\n', captureStdout: value => { capturedBytes += value.length; } }), /CHILD_REJECTED/);
+  assert.equal(capturedBytes, 0);
+});
+
+void test('suite driver runs sequentially and resolves logs before reset and skips blocked sibling suites', async () => {
+  const { executeSuites } = await import('../../../scripts/e2e/run.ts'); const order: string[] = [];
+  const defs = [definition('SAFE-01/one'), { ...definition('SAFE-01/two'), suite: 'second' }];
+  await executeSuites(defs, {
+    async create(suite) { order.push(`create:${suite}`); return { suite }; }, async action(def) { order.push(`action:${def.id}`); }, async flush(suite) { order.push(`flush:${suite.suite}`); }, async reset(suite) { order.push(`reset:${suite.suite}`); throw new Error('RESET_FAILED'); }, async blocked(def) { order.push(`blocked:${def.id}`); },
+  });
+  assert.deepEqual(order, ['create:harness', 'action:SAFE-01/one', 'flush:harness', 'reset:harness', 'blocked:SAFE-01/two']);
+});
+
+void test('local SDK transport copies byte views without calling unsafe adapter string conversion', async t => {
+  const { localS3 } = await import('../../../scripts/e2e/terraform.ts'); const client = localS3(target); t.after(() => client.destroy());
+  let input = Buffer.alloc(0); t.mock.method(http, 'request', (_url: URL, _options: http.RequestOptions, callback: (response: http.IncomingMessage) => void) => { const outgoing = new PassThrough(); outgoing.on('data', chunk => { input = Buffer.concat([input, chunk]); }); const response = Readable.from([Buffer.from('{}')]) as http.IncomingMessage; response.statusCode = 200; response.rawHeaders = []; process.nextTick(() => callback(response)); return outgoing; });
+  class BytesAdapter extends Uint8Array { override valueOf(): never { throw new Error('UNSAFE_STRING_CONVERSION'); } }
+  const bytes = new BytesAdapter([1, 2, 3]); const handler = client.config.requestHandler;
+  await handler.handle({ protocol: 'http:', hostname: 'floci', port: 4566, path: '/', query: {}, method: 'POST', headers: {}, body: bytes });
+  assert.deepEqual(input, Buffer.from([1, 2, 3]));
+});
+
+void test('local SDK forwarding rejects exhausted and already aborted requests without upstream I/O', async t => {
+  const { localS3 } = await import('../../../scripts/e2e/terraform.ts'); const client = localS3(target); t.after(() => client.destroy());
+  let upstream = 0; t.mock.method(http, 'request', () => { upstream++; throw new Error('UNEXPECTED_UPSTREAM'); });
+  const request = { protocol: 'http:', hostname: 'floci', port: 4566, path: '/', method: 'POST', headers: {} };
+  const signal = AbortSignal.abort();
+  await assert.rejects(client.config.requestHandler.handle(request, { abortSignal: signal }), /LOCAL_REQUEST_CANCELLED/);
+  await assert.rejects(client.config.requestHandler.handle(request, { requestTimeout: 0 }), /LOCAL_REQUEST_CANCELLED/);
+  assert.equal(upstream, 0);
+});
+
+void test('local transport bounds a slow response and closes active request on abort', async t => {
+  let destroyed = 0; let upstream = 0; const signals: AbortSignal[] = [];
+  t.mock.method(http, 'request', (_url: URL, options: http.RequestOptions) => { upstream++; signals.push(options.signal as AbortSignal); const request = new PassThrough(); options.signal?.addEventListener('abort', () => { destroyed++; request.destroy(new Error('cancelled')); }, { once: true }); return request; });
+  const started = performance.now(); await assert.rejects(localRequest(target, new URL(target.endpoint), { timeoutMs: 10 }), /LOCAL_REQUEST_FAILED/); assert.ok(performance.now() - started < 1000);
+  const controller = new AbortController(); const pending = localRequest(target, new URL(target.endpoint), { signal: controller.signal }); controller.abort(); await assert.rejects(pending, /LOCAL_REQUEST_FAILED/);
+  assert.equal(upstream, 2); assert.equal(destroyed, 2); assert.ok(signals.every(signal => signal.aborted));
+});
