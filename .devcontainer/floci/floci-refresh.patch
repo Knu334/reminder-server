@@ -99,6 +99,123 @@ index bd4230a..faaae9c 100644
          }
  
          // 3. $default catch-all
+diff --git a/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/AlarmEvaluator.java b/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/AlarmEvaluator.java
+index 335ef51..88e83cd 100644
+--- a/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/AlarmEvaluator.java
++++ b/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/AlarmEvaluator.java
+@@ -280,7 +280,10 @@ public class AlarmEvaluator {
+                 && alarm.getMetricName() != null && !alarm.getMetricName().isBlank()
+                 && alarm.getPeriod() != null && alarm.getPeriod() > 0
+                 && alarm.getEvaluationPeriods() > 0
+-                && alarm.getComparisonOperator() != null;
++                && alarm.getComparisonOperator() != null
++                // An ExtendedStatistic (percentile) alarm has no Statistic; there is no percentile
++                // evaluation, so leave its state untouched rather than throw on List.of(null).
++                && alarm.getStatistic() != null;
+     }
+ 
+     private static boolean breaches(double value, String comparisonOperator, double threshold) {
+diff --git a/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsJsonHandler.java b/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsJsonHandler.java
+index 747d022..d51c804 100644
+--- a/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsJsonHandler.java
++++ b/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsJsonHandler.java
+@@ -157,6 +157,7 @@ public class CloudWatchMetricsJsonHandler {
+         alarm.setMetricName(request.path("MetricName").asText(null));
+         alarm.setNamespace(request.path("Namespace").asText(null));
+         alarm.setStatistic(request.path("Statistic").asText(null));
++        alarm.setExtendedStatistic(request.path("ExtendedStatistic").asText(null));
+         JsonNode metrics = request.path("Metrics");
+         if (metrics.isArray()) {
+             for (JsonNode query : metrics) {
+@@ -171,6 +172,7 @@ public class CloudWatchMetricsJsonHandler {
+         alarm.setThreshold(request.path("Threshold").asDouble(0));
+         alarm.setComparisonOperator(request.path("ComparisonOperator").asText(null));
+         alarm.setTreatMissingData(request.path("TreatMissingData").asText(null));
++        alarm.setEvaluateLowSampleCountPercentile(request.path("EvaluateLowSampleCountPercentile").asText(null));
+         alarm.setActionsEnabled(request.path("ActionsEnabled").asBoolean(true));
+         alarm.setDimensions(parseDimensionsJson(request.path("Dimensions")));
+ 
+@@ -233,6 +235,9 @@ public class CloudWatchMetricsJsonHandler {
+                 if (a.getStatistic() != null) {
+                     node.put("Statistic", a.getStatistic());
+                 }
++                if (a.getExtendedStatistic() != null) {
++                    node.put("ExtendedStatistic", a.getExtendedStatistic());
++                }
+                 ArrayNode dimensions = node.putArray("Dimensions");
+                 a.getDimensions().forEach(d -> {
+                     ObjectNode dimNode = dimensions.addObject();
+@@ -253,6 +258,9 @@ public class CloudWatchMetricsJsonHandler {
+             node.put("Threshold", a.getThreshold());
+             if (a.getComparisonOperator() != null) node.put("ComparisonOperator", a.getComparisonOperator());
+             if (a.getTreatMissingData() != null) node.put("TreatMissingData", a.getTreatMissingData());
++            if (a.getEvaluateLowSampleCountPercentile() != null) {
++                node.put("EvaluateLowSampleCountPercentile", a.getEvaluateLowSampleCountPercentile());
++            }
+             node.put("ActionsEnabled", a.isActionsEnabled());
+             if (a.getStateValue() != null) node.put("StateValue", a.getStateValue());
+             if (a.getStateReason() != null) node.put("StateReason", a.getStateReason());
+diff --git a/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsQueryHandler.java b/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsQueryHandler.java
+index 80a1775..e874b87 100644
+--- a/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsQueryHandler.java
++++ b/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsQueryHandler.java
+@@ -661,6 +661,7 @@ public class CloudWatchMetricsQueryHandler {
+         a.setMetricName(params.getFirst("MetricName"));
+         a.setNamespace(params.getFirst("Namespace"));
+         a.setStatistic(params.getFirst("Statistic"));
++        a.setExtendedStatistic(params.getFirst("ExtendedStatistic"));
+         a.setMetrics(parseAlarmMetricQueries(params));
+         a.setPeriod(a.getMetrics().isEmpty() ? parseIntParam(params, "Period", 60) : null);
+         a.setUnit(params.getFirst("Unit"));
+@@ -671,6 +672,7 @@ public class CloudWatchMetricsQueryHandler {
+         a.setThreshold(parseDouble(params.getFirst("Threshold"), 0));
+         a.setComparisonOperator(params.getFirst("ComparisonOperator"));
+         a.setTreatMissingData(params.getFirst("TreatMissingData"));
++        a.setEvaluateLowSampleCountPercentile(params.getFirst("EvaluateLowSampleCountPercentile"));
+ 
+         // Dimensions
+         List<Dimension> dims = new ArrayList<>();
+@@ -783,6 +785,7 @@ public class CloudWatchMetricsQueryHandler {
+                     .elem("MetricName", a.getMetricName())
+                     .elem("Namespace", a.getNamespace())
+                     .elem("Statistic", a.getStatistic())
++                    .elem("ExtendedStatistic", a.getExtendedStatistic())
+                     .elem("Period", a.getPeriod() == null ? null : a.getPeriod().toString())
+                     .elem("Unit", a.getUnit());
+         }
+@@ -794,7 +797,8 @@ public class CloudWatchMetricsQueryHandler {
+                 .elem("EvaluationPeriods", String.valueOf(a.getEvaluationPeriods()))
+                 .elem("Threshold", String.valueOf(a.getThreshold()))
+                 .elem("ComparisonOperator", a.getComparisonOperator())
+-                .elem("TreatMissingData", a.getTreatMissingData());
++                .elem("TreatMissingData", a.getTreatMissingData())
++                .elem("EvaluateLowSampleCountPercentile", a.getEvaluateLowSampleCountPercentile());
+         // Only an alarm the caller gave an M for carries the member, matching what AWS returns.
+         if (a.getDatapointsToAlarm() != null) {
+             xml.elem("DatapointsToAlarm", String.valueOf(a.getDatapointsToAlarm()));
+diff --git a/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/model/MetricAlarm.java b/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/model/MetricAlarm.java
+index 7347be3..8cba6ba 100644
+--- a/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/model/MetricAlarm.java
++++ b/src/main/java/io/github/hectorvent/floci/services/cloudwatch/metrics/model/MetricAlarm.java
+@@ -27,6 +27,8 @@ public class MetricAlarm {
+     private String metricName;
+     private String namespace;
+     private String statistic;
++    /** Percentile statistic such as p95; an alarm carries this or {@link #statistic}, never both. */
++    private String extendedStatistic;
+     private List<Dimension> dimensions = new ArrayList<>();
+     /** Single-metric period; absent for alarms whose periods are defined in Metrics. */
+     private Integer period;
+@@ -99,6 +101,9 @@ public class MetricAlarm {
+     public String getStatistic() { return statistic; }
+     public void setStatistic(String statistic) { this.statistic = statistic; }
+ 
++    public String getExtendedStatistic() { return extendedStatistic; }
++    public void setExtendedStatistic(String extendedStatistic) { this.extendedStatistic = extendedStatistic; }
++
+     public List<Dimension> getDimensions() { return dimensions; }
+     public void setDimensions(List<Dimension> dimensions) { this.dimensions = dimensions; }
+ 
 diff --git a/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoAuthFlowHandler.java b/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoAuthFlowHandler.java
 index 0a53da6..038fb00 100644
 --- a/src/main/java/io/github/hectorvent/floci/services/cognito/CognitoAuthFlowHandler.java
@@ -895,6 +1012,118 @@ index 0000000..6795752
 +        }
 +    }
 +}
+diff --git a/src/test/java/io/github/hectorvent/floci/services/cloudwatch/metrics/AlarmEvaluatorTest.java b/src/test/java/io/github/hectorvent/floci/services/cloudwatch/metrics/AlarmEvaluatorTest.java
+index 64426d3..54c63ec 100644
+--- a/src/test/java/io/github/hectorvent/floci/services/cloudwatch/metrics/AlarmEvaluatorTest.java
++++ b/src/test/java/io/github/hectorvent/floci/services/cloudwatch/metrics/AlarmEvaluatorTest.java
+@@ -80,6 +80,20 @@ class AlarmEvaluatorTest {
+         verify(handler).handle(eq(POLICY_ARN), eq(alarm), eq(90.0), eq(REGION));
+     }
+ 
++    // A percentile alarm carries ExtendedStatistic and no Statistic; evaluate used to build
++    // List.of(null) from it and throw a NullPointerException on every tick.
++    @Test
++    void alarmWithOnlyExtendedStatisticIsSkippedWithoutThrowing() {
++        MetricAlarm alarm = alarm();
++        alarm.setStatistic(null);
++        alarm.setExtendedStatistic("p95");
++
++        assertDoesNotThrow(() -> evaluator.evaluate(alarm));
++
++        verify(metricsService, never()).setAlarmState(
++                anyString(), anyString(), anyString(), any(), anyString());
++    }
++
+     @Test
+     void redispatchesOnEveryTickWhileStillInAlarm() {
+         stubMetrics(datapoints(80, 85, 90));
+diff --git a/src/test/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsJsonHandlerTest.java b/src/test/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsJsonHandlerTest.java
+index 89628e6..d1eafee 100644
+--- a/src/test/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsJsonHandlerTest.java
++++ b/src/test/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsJsonHandlerTest.java
+@@ -246,6 +246,34 @@ class CloudWatchMetricsJsonHandlerTest {
+                 "an alarm with no M out of N must not report one");
+     }
+ 
++    // A percentile alarm is created with ExtendedStatistic instead of Statistic. The handler used
++    // to drop both ExtendedStatistic and EvaluateLowSampleCountPercentile, so a client re-planning
++    // against its own configuration saw them vanish from DescribeAlarms.
++    @Test
++    void describeAlarms_keepsExtendedStatisticAndLowSampleCountPercentileWithoutStatistic() {
++        ObjectNode req = alarmRequest("PercentileAlarm");
++        req.put("ExtendedStatistic", "p95");
++        req.put("EvaluateLowSampleCountPercentile", "ignore");
++
++        JsonNode alarm = describeFirstAlarm(req);
++
++        assertEquals("p95", alarm.path("ExtendedStatistic").asText());
++        assertEquals("ignore", alarm.path("EvaluateLowSampleCountPercentile").asText());
++        assertFalse(alarm.has("Statistic"), "a percentile alarm must not report a Statistic");
++    }
++
++    @Test
++    void describeAlarms_omitsPercentileFieldsForAnAlarmThatNeverSetThem() {
++        ObjectNode req = alarmRequest("SumAlarm");
++        req.put("Statistic", "Sum");
++
++        JsonNode alarm = describeFirstAlarm(req);
++
++        assertEquals("Sum", alarm.get("Statistic").asText());
++        assertFalse(alarm.has("ExtendedStatistic"));
++        assertFalse(alarm.has("EvaluateLowSampleCountPercentile"));
++    }
++
+     @Test
+     void getMetricStatistics_decimalEpochStartEndTime_filtersOutOfRangeDatapoints() {
+         putMetric("NS", "M", "type", "current", 100.0, EPOCH_NOW);
+diff --git a/src/test/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsQueryHandlerTest.java b/src/test/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsQueryHandlerTest.java
+index 6f465c2..f37b281 100644
+--- a/src/test/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsQueryHandlerTest.java
++++ b/src/test/java/io/github/hectorvent/floci/services/cloudwatch/metrics/CloudWatchMetricsQueryHandlerTest.java
+@@ -102,6 +102,43 @@ class CloudWatchMetricsQueryHandlerTest {
+         assertEquals(2, captor.getValue().getDatapointsToAlarm());
+     }
+ 
++    // Query-protocol twin of the JSON handler's percentile alarm test: ExtendedStatistic and
++    // EvaluateLowSampleCountPercentile used to be dropped on the way in.
++    @Test
++    void putMetricAlarmKeepsExtendedStatisticAndLowSampleCountPercentile() {
++        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
++        params.putSingle("AlarmName", "PercentileAlarm");
++        params.putSingle("MetricName", "M");
++        params.putSingle("ExtendedStatistic", "p95");
++        params.putSingle("EvaluateLowSampleCountPercentile", "ignore");
++
++        handler.handle("PutMetricAlarm", params, REGION);
++
++        ArgumentCaptor<MetricAlarm> captor = ArgumentCaptor.forClass(MetricAlarm.class);
++        verify(metricsService).putMetricAlarm(captor.capture(), anyString());
++        assertEquals("p95", captor.getValue().getExtendedStatistic());
++        assertEquals("ignore", captor.getValue().getEvaluateLowSampleCountPercentile());
++        assertNull(captor.getValue().getStatistic());
++    }
++
++    @Test
++    void describeAlarmsReturnsExtendedStatisticAndLowSampleCountPercentileWithoutStatistic() {
++        MetricAlarm alarm = new MetricAlarm();
++        alarm.setAlarmName("PercentileAlarm");
++        alarm.setMetricName("M");
++        alarm.setNamespace("NS");
++        alarm.setExtendedStatistic("p95");
++        alarm.setEvaluateLowSampleCountPercentile("ignore");
++        when(metricsService.describeAlarms(any(), any(), anyString())).thenReturn(List.of(alarm));
++
++        String xml = (String) handler.handle("DescribeAlarms", new MultivaluedHashMap<>(), REGION).getEntity();
++
++        assertTrue(xml.contains("<ExtendedStatistic>p95</ExtendedStatistic>"), xml);
++        assertTrue(xml.contains(
++                "<EvaluateLowSampleCountPercentile>ignore</EvaluateLowSampleCountPercentile>"), xml);
++        assertFalse(xml.contains("<Statistic>"), "a percentile alarm must not report a Statistic");
++    }
++
+     // The JSON handler forwards the Unit filter now; this pins the Query path to the same
+     // contract so the two protocols cannot drift apart again.
+     @Test
 diff --git a/src/test/java/io/github/hectorvent/floci/services/cognito/CognitoOAuthTokenIntegrationTest.java b/src/test/java/io/github/hectorvent/floci/services/cognito/CognitoOAuthTokenIntegrationTest.java
 index 5369fcf..9c90944 100644
 --- a/src/test/java/io/github/hectorvent/floci/services/cognito/CognitoOAuthTokenIntegrationTest.java
