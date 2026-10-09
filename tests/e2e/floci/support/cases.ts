@@ -149,7 +149,6 @@ export const apiDefinitions: CaseDefinition[] = [
   apiCase('API-14/auth-refusal-rate-unchanged', ['unauthenticated-401'], ['refusal-api-result-absent'], { ddb: ['refusal-rate-and-storage-unchanged'] }),
   ...rejectIds('API-14/').map(id => apiCase(id, rejection.http, rejection.logs, { ddb: rejection.ddb })),
   apiCase('API-14/unpublished-503-rate-plus-one', ['unpublished-503'], ['unpublished-result-delivered'], { ddb: ['unpublished-rate-plus-one-storage-unchanged'] }),
-  apiCase('API-14/rate-limit-120', ['request-120-200', 'request-121-429-retry-after-matches-body'], ['request-120-result-delivered', 'request-121-result-delivered'], { ddb: ['counter-held-at-120-storage-unchanged'] }),
 ];
 function rejectIds(prefix: string): string[] { return rejectParams.filter(item => item.id.startsWith(prefix)).map(item => item.id); }
 function acceptIds(prefix: string): string[] { return acceptParams.filter(item => item.id.startsWith(prefix)).map(item => item.id); }

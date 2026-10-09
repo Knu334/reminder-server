@@ -253,9 +253,8 @@ register('STORE-05/delete-with-image', async (fixture, recorder, score) => {
 // API-14 the real limit from a synthetic count of 119, inside one minute window, with two tokens of the same owner.
 const WINDOW_MARGIN_MS = 20_000;
 register('API-14/rate-boundary-seeded', async (fixture, recorder, score) => {
-  const caseId = 'API-14/rate-boundary-seeded'; const first = await actor(fixture, 'a'); const second = await secondToken(fixture, 'a');
+  const caseId = 'API-14/rate-boundary-seeded'; const first = await fresh(fixture); const second = await secondToken(fixture, 'a');
   if (first.ownerId !== second.ownerId) throw new Error('API_CONTROL_FAILED');
-  const state = await readOwnerState(fixture, first.ownerId); if (state.itemCount !== 0 || await rateTotal(fixture, first.ownerId) !== 0) throw new Error('STORE_OWNER_NOT_FRESH');
   // The precondition is fixed: enough of the window must remain for two real requests, otherwise wait for the next minute before seeding.
   const remaining = 60_000 - (apiIo.now() % 60_000); if (remaining < WINDOW_MARGIN_MS) await apiIo.sleep(remaining + 1_000);
   const minute = Math.floor(apiIo.now() / 60_000); const key = keys.rate(first.ownerId, minute); const versions = await s3Versions(fixture); const domain = await snapshotOwnedStorage(fixture, { excludeRate: true });

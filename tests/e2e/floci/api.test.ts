@@ -142,8 +142,6 @@ void test('fixture initialisation failure leaves every unstarted API case not-ru
 
 void test('more negative controls: rate limit, cursors, ownership, request-id correlation and unchanged storage', async () => {
   const cases: [string, SimOptions][] = [
-    ['API-14/rate-limit-120', tamper((_m, p) => p === '/v2/reminders', result => result.status === 429 ? withStatus(200)(result) : result)],
-    ['API-14/rate-limit-120', tamper((_m, p) => p === '/v2/reminders', result => result.status === 429 ? { ...result, headers: new Headers({ ...Object.fromEntries(result.headers.entries()), 'retry-after': '7' }) } : result)],
     ['API-13/forged-owner', tamper((_m, p) => p.includes('cursor=') && p.includes('limit=1'), result => result.status === 422 ? withStatus(200)(result) : result)],
     ['API-13/tombstone-head-limit-1', tamper((m, p) => m === 'GET' && p === '/v2/reminders?limit=1', result => ({ ...result, bytes: Buffer.from('{"items":[],"nextCursor":null}') }))],
     ['API-05/other-owner-get', tamper((m, p) => m === 'GET' && p === '/v2/reminders/own-a-only', withStatus(200))],

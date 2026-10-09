@@ -1,7 +1,6 @@
-import { DeleteCommand, GetCommand, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { ListObjectVersionsCommand } from '@aws-sdk/client-s3';
 import { ownerIdFor } from '../../../../src/api/identity.ts';
-import { keys } from '../../../../src/shared/ports.ts';
 import { caseActions, caseGuards } from './cases.ts';
 import { Score } from './auth-cases.ts';
 import { fixtureState } from './fixture.ts';
@@ -20,8 +19,6 @@ export const apiIo = {
   raw: (fixture: SuiteFixture, url: URL, options: { method: string; headers: Record<string, string> }): Promise<HttpResult> => localRequest(fixture.target, url, options),
 };
 const tick = (): Promise<void> => new Promise<void>(resolve => setTimeout(resolve, 2)); // distinct log milliseconds; always real time
-/** Each individual sleep stays at or below 30 seconds. */
-async function sleepFor(ms: number): Promise<void> { for (let left = ms; left > 0; left -= 30_000) await apiIo.sleep(Math.min(30_000, left)); }
 
 type Owner = 'a' | 'b';
 export type Actor = { owner: Owner; token: string; ownerId: string };
@@ -487,26 +484,4 @@ register('API-14/unpublished-503-rate-plus-one', [], async (fixture, recorder, s
   score.ok('dynamodb', 'unpublished-rate-plus-one-storage-unchanged', before.domain === after.domain && after.rate === before.rate + 1); score.ok('s3', 'no-image-versions-added', before.s3 === after.s3);
   defer(recorder, 'API-14/unpublished-503-rate-plus-one', 'unpublished-result-delivered', logOf(probe, 503, { operation: 'list', code: 'SERVICE_UNAVAILABLE' }));
 });
-const WINDOW_MARGIN_MS = 20_000; const LIMIT = 120;
-register('API-14/rate-limit-120', [], async (fixture, recorder, score) => {
-  const first = await actor(fixture, 'a'); const second = await secondToken(fixture, 'a');
-  if (first.ownerId !== second.ownerId) throw new Error('API_CONTROL_FAILED');
-  // Synthetic count 119 for the current UTC minute, set only after enough of the window remains for two real requests.
-  if (60_000 - (apiIo.now() % 60_000) < WINDOW_MARGIN_MS) await sleepFor(60_000 - (apiIo.now() % 60_000) + 1_000);
-  const minute = Math.floor(apiIo.now() / 60_000); const key = keys.rate(first.ownerId, minute); const before = await snapshot(fixture, first);
-  let reading: Probe | undefined; let limited: Probe | undefined; let held = false; let afterSnapshot: Snapshot | undefined;
-  try {
-    await fixture.clients.dynamodb.send(new PutCommand({ TableName: fixture.config.ownerStateTable, Item: { ...key, count: LIMIT - 1, expiresAt: keys.rateExpiresAt(minute) } }));
-    reading = await send(fixture, '/v2/reminders', { token: first.token }); limited = await send(fixture, '/v2/reminders', { token: second.token });
-    const row = await fixture.clients.dynamodb.send(new GetCommand({ TableName: fixture.config.ownerStateTable, Key: key, ConsistentRead: true })); held = Number(row.Item?.count) === LIMIT;
-    afterSnapshot = await snapshot(fixture, first);
-  } finally { await fixture.clients.dynamodb.send(new DeleteCommand({ TableName: fixture.config.ownerStateTable, Key: key })); }
-  recorder.recordInput({ httpStatus: limited?.status ?? 0 });
-  const retry = limited?.headers.get('retry-after') ?? ''; const body = limited?.json;
-  score.ok('http', 'request-120-200', !!reading && !!listOf(reading));
-  score.ok('http', 'request-121-429-retry-after-matches-body', !!limited && errorIsRate(limited) && /^[1-9][0-9]?$/.test(retry) && Number(retry) >= 1 && Number(retry) <= 60 && isRecord(body) && body.retryAfterSeconds === Number(retry));
-  score.ok('dynamodb', 'counter-held-at-120-storage-unchanged', held && !!afterSnapshot && before.domain === afterSnapshot.domain); score.ok('s3', 'no-image-versions-added', !!afterSnapshot && before.s3 === afterSnapshot.s3);
-  if (reading) defer(recorder, 'API-14/rate-limit-120', 'request-120-result-delivered', logOf(reading, 200, { operation: 'list' }));
-  if (limited) defer(recorder, 'API-14/rate-limit-120', 'request-121-result-delivered', logOf(limited, 429, { operation: 'list', code: 'OWNER_RATE_LIMIT_EXCEEDED' }));
-});
-function errorIsRate(probe: Probe): boolean { return errorIs(probe, 429, 'OWNER_RATE_LIMIT_EXCEEDED'); }
+// API-14/rate-limit-120 was retired: the single seeded rate-boundary case lives in storage-cases.ts (API-14/rate-boundary-seeded).

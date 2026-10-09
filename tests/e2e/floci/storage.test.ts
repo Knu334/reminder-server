@@ -36,7 +36,8 @@ void test('the storage inventory has an independent E case for every STORE/API-1
   assert.ok(!e.some(def => def.requirementId === 'STORE-06'));
   const sources = (await readFile(join(root, 'tests/integration/formal-e2e/concurrency.test.ts'), 'utf8')) + (await readFile(join(root, 'tests/integration/formal-e2e/quota.test.ts'), 'utf8'));
   for (const def of integration) { assert.equal(caseActions.has(def.id), false, `${def.id} is not an E action`); assert.ok(sources.includes(def.id), `${def.id} is proven by a named integration test`); }
-  assert.equal(caseGuards.size >= 0, true);
+  assert.equal(definitions.some(def => def.id === 'API-14/rate-limit-120'), false, 'one rate-boundary case only');
+  for (const guarded of caseGuards.keys()) assert.equal(storage.some(def => def.id === guarded), false, 'storage cases are independent (no guards)');
 });
 
 type Saved = { id: string; status: string; reason?: string; outputs?: { kind: string; status: string; assertions: { name: string; status: string }[] }[] };
@@ -87,6 +88,7 @@ void test('negative controls: each broken contract fails exactly its own case', 
     ['STORE-02/delete-same-revision-other-hash', tamper((m, p) => m === 'DELETE' && itemPath.test(p), result => result.status === 412 ? withStatus(200)(result) : result)],
     ['STORE-04/resend-delete', tamper((m, p) => m === 'DELETE' && itemPath.test(p), result => result.status === 404 ? withStatus(200)(result) : result)],
     ['STORE-05/delete-with-image', tamper((m, p) => m === 'GET' && p.endsWith('/thumbnail-url'), result => result.status === 404 ? withStatus(200)(result) : result)],
+    ['API-14/rate-boundary-seeded', tamper((_m, p) => p === '/v2/reminders', result => result.status === 429 ? { ...result, headers: new Headers({ ...Object.fromEntries(result.headers.entries()), 'retry-after': '7' }) } : result)],
     ['API-14/rate-boundary-seeded', tamper((_m, p) => p === '/v2/reminders', result => result.status === 429 ? withStatus(200)(result) : result)],
   ];
   for (const [id, options] of cases) {
