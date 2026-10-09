@@ -90,3 +90,33 @@ void test('normal cleanup delivered pair must agree with tracked response and co
   assert.equal(observer.cleanupMatch(expected, completion), true);
   for (const changed of [{ completed: false }, { status: 500 }, { since: 91 }, { result: { ...completion.result, evaluated: 1 } }]) assert.equal(observer.cleanupMatch(expected, { ...completion, ...changed }), false);
 });
+
+void test('one case can register several cleanup expectations, each paired with its own invoke window and stream', async () => {
+  const { expectCleanupLogs, suiteLogStates, cleanupCaseMatches, cleanupChecksMatch } = await import('../../e2e/floci/support/logs.ts');
+  const fixture = {} as import('../../e2e/floci/support/types.ts').SuiteFixture; const observer = new LogObserver(groups);
+  const pair = (n: number, at: number, evaluated: number, deletes: number) => [event(`s${n}`, { operation: 'cleanup_start', lambdaRequestId: `lambda-${n}` }, `stream-${n}`, groups.cleanup, at), event(`e${n}`, { operation: 'cleanup', requestId: `run-${n}`, status: 200, evaluated, deletes }, `stream-${n}`, groups.cleanup, at + 5)];
+  observer.ingest([...pair(1, 100, 1, 1), ...pair(2, 200, 0, 0)]);
+  const result = (evaluated: number, deletes: number) => ({ evaluated, deletes, incomplete: false, skippedUnpublished: false });
+  const state = { observer, pending: [], cleanup: new Map(), lastInput: 0, completions: [{ since: 90, until: 120, completed: true, status: 200, result: result(1, 1), storageUnchanged: true }, { since: 190, until: 220, completed: true, status: 200, result: result(0, 0), storageUnchanged: true }] };
+  suiteLogStates.set(fixture, state);
+  const first = expectCleanupLogs(fixture, 'multi', { since: 90, until: 120, status: 200, evaluated: 1, deletes: 1 }); const second = expectCleanupLogs(fixture, 'multi', { since: 190, until: 220, status: 200, evaluated: 0, deletes: 0 });
+  assert.deepEqual([first.assertion, second.assertion], ['delivered', 'delivered-2']); assert.equal(state.cleanup.size, 2);
+  assert.equal(cleanupCaseMatches(state, 'multi'), true); assert.equal(cleanupChecksMatch(state), true);
+  assert.throws(() => expectCleanupLogs(fixture, 'multi', { since: 100, until: 130 }), /FIXTURE_REJECTED/, 'overlapping windows are ambiguous');
+});
+
+void test('a mismatched second-invoke cleanup log fails the case even when the first invoke matches', async () => {
+  const { expectCleanupLogs, suiteLogStates, cleanupCaseMatches } = await import('../../e2e/floci/support/logs.ts');
+  const build = (second: { deletes: number; streamEnd?: string; omitEnd?: boolean }) => {
+    const fixture = {} as import('../../e2e/floci/support/types.ts').SuiteFixture; const observer = new LogObserver(groups);
+    observer.ingest([event('s1', { operation: 'cleanup_start', lambdaRequestId: 'l1' }, 'a', groups.cleanup, 100), event('e1', { operation: 'cleanup', requestId: 'r1', status: 200, evaluated: 1, deletes: 1 }, 'a', groups.cleanup, 105), event('s2', { operation: 'cleanup_start', lambdaRequestId: 'l2' }, 'b', groups.cleanup, 200),
+      ...(second.omitEnd ? [] : [event('e2', { operation: 'cleanup', requestId: 'r2', status: 200, evaluated: 0, deletes: second.deletes }, second.streamEnd ?? 'b', groups.cleanup, 205)])]);
+    const result = (evaluated: number, deletes: number) => ({ evaluated, deletes, incomplete: false, skippedUnpublished: false });
+    const state = { observer, pending: [], cleanup: new Map(), lastInput: 0, completions: [{ since: 90, until: 120, completed: true, status: 200, result: result(1, 1), storageUnchanged: true }, { since: 190, until: 220, completed: true, status: 200, result: result(0, 0), storageUnchanged: true }] };
+    suiteLogStates.set(fixture, state); expectCleanupLogs(fixture, 'multi', { since: 90, until: 120, status: 200, evaluated: 1, deletes: 1 }); expectCleanupLogs(fixture, 'multi', { since: 190, until: 220, status: 200, evaluated: 0, deletes: 0 }); return state;
+  };
+  assert.equal(cleanupCaseMatches(build({ deletes: 0 }), 'multi'), true);
+  assert.equal(cleanupCaseMatches(build({ deletes: 1 }), 'multi'), false, 'wrong count in the delivered log');
+  assert.equal(cleanupCaseMatches(build({ deletes: 0, streamEnd: 'other' }), 'multi'), false, 'end in another stream is no pair');
+  assert.equal(cleanupCaseMatches(build({ deletes: 0, omitEnd: true }), 'multi'), false, 'missing service end');
+});

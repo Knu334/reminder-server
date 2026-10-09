@@ -54,9 +54,10 @@ const markerKeys = (obs: Obs): string[] => obs.markers.map(marker => marker.key)
 const retiredByApi = (job: Row | undefined, ref: { key: string; versionId: string; imageId: string }, ownerId: string, probe: Probe): boolean => { const due = Number(job?.dueAtMs); return !!job && job.state === 'retired' && job.ownerId === ownerId && job.key === ref.key && job.versionId === ref.versionId && Number.isSafeInteger(due) && due - DAY >= probe.since - 5000 && due - DAY <= probe.until + 5000 && job.cleanupSortKey === `${String(due).padStart(13, '0')}#${ref.imageId}` && /^retired#0[0-3]$/.test(String(job.cleanupPartition)); };
 const okInvoke = (inv: CleanupInvocation, evaluated: number, deletes: number): boolean => inv.status === 200 && !inv.functionError && !!inv.result && !inv.result.skippedUnpublished && !inv.result.incomplete && inv.result.evaluated === evaluated && inv.result.deletes === deletes;
 const checkpointOk = (cp: Row | undefined, rotation: number): boolean => !!cp && Object.keys(cp).sort().join(',') === 'cursors,jobId,roundRobinIndex' && cp.roundRobinIndex === rotation && typeof cp.cursors === 'object' && cp.cursors !== null && Object.keys(cp.cursors).length === 12 && Object.entries(cp.cursors).every(([name, value]) => /^(pending|retired|deleting)#0[0-3]$/.test(name) && value === null);
-async function run(c: Ctx, evaluated: number, deletes: number, event: unknown = {}, log = true): Promise<CleanupInvocation> {
+async function run(c: Ctx, evaluated: number | undefined, deletes: number, event: unknown = {}): Promise<CleanupInvocation> {
   const inv = await invokeCleanup(c.fixture, event); c.recorder.recordInput({ httpStatus: inv.status });
-  if (log) c.recorder.deferLogs(expectCleanupLogs(c.fixture, c.caseId, { since: inv.startedAt, until: inv.finishedAt, status: 200, evaluated, deletes })); return inv;
+  // Every published invoke is checked: its own start+service-end pair, status and counts, bound to its own window.
+  c.recorder.deferLogs(expectCleanupLogs(c.fixture, c.caseId, { since: inv.startedAt, until: inv.finishedAt, status: 200, ...(evaluated === undefined ? {} : { evaluated }), deletes })); return inv;
 }
 /** A duplicate create with a new image: S3 succeeded and the commit was refused, so exactly one orphan pending job with a recorded version remains. */
 async function orphan(c: Ctx, id: string, data: Buffer, assertion: string): Promise<Row> {
@@ -74,7 +75,7 @@ const sameVersions = (a: Obs, b: Obs): boolean => isDeepStrictEqual(a.versions, 
 register('CLEAN-01/unpublished', async c => {
   const base = imageBytes('png', 100, 1); const extra = imageBytes('gif', 150, 9); await setup(c.fixture, c.recorder, c.caseId, c.who, 'cl-1', base64Of(base));
   const job = await due(c, await orphan(c, 'cl-1', extra, 'duplicate-result-delivered')); const before = await observe(c);
-  await c.fixture.setPublication(false); let inv: CleanupInvocation; try { inv = await run(c, 0, 0, {}, false); } finally { await c.fixture.setPublication(true); }
+  await c.fixture.setPublication(false); let inv: CleanupInvocation; try { inv = await invokeCleanup(c.fixture); c.recorder.recordInput({ httpStatus: inv.status }); } finally { await c.fixture.setPublication(true); }
   c.recorder.deferLogs(expectCleanupLogs(c.fixture, c.caseId, { since: inv.startedAt, until: inv.finishedAt, skippedUnpublished: true, evaluated: 0, deletes: 0 }));
   const after = await observe(c); const checkpoint = await readCheckpoint(c.fixture);
   c.score.ok('http', 'invoke-200-no-function-error-skipped-unpublished', inv.status === 200 && !inv.functionError && !!inv.result);
@@ -101,7 +102,7 @@ register('CLEAN-01/event-injection', async c => {
   const events = [{ key: String(job.key) }, { ownerId: c.who.ownerId }, { detail: { image: String(job.key) } }, { source: 'attacker.example' }]; const rejected: CleanupInvocation[] = [];
   for (const event of events) { const inv = await invokeCleanup(c.fixture, event); c.recorder.recordInput({ httpStatus: inv.status }); rejected.push(inv); }
   const middle = await observe(c); const stillCurrent = await isCurrent(c, String(job.key), data);
-  const control = await run(c, 1, 1, {}, false); const after = await observe(c);
+  const control = await run(c, 1, 1); const after = await observe(c);
   c.score.ok('http', 'every-injected-event-function-error-behind-200', rejected.length === events.length && rejected.every(inv => inv.status === 200 && inv.functionError === 'Unhandled' && inv.result === undefined));
   c.score.ok('http', 'control-event-processed-200-one-delete', okInvoke(control, 1, 1));
   c.score.ok('dynamodb', 'rejected-events-leave-all-rows-unchanged', rejected.every(inv => inv.storageUnchanged) && isDeepStrictEqual(before.jobs, middle.jobs) && isDeepStrictEqual(before.state, middle.state) && jobOf(middle.jobs, String(job.jobId))?.state === 'pending');
@@ -205,7 +206,7 @@ register('CLEAN-06/same-shard-51-two-invokes', async c => {
   const jobs: Row[] = []; for (const [index, jobId] of ids.entries()) jobs.push((await syntheticJob(c, imageBytes('png', 64 + index, index), { jobId })).job);
   await seedCleanupJobs(c.fixture, jobs as never[]); const before = await observe(c);
   const first = await run(c, 51, 51); const afterFirst = await observe(c); const checkpoint = await readCheckpoint(c.fixture);
-  const second = await run(c, 0, 0, {}, false); const afterSecond = await observe(c);
+  const second = await run(c, undefined, 0); const afterSecond = await observe(c);
   c.score.ok('http', 'invoke-200-no-function-error-counts-51-51', before.jobs.length === 51 && okInvoke(first, 51, 51));
   c.score.ok('http', 'second-invoke-no-delete-200', second.status === 200 && !second.functionError && !!second.result && second.result.deletes === 0 && !second.result.incomplete && !second.result.skippedUnpublished);
   c.score.ok('dynamodb', 'all-51-done-checkpoint-without-gsi-attributes-rotation-reset', afterFirst.jobs.length === 51 && afterFirst.jobs.every(job => isDone(job, c.who.ownerId)) && checkpointOk(checkpoint, 1) && isDeepStrictEqual(afterFirst.jobs, afterSecond.jobs));
@@ -215,7 +216,7 @@ register('CLEAN-06/same-shard-51-two-invokes', async c => {
 register('CLEAN-09/second-invoke-converges', async c => {
   const base = imageBytes('png', 100, 1); const extra = imageBytes('gif', 150, 9); await setup(c.fixture, c.recorder, c.caseId, c.who, 'cl-1', base64Of(base));
   const job = await due(c, await orphan(c, 'cl-1', extra, 'duplicate-result-delivered'));
-  const first = await run(c, 1, 1); const afterFirst = await observe(c); const second = await run(c, 0, 0, {}, false); const afterSecond = await observe(c);
+  const first = await run(c, 1, 1); const afterFirst = await observe(c); const second = await run(c, undefined, 0); const afterSecond = await observe(c);
   c.score.ok('http', 'both-invokes-synchronous-200-no-function-error', okInvoke(first, 1, 1) && second.status === 200 && !second.functionError && !!second.result);
   c.score.ok('http', 'second-invoke-no-delete', second.result?.deletes === 0 && !second.result.incomplete && !second.result.skippedUnpublished);
   c.score.ok('dynamodb', 'job-done-and-unchanged-by-second-invoke', isDone(jobOf(afterFirst.jobs, String(job.jobId)), c.who.ownerId) && isDeepStrictEqual(afterFirst.jobs, afterSecond.jobs) && isDeepStrictEqual(afterFirst.state, afterSecond.state));

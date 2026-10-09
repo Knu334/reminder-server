@@ -154,10 +154,13 @@ export async function collectOwned(fixture: SuiteFixture, ownerIds: string[]): P
  */
 export async function invokeCleanup(fixture: SuiteFixture, event: unknown = {}): Promise<CleanupInvocation> {
   const state = fixtureState(fixture); const payload = JSON.stringify(event); if (!payload || Buffer.byteLength(payload) > 1024) throw new Error('CLEANUP_EVENT_REJECTED');
-  if (state.cleanupIntervals.some(interval => !interval.completed)) throw new Error('CLEANUP_NOT_SEQUENTIAL');
+  const unfinished = state.cleanupIntervals.find(interval => !interval.completed); if (unfinished?.failed) throw new Error('CLEANUP_PREVIOUS_INVOKE_FAILED'); if (unfinished) throw new Error('CLEANUP_NOT_SEQUENTIAL');
   if (!await cleanupIo.stopped(fixture)) throw new Error('CLEANUP_SCHEDULER_NOT_STOPPED');
   const before = await snapshotOwnedStorage(fixture); const interval: import('./logs.ts').CleanupCompletion = { since: Date.now(), until: 0, completed: false }; state.cleanupIntervals.push(interval);
-  const raw = await cleanupIo.invoke(fixture, Buffer.from(payload)); interval.until = Date.now(); interval.completed = true; interval.status = raw.status;
+  let raw: Awaited<ReturnType<typeof cleanupIo.invoke>>;
+  // A thrown invoke has an unknown outcome: its interval stays incomplete (quiescence is never satisfied falsely) but records a fixed failure code.
+  try { raw = await cleanupIo.invoke(fixture, Buffer.from(payload)); } catch (error) { interval.failed = error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name) ? 'CLEANUP_INVOKE_TIMEOUT' : 'CLEANUP_INVOKE_FAILED'; throw new Error(interval.failed); }
+  interval.until = Date.now(); interval.completed = true; interval.status = raw.status;
   const functionError = raw.functionError === undefined ? undefined : raw.functionError === 'Unhandled' || raw.functionError === 'Handled' ? raw.functionError : 'Unknown' as const;
   let result: CleanupResult | undefined;
   if (!functionError && raw.payload) {

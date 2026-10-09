@@ -25,10 +25,10 @@ void test('the cleanup inventory has independent E cases for CLEAN-01..06 and 09
   for (const id of ['CLEAN-01/unpublished', 'CLEAN-01/published-counts', 'CLEAN-01/event-injection', 'CLEAN-02/pending-24h-both-sides', 'CLEAN-02/retired-origin-replace', 'CLEAN-02/delete-tombstone', 'CLEAN-03/active-lease', 'CLEAN-03/expired-lease', 'CLEAN-03/unrecorded-version', 'CLEAN-04/committed-protected', 'CLEAN-05/version-mismatch', 'CLEAN-05/checksum-mismatch', 'CLEAN-05/existing-marker-and-absent', 'CLEAN-06/same-shard-51-two-invokes', 'CLEAN-09/second-invoke-converges']) assert.ok(e.some(def => def.id === id), id);
   for (const def of e) {
     assert.equal(def.required, true); assert.equal(def.acceptance, 'behavior'); assert.deepEqual(def.outputs.map(output => output.kind), ['http', 'dynamodb', 's3', 'logs']);
-    assert.ok(def.outputs.filter(output => output.kind !== 'logs' || def.id !== 'CLEAN-01/event-injection').every(output => output.assertions.length > 0), `${def.id} asserts every applicable output`);
+    assert.ok(def.outputs.every(output => output.assertions.length > 0), `${def.id} asserts every applicable output`);
     assert.equal(caseActions.has(def.id), true, `${def.id} action`); assert.equal(caseAuthId(def), def.id, `${def.id} owns its synthetic users`); assert.equal(caseGuards.has(def.id), false);
   }
-  const injection = e.find(def => def.id === 'CLEAN-01/event-injection')!.outputs.find(output => output.kind === 'logs')!; assert.deepEqual(injection.assertions, []); assert.equal(injection.notApplicableReason, 'rejected-before-cleanup-start-no-application-log');
+  const injection = e.find(def => def.id === 'CLEAN-01/event-injection')!.outputs.find(output => output.kind === 'logs')!; assert.deepEqual(injection.assertions, ['delivered'], 'only the control invoke is a published run; rejected events precede cleanup_start and have no application log to match');
   for (const def of cleanup.filter(def => def.layer === 'I')) assert.equal(caseActions.has(def.id), false, `${def.id} is evidenced by named tests, not by an E action`);
 });
 
@@ -57,12 +57,12 @@ void test('every cleanup E case passes against the real cleanup handler, statefu
   for (const result of results.values()) { const logs = result.outputs?.find(output => output.kind === 'logs'); assert.ok(logs && logs.status !== 'fail', `${result.id} logs`); }
   const published = results.get('CLEAN-02/delete-tombstone')!; assert.ok(published.outputs?.find(output => output.kind === 'logs')?.assertions.some(item => item.name === 'delivered' && item.status === 'pass'));
   assert.equal(sim.harness.snapshot().jobs.length, 0, 'owned synthetic jobs are collected between cases'); assert.equal(sim.harness.imageVersions().length, 0); assert.equal(sim.harness.imageDeleteMarkers().length, 0);
-  assert.equal(suiteLogStates.get(sim.fixture)!.cleanup.size, e.length - 1, 'every case but the rejected-event case registers a cleanup-log expectation');
+  assert.equal(suiteLogStates.get(sim.fixture)!.cleanup.size, e.length + 2, 'every published invoke registers its own cleanup-log expectation (CLEAN-06 and CLEAN-09 have two)');
 });
 
 void test('independent cleanup cases get their own synthetic users', async () => {
   const { sim, failures } = await runSuite(undefined); assert.deepEqual(failures, []);
-  const used = sim.authIds.filter(id => id !== 'default'); assert.equal(used.length, new Set(used).size); assert.ok(e.every(def => used.includes(def.id)) || used.length <= e.length);
+  const used = sim.authIds.filter(id => id !== 'default'); assert.equal(used.length, new Set(used).size); assert.ok(e.every(def => used.includes(def.id)), 'every case asked for its own auth');
 });
 
 void test('a foreign candidate job stops a case before any invoke and is never processed', async () => {
@@ -133,4 +133,12 @@ void test('a failed prerequisite leaves cleanup cases not-run', async () => {
     assert.ok(saved.cases.every(item => item.result.status === 'not-run'), 'E cases and I cases are not-run, never pass');
     assert.ok(saved.cases.filter(item => e.some(def => def.id === item.id)).every(item => item.result.reason === 'prerequisite-failed'));
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+void test('a thrown invoke keeps quiescence unsatisfied and later invokes name the real failure, not a sequencing error', async () => {
+  const sim = createSim(); const state = fixtureStates.get(sim.fixture) as unknown as { cleanupIntervals: { completed: boolean; failed?: string }[] }; const original = cleanupIo.invoke;
+  cleanupIo.invoke = async () => { throw Object.assign(new Error('secret-looking detail'), { name: 'TimeoutError' }); };
+  try { await assert.rejects(invokeCleanup(sim.fixture), (error: Error) => error.message === 'CLEANUP_INVOKE_TIMEOUT'); } finally { cleanupIo.invoke = original; }
+  assert.equal(state.cleanupIntervals.at(-1)?.completed, false, 'an unknown outcome never satisfies quiescence'); assert.equal(state.cleanupIntervals.every(interval => interval.completed), false);
+  await assert.rejects(invokeCleanup(sim.fixture), (error: Error) => error.message === 'CLEANUP_PREVIOUS_INVOKE_FAILED');
 });
