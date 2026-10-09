@@ -99,7 +99,7 @@ export function createSim(options: SimOptions = {}) {
         if (command instanceof DeleteCommand) return {};
         throw new Error('SIM_COMMAND_UNSUPPORTED');
       } },
-      s3: { async send(command: unknown): Promise<unknown> { if (command instanceof ListObjectVersionsCommand) return { Versions: [] }; throw new Error('SIM_COMMAND_UNSUPPORTED'); } },
+      s3: { async send(command: unknown): Promise<unknown> { if (command instanceof ListObjectVersionsCommand) return { Versions: h.imageVersions().map(item => ({ Key: item.key, VersionId: item.versionId, Size: item.bytes })), DeleteMarkers: h.imageDeleteMarkers().map(item => ({ Key: item.key, VersionId: item.versionId })) }; throw new Error('SIM_COMMAND_UNSUPPORTED'); } },
     },
   } as unknown as SuiteFixture;
   fixtureStates.set(fixture, { disposed: false } as never);

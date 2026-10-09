@@ -155,6 +155,50 @@ function rejectIds(prefix: string): string[] { return rejectParams.filter(item =
 function acceptIds(prefix: string): string[] { return acceptParams.filter(item => item.id.startsWith(prefix)).map(item => item.id); }
 definitions.push(...apiDefinitions);
 
+
+/**
+ * Strong ETag, concurrency, tombstone and rate-boundary cases. Each E case owns its synthetic users (own RATE and storage) and starts
+ * from a fresh owner; there are no dependency groups. STORE-06 and the store-level concurrency proofs are I cases whose evidence is
+ * tests/integration/formal-e2e/{concurrency,quota}.test.ts, shown as a separate layer from the E client sends.
+ */
+function storeCase(id: string, http: string[], ddb: string[], s3: string[], logs: string[]): CaseDefinition {
+  return { id, requirementId: id.split('/')[0]!, layer: 'E', required: true, acceptance: 'behavior', suite: 'storage', source: `formal-e2e-coverage/${id.split('/')[0]!}`, outputs: [
+    { kind: 'http', assertions: http }, { kind: 'dynamodb', assertions: ddb }, { kind: 's3', assertions: s3 }, { kind: 'logs', assertions: logs },
+  ] };
+}
+function storeInt(id: string, assertions: string[]): CaseDefinition {
+  const na = (reason: string) => ({ assertions: [] as string[], notApplicableReason: reason });
+  return { id, requirementId: id.split('/')[0]!, layer: 'I', required: true, acceptance: 'behavior', suite: 'storage', source: `formal-e2e-coverage/${id.split('/')[0]!}`, outputs: [
+    { kind: 'http', ...na('service-and-adapter-boundary-no-gateway') }, { kind: 'dynamodb', assertions }, { kind: 's3', ...na('image-bytes-counted-in-owner-state') }, { kind: 'logs', ...na('handler-boundary-no-delivery') },
+  ] };
+}
+const ifMatchCases: [string, string[]][] = [['missing-if-match', ['428-precondition-required']], ['weak-if-match', ['422-invalid-if-match']], ['star-if-match', ['422-invalid-if-match']], ['list-if-match', ['422-invalid-if-match']], ['same-revision-other-hash', ['412-precondition-failed']], ['sequential-stale', ['412-precondition-failed']]];
+export const storageDefinitions: CaseDefinition[] = [
+  storeCase('STORE-01/exact-etag-and-headers', ['create-etag-is-rn-sha256-of-raw-bytes', 'get-same-bytes-and-etag', 'item-headers-no-transform-no-store', 'patch-etag-is-r2-sha256-of-raw-bytes', 'readonly-dto-fields-refused-etag-unchanged'], ['stored-row-matches-dto-and-etag-revision'], ['no-image-versions-added'], ['create-result-delivered', 'get-result-delivered', 'patch-result-delivered', 'readonly-result-delivered']),
+  ...['patch', 'delete'].flatMap(op => ifMatchCases.map(([label, status]) => storeCase(`STORE-02/${op}-${label}`, [`${status[0]}`, 'current-get-same-bytes-and-etag', 'exact-if-match-control-200'], ['rejection-leaves-row-and-counters', 'control-changes-state-exactly-once'], ['no-image-versions-added'],
+    ['create-result-delivered', ...(label === 'sequential-stale' ? ['stale-setup-result-delivered'] : []), 'rejection-result-delivered', 'current-get-result-delivered', 'control-result-delivered']))),
+  storeCase('STORE-03/patch-patch', ['requests-overlapped-one-200-one-412', 'final-get-matches-winner'], ['revision-2-once-counter-unchanged-winner-fields'], ['image-versions-unchanged-by-race'], ['create-result-delivered', 'winner-result-delivered', 'loser-result-delivered', 'final-get-result-delivered']),
+  storeCase('STORE-03/delete-delete', ['requests-overlapped-one-200-one-412-or-404', 'final-get-404'], ['one-tombstone-counters-decremented-once-job-retired-once'], ['image-versions-unchanged-by-race'], ['create-result-delivered', 'winner-result-delivered', 'loser-result-delivered', 'final-get-result-delivered']),
+  storeCase('STORE-03/patch-delete', ['requests-overlapped-one-200-one-412-or-404', 'final-get-matches-winner'], ['one-winner-state-counters-and-job-consistent'], ['image-versions-unchanged-by-race'], ['create-result-delivered', 'winner-result-delivered', 'loser-result-delivered', 'final-get-result-delivered']),
+  storeCase('STORE-04/same-id-create', ['requests-overlapped-one-201-one-409', 'winner-readback-matches'], ['one-row-winner-fields-counter-1'], ['no-image-versions-added'], ['winner-result-delivered', 'loser-result-delivered', 'readback-result-delivered']),
+  storeCase('STORE-04/different-item-patch', ['requests-overlapped-both-200', 'both-readbacks-match'], ['both-rows-revision-2-counter-unchanged'], ['no-image-versions-added'], ['create-x-result-delivered', 'create-y-result-delivered', 'patch-x-result-delivered', 'patch-y-result-delivered', 'readback-x-result-delivered', 'readback-y-result-delivered']),
+  storeCase('STORE-04/resend-create', ['first-create-201', 'resend-409-already-exists'], ['resend-leaves-row-and-counter-unchanged'], ['no-image-versions-added'], ['create-result-delivered', 'resend-result-delivered']),
+  storeCase('STORE-04/resend-delete', ['first-delete-200', 'resend-404-not-found'], ['resend-leaves-tombstone-and-counter-unchanged'], ['no-image-versions-added'], ['create-result-delivered', 'delete-result-delivered', 'resend-result-delivered']),
+  storeCase('STORE-05/lifecycle-tombstone', ['get-200-then-delete-200-exact-body', 'get-after-delete-404', 'list-excludes-tombstone', 'recreate-409'], ['exact-tombstone-fields-counter-decremented-other-item-unchanged'], ['no-image-versions-added'],
+    ['create-x-result-delivered', 'create-y-result-delivered', 'get-result-delivered', 'delete-result-delivered', 'get-404-result-delivered', 'list-result-delivered', 'recreate-result-delivered']),
+  storeCase('STORE-05/delete-with-image', ['create-with-thumbnail-201', 'delete-200', 'get-after-delete-404', 'thumbnail-url-after-delete-404'], ['tombstone-without-image-ref-counters-zero-job-retired'], ['image-version-retained-immediately-after-delete'], ['create-result-delivered', 'delete-result-delivered', 'get-404-result-delivered', 'thumbnail-404-result-delivered']),
+  storeCase('API-14/rate-boundary-seeded', ['request-at-119-is-200', 'second-token-request-121-is-429-retry-after-matches-body', 'window-not-crossed'], ['seeded-119-exact-expires-at-then-120-held', 'rate-requests-leave-reminders-unchanged'], ['no-image-versions-added'], ['request-120-result-delivered', 'request-121-result-delivered']),
+  storeInt('STORE-03/both-read-old-i', ['patch-patch-one-success-one-412', 'delete-delete-one-success-one-412', 'patch-delete-either-order-one-winner', 'delete-before-read-answers-404', 'gate-holds-both-reads-before-commit']),
+  storeInt('STORE-04/create-race-i', ['same-id-one-201-one-409', 'different-items-both-retained']),
+  storeInt('STORE-06/items-1000-boundary-i', ['1000th-succeeds-1001st-413-non-growth-allowed']),
+  storeInt('STORE-06/items-1000-concurrent-i', ['two-creates-from-999-one-success-one-413']),
+  storeInt('STORE-06/items-1000-delete-recovery-i', ['delete-at-cap-frees-exactly-one-slot']),
+  storeInt('STORE-06/image-128mib-boundary-i', ['exactly-134217728-succeeds-one-more-byte-413']),
+  storeInt('STORE-06/image-128mib-concurrent-i', ['two-1mib-creates-one-success-one-413-one-committed-job']),
+  storeInt('STORE-06/image-128mib-delete-recovery-i', ['delete-returns-bytes-and-allows-new-image']),
+];
+definitions.push(...storageDefinitions);
+
 /** A guard returns true when a prerequisite case has not passed; the runner then records not-run. */
 export const caseGuards = new Map<string, (fixture: import('./types.ts').SuiteFixture) => boolean>();
 /**

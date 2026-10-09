@@ -24,53 +24,53 @@ const tick = (): Promise<void> => new Promise<void>(resolve => setTimeout(resolv
 async function sleepFor(ms: number): Promise<void> { for (let left = ms; left > 0; left -= 30_000) await apiIo.sleep(Math.min(30_000, left)); }
 
 type Owner = 'a' | 'b';
-type Actor = { owner: Owner; token: string; ownerId: string };
+export type Actor = { owner: Owner; token: string; ownerId: string };
 type Shared = { passed: Set<string>; data: Map<string, unknown> };
 /** Sessions belong to one case's (or one declared dependency group's) auth, so users never leak across independent cases. */
 const sessions = new WeakMap<object, Map<Owner, AuthSession>>();
 const shared = new WeakMap<object, Shared>();
 function stateOf(fixture: SuiteFixture): Shared { const key = fixtureState(fixture); let value = shared.get(key); if (!value) { value = { passed: new Set(), data: new Map() }; shared.set(key, value); } return value; }
 /** A signed token for the shared owner A or B; renewed before its real five minute life ends. */
-async function actor(fixture: SuiteFixture, owner: Owner): Promise<Actor> {
+export async function actor(fixture: SuiteFixture, owner: Owner): Promise<Actor> {
   let owned = sessions.get(fixture.auth); if (!owned) { owned = new Map(); sessions.set(fixture.auth, owned); } let session = owned.get(owner);
   if (!session || session.claims.exp * 1000 - Date.now() < 60_000) { session = await fixture.auth.login(owner, [READ, WRITE], 'primary'); owned.set(owner, session); }
   return { owner, token: session.accessToken, ownerId: ownerIdFor(fixture.config.issuer, session.claims.sub) };
 }
 /** A second token for the same owner, used to show that the rate window is shared per owner. */
-async function secondToken(fixture: SuiteFixture, owner: Owner): Promise<Actor> { const session = await fixture.auth.login(owner, [READ, WRITE], 'primary'); return { owner, token: session.accessToken, ownerId: ownerIdFor(fixture.config.issuer, session.claims.sub) }; }
+export async function secondToken(fixture: SuiteFixture, owner: Owner): Promise<Actor> { const session = await fixture.auth.login(owner, [READ, WRITE], 'primary'); return { owner, token: session.accessToken, ownerId: ownerIdFor(fixture.config.issuer, session.claims.sub) }; }
 
-type Probe = { status: number; headers: Headers; text: string; json: unknown; requestId: string | null; since: number; until: number };
+export type Probe = { status: number; headers: Headers; bytes: Buffer; text: string; json: unknown; requestId: string | null; since: number; until: number };
 type Options = { token?: string; method?: string; headers?: Record<string, string>; body?: string };
-async function send(fixture: SuiteFixture, path: string, options: Options = {}): Promise<Probe> {
+export async function send(fixture: SuiteFixture, path: string, options: Options = {}): Promise<Probe> {
   const since = Date.now(); const response = await fixture.request(path, options); const until = Date.now();
   const text = response.bytes.toString('utf8'); let json: unknown; try { json = JSON.parse(text); } catch { json = undefined; }
-  return { status: response.status, headers: response.headers, text, json, requestId: response.headers.get('x-request-id'), since, until };
+  return { status: response.status, headers: response.headers, bytes: response.bytes, text, json, requestId: response.headers.get('x-request-id'), since, until };
 }
-const jsonHeaders = (contentType?: string | null): Record<string, string> => contentType === null ? {} : { 'content-type': contentType ?? 'application/json' };
-const edgeId = (probe: Probe): string => probe.requestId ?? probe.headers.get('apigw-requestid') ?? probe.headers.get('x-amzn-requestid') ?? 'uncorrelated-gateway-answer';
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+export const jsonHeaders = (contentType?: string | null): Record<string, string> => contentType === null ? {} : { 'content-type': contentType ?? 'application/json' };
+export const edgeId = (probe: Probe): string => probe.requestId ?? probe.headers.get('apigw-requestid') ?? probe.headers.get('x-amzn-requestid') ?? 'uncorrelated-gateway-answer';
+export const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const DTO_KEYS = 'id,url,title,reminderTime,autoOpen,webPush,hidden,revision,createdAt,updatedAt,thumbnail';
 
 /** Lambda-reaching responses are delivered as API result logs; the expectation names status/code/operation, never content. */
-function logOf(probe: Probe, status: number, extra: { code?: string; operation?: string } = {}): LogExpectation {
+export function logOf(probe: Probe, status: number, extra: { code?: string; operation?: string } = {}): LogExpectation {
   if (!probe.requestId) throw new Error('API_REQUEST_ID_MISSING');
   return { service: 'api', requestId: probe.requestId, since: probe.since, until: probe.until, status, mode: 'present', ...extra };
 }
-function defer(recorder: CaseRecorder, caseId: string, assertion: string, expectation: LogExpectation, controls?: { before: LogExpectation; after: LogExpectation }): void { recorder.deferLogs({ caseId, assertion, expectation, ...(controls ? { controls } : {}) }); }
+export function defer(recorder: CaseRecorder, caseId: string, assertion: string, expectation: LogExpectation, controls?: { before: LogExpectation; after: LogExpectation }): void { recorder.deferLogs({ caseId, assertion, expectation, ...(controls ? { controls } : {}) }); }
 
-function commonHeaders(probe: Probe): boolean { return /^application\/json/i.test(probe.headers.get('content-type') ?? '') && probe.headers.get('x-content-type-options') === 'nosniff' && !!probe.requestId; }
+export function commonHeaders(probe: Probe): boolean { return /^application\/json/i.test(probe.headers.get('content-type') ?? '') && probe.headers.get('x-content-type-options') === 'nosniff' && !!probe.requestId; }
 /** A Lambda error: the top-level code, safe message and the same request id as the header. */
-function errorIs(probe: Probe, status: number, code: string): boolean {
+export function errorIs(probe: Probe, status: number, code: string): boolean {
   const body = probe.json; if (probe.status !== status || !isRecord(body)) return false;
   const shape = Object.keys(body).sort().join(',');
   const allowed = status === 429 ? ['code,message,requestId,retryAfterSeconds'] : code === 'LEGACY_API_REMOVED' ? ['code,message,replacement,requestId'] : ['code,message,requestId'];
   return allowed.includes(shape) && body.code === code && typeof body.message === 'string' && body.requestId === probe.requestId && commonHeaders(probe) && probe.headers.get('etag') === null && probe.headers.get('cache-control') === 'no-store';
 }
-const strongEtag = (probe: Probe): boolean => /^"[\x21\x23-\x7e]+"$/.test(probe.headers.get('etag') ?? '');
-const itemHeaders = (probe: Probe): boolean => commonHeaders(probe) && strongEtag(probe) && probe.headers.get('cache-control') === 'private, no-store, no-transform';
-function dtoOf(probe: Probe): Record<string, unknown> | undefined { return isRecord(probe.json) && Object.keys(probe.json).join(',') === DTO_KEYS && JSON.stringify(probe.json) === probe.text && ISO.test(String(probe.json.createdAt)) && ISO.test(String(probe.json.updatedAt)) && ISO.test(String(probe.json.reminderTime)) ? probe.json : undefined; }
-function listOf(probe: Probe): { items: Record<string, unknown>[]; nextCursor: string | null } | undefined {
+export const strongEtag = (probe: Probe): boolean => /^"[\x21\x23-\x7e]+"$/.test(probe.headers.get('etag') ?? '');
+export const itemHeaders = (probe: Probe): boolean => commonHeaders(probe) && strongEtag(probe) && probe.headers.get('cache-control') === 'private, no-store, no-transform';
+export function dtoOf(probe: Probe): Record<string, unknown> | undefined { return isRecord(probe.json) && Object.keys(probe.json).join(',') === DTO_KEYS && JSON.stringify(probe.json) === probe.text && ISO.test(String(probe.json.createdAt)) && ISO.test(String(probe.json.updatedAt)) && ISO.test(String(probe.json.reminderTime)) ? probe.json : undefined; }
+export function listOf(probe: Probe): { items: Record<string, unknown>[]; nextCursor: string | null } | undefined {
   const body = probe.json;
   if (probe.status !== 200 || !isRecord(body) || Object.keys(body).join(',') !== 'items,nextCursor' || !Array.isArray(body.items) || !(body.nextCursor === null || (typeof body.nextCursor === 'string' && body.nextCursor.length > 0)) || !commonHeaders(probe) || probe.headers.get('etag') !== null) return undefined;
   const items = body.items as unknown[]; if (!items.every(isRecord) || !items.every(item => Object.keys(item).join(',') === DTO_KEYS)) return undefined;
@@ -81,7 +81,7 @@ const sequence = (from: number, to: number): string[] => Array.from({ length: to
 const same = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right);
 
 /** Every request an owner sends in the current minute; the sum over all minutes is stable across a minute boundary. */
-async function rateTotal(fixture: SuiteFixture, ownerId: string): Promise<number> {
+export async function rateTotal(fixture: SuiteFixture, ownerId: string): Promise<number> {
   let total = 0; let ExclusiveStartKey: Record<string, unknown> | undefined;
   do {
     const page = await fixture.clients.dynamodb.send(new QueryCommand({ TableName: fixture.config.ownerStateTable, ConsistentRead: true, KeyConditionExpression: 'pk = :pk AND begins_with(sk, :rate)', ExpressionAttributeValues: { ':pk': `OWNER#${ownerId}`, ':rate': 'RATE#' }, ...(ExclusiveStartKey ? { ExclusiveStartKey } : {}) }));
@@ -90,7 +90,7 @@ async function rateTotal(fixture: SuiteFixture, ownerId: string): Promise<number
   } while (ExclusiveStartKey);
   return total;
 }
-async function s3Versions(fixture: SuiteFixture): Promise<number> {
+export async function s3Versions(fixture: SuiteFixture): Promise<number> {
   let count = 0; let KeyMarker: string | undefined; let VersionIdMarker: string | undefined;
   do {
     const page = await fixture.clients.s3.send(new ListObjectVersionsCommand({ Bucket: fixture.config.imagesBucket, ...(KeyMarker ? { KeyMarker } : {}), ...(VersionIdMarker ? { VersionIdMarker } : {}) }));
@@ -102,7 +102,7 @@ async function s3Versions(fixture: SuiteFixture): Promise<number> {
 type Snapshot = { domain: string; full: string; rate: number; s3: number };
 const snapshot = async (fixture: SuiteFixture, ...owners: Actor[]): Promise<Snapshot & { rates: number[] }> => { const rates: number[] = []; for (const owner of owners) rates.push(await rateTotal(fixture, owner.ownerId)); return { domain: await snapshotOwnedStorage(fixture, { excludeRate: true }), full: await snapshotOwnedStorage(fixture), rate: rates[0] ?? 0, rates, s3: await s3Versions(fixture) }; };
 
-async function createItem(fixture: SuiteFixture, who: Actor, body: string, contentType?: string): Promise<Probe> {
+export async function createItem(fixture: SuiteFixture, who: Actor, body: string, contentType?: string): Promise<Probe> {
   return send(fixture, '/v2/reminders', { token: who.token, method: 'POST', headers: jsonHeaders(contentType), body });
 }
 type Expected = { storedId: string; title?: string; url?: string; reminderTime?: string };

@@ -5,6 +5,7 @@ import { createOwnerStore } from "../../src/reminders/owner-store";
 import { createRemindersService } from "../../src/reminders/service";
 import type { ImageJob, ImageRef } from "../../src/images/types";
 import type { ImagesStore } from "../../src/shared/ports";
+import { keys } from "../../src/shared/ports";
 import { requireBudget } from "../../src/shared/budget";
 import { createJobsStore } from "../../src/images/jobs-store";
 import type { CleanupPartition } from "../../src/images/types";
@@ -148,6 +149,11 @@ export function createHarness(config = harnessConfig) {
   return {
     service, reminders, owners, jobs, images, cleanupQueries, deletedKeys,
     get checkpointWrites(): number { return checkpointWrites; },
+    /** Synthetic counter row set just below a cap; the reminders themselves are not created. */
+    seedStorage(ownerId: string, itemCount: number, imageBytes: number): void { const row = { ...keys.storage(ownerId), itemCount, imageBytes }; table("owners").set(rowKey(row), row); },
+    /** Stored image versions and delete markers, as the images bucket would list them. */
+    imageVersions(): Array<{ key: string; versionId: string; bytes: number }> { return [...objects.values()].map(({ ref }) => ({ key: ref.key, versionId: ref.versionId, bytes: ref.bytes })); },
+    imageDeleteMarkers(): Array<{ key: string; versionId: string }> { return [...markers.entries()].map(([key, versionId]) => ({ key, versionId })); },
     seedJob(job: ImageJob): void { const row = Object.fromEntries(Object.entries(job).filter(([, value]) => value !== undefined)); table("jobs").set(rowKey(row), structuredClone(row)); },
     setPublication(published: boolean): void { const row = { pk: "GLOBAL", sk: "PUBLICATION", published, runId: null }; table("owners").set(rowKey(row), row); },
     freezeCleanupIndex(): void { frozenIndex = [...table("jobs").values()].filter(row => row.cleanupPartition !== undefined).map(row => ({ jobId: row.jobId, cleanupPartition: row.cleanupPartition, cleanupSortKey: row.cleanupSortKey })); },
