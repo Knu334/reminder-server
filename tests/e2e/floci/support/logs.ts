@@ -5,6 +5,8 @@ import type { LogExpectation, PendingLogCheck, LogCheckResult, SuiteFixture, Out
 export type ObservedEvent = { eventId: string; message: string; logStreamName: string; group: string; timestamp: number };
 export type CleanupCompletion = { since: number; until: number; completed: boolean; failed?: string; status?: number; result?: CleanupResult; storageUnchanged?: boolean };
 export type CleanupExpectation = { since: number; until: number; status?: number; evaluated?: number; deletes?: number; skippedUnpublished?: boolean };
+/** Floci stamps Lambda log events when it ingests them, slightly after the HTTP response returns. */
+export const LOG_TIMESTAMP_GRACE_MS = 500;
 type Parsed = ObservedEvent & { invokeId?: string; doc: Record<string, unknown> };
 export class LogObserver {
   private events = new Map<string, Parsed>();
@@ -23,11 +25,14 @@ export class LogObserver {
     }
   }
   safeCounts(): Record<LogExpectation['service'], number> { return Object.fromEntries(Object.entries(this.groups).map(([service, group]) => [service, [...this.events.values()].filter(e => e.group === group).length])) as Record<LogExpectation['service'], number>; }
-  private window(expect: LogExpectation): Parsed[] { return [...this.events.values()].filter(event => event.group === this.groups[expect.service] && event.timestamp >= expect.since && event.timestamp <= (expect.until ?? Infinity)); }
+  private window(expect: LogExpectation, graceMs = 0): Parsed[] { return [...this.events.values()].filter(event => event.group === this.groups[expect.service] && event.timestamp >= expect.since && event.timestamp <= (expect.until === undefined ? Infinity : expect.until + graceMs)); }
   match(expect: LogExpectation): boolean {
     if (expect.service === 'api' && (!expect.requestId || expect.status === undefined)) return false;
-    const matched = this.window(expect).filter(({ doc }) => (!expect.requestId || doc.requestId === expect.requestId) && (!expect.lambdaRequestId || doc.lambdaRequestId === expect.lambdaRequestId) && (expect.status === undefined || Number(doc.status) === expect.status) && (!expect.operation || doc.operation === expect.operation) && (!expect.code || doc.code === expect.code));
-    return expect.mode === 'present' ? matched.length === 1 : matched.length === 0;
+    const present = expect.mode === 'present';
+    const matched = this.window(expect, present && expect.requestId ? LOG_TIMESTAMP_GRACE_MS : 0).filter(({ doc }) => (!expect.requestId || doc.requestId === expect.requestId) && (!expect.lambdaRequestId || doc.lambdaRequestId === expect.lambdaRequestId) && (expect.status === undefined || Number(doc.status) === expect.status) && (!expect.operation || doc.operation === expect.operation) && (!expect.code || doc.code === expect.code));
+    if (present) return matched.length === 1;
+    // A refused request must have no result log at all, however late Floci stamps it.
+    return matched.length === 0 && !(expect.requestId && [...this.events.values()].some(e => e.group === this.groups[expect.service] && e.doc.requestId === expect.requestId));
   }
   check(check: PendingLogCheck): LogCheckResult {
     const before = check.controls ? this.match(check.controls.before) : false; const after = check.controls ? this.match(check.controls.after) : false;

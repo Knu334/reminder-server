@@ -120,3 +120,17 @@ void test('a mismatched second-invoke cleanup log fails the case even when the f
   assert.equal(cleanupCaseMatches(build({ deletes: 0, streamEnd: 'other' }), 'multi'), false, 'end in another stream is no pair');
   assert.equal(cleanupCaseMatches(build({ deletes: 0, omitEnd: true }), 'multi'), false, 'missing service end');
 });
+void test('Floci stamps a result log shortly after the HTTP response so the window tolerates bounded ingestion lag', () => {
+  const observer = new LogObserver(groups);
+  observer.ingest([event('late', { requestId: 'r-late', status: 200 }, 'invoke-1', 'owned-api', 112), event('far', { requestId: 'r-far', status: 200 }, 'invoke-1', 'owned-api', 110 + 60_000)]);
+  const base = { service: 'api' as const, status: 200, since: 90, until: 110, mode: 'present' as const };
+  assert.equal(observer.match({ ...base, requestId: 'r-late' }), true);
+  assert.equal(observer.match({ ...base, requestId: 'r-far' }), false);
+  assert.equal(observer.match({ ...base, requestId: 'r-late', since: 113, until: 120 }), false);
+});
+void test('absence is not weakened by the ingestion-lag grace: a late-stamped refused request is still detected', () => {
+  const observer = new LogObserver(groups);
+  observer.ingest([event('late-refused', { requestId: 'r-refused', status: 401 }, 'invoke-1', 'owned-api', 112)]);
+  assert.equal(observer.match({ service: 'api', requestId: 'r-refused', status: 401, since: 90, until: 110, mode: 'absent' }), false);
+  assert.equal(observer.match({ service: 'api', requestId: 'r-other', status: 401, since: 90, until: 110, mode: 'absent' }), true);
+});
