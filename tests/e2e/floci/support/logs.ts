@@ -44,15 +44,21 @@ export class LogObserver {
     return { caseId: check.caseId, assertion: check.assertion, matched, ...(check.controls ? { controlsMatched: { before, after } } : {}) };
   }
   cleanupMatch(expected: CleanupExpectation, completion?: CleanupCompletion): boolean {
-    const events = [...this.events.values()].filter(e => e.group === this.groups.cleanup && e.timestamp >= expected.since && e.timestamp <= expected.until);
-    const starts = events.filter(e => e.doc.operation === 'cleanup_start' && typeof e.doc.lambdaRequestId === 'string');
+    // Floci stamps events at ingestion, after the invoke returned: accept a bounded lag, but never another invoke's start.
+    const events = [...this.events.values()].filter(e => e.group === this.groups.cleanup && e.timestamp >= expected.since && e.timestamp <= expected.until + LOG_TIMESTAMP_GRACE_MS);
+    const isStart = (e: Parsed): boolean => e.doc.operation === 'cleanup_start' && typeof e.doc.lambdaRequestId === 'string';
+    const strictStarts = events.filter(e => isStart(e) && e.timestamp <= expected.until);
+    // A start stamped after the response belongs to this invoke only if it is the earliest one in the lag window.
+    const starts = strictStarts.length > 0 ? strictStarts : events.filter(isStart).sort((a, b) => a.timestamp - b.timestamp).slice(0, 1);
     if (starts.length !== 1) return false;
     const start = starts[0]!;
+    const nextStart = Math.min(Infinity, ...events.filter(e => isStart(e) && e !== start && e.timestamp >= start.timestamp).map(e => e.timestamp));
+    const own = events.filter(e => e === start || e.timestamp < nextStart);
     if (start.invokeId && start.invokeId !== start.doc.lambdaRequestId) return false;
     if (expected.skippedUnpublished === true) {
-      return !!completion && completion.completed && completion.since === expected.since && completion.until === expected.until && completion.status === 200 && completion.result?.skippedUnpublished === true && completion.result.incomplete === false && completion.result.evaluated === (expected.evaluated ?? 0) && completion.result.deletes === (expected.deletes ?? 0) && completion.storageUnchanged === true && !events.some(e => e.doc.operation === 'cleanup');
+      return !!completion && completion.completed && completion.since === expected.since && completion.until === expected.until && completion.status === 200 && completion.result?.skippedUnpublished === true && completion.result.incomplete === false && completion.result.evaluated === (expected.evaluated ?? 0) && completion.result.deletes === (expected.deletes ?? 0) && completion.storageUnchanged === true && !own.some(e => e.doc.operation === 'cleanup');
     }
-    const ends = events.filter(e => e.logStreamName === start.logStreamName && e.timestamp >= start.timestamp && e.doc.operation === 'cleanup' && typeof e.doc.requestId === 'string');
+    const ends = own.filter(e => e.logStreamName === start.logStreamName && e.timestamp >= start.timestamp && e.doc.operation === 'cleanup' && typeof e.doc.requestId === 'string');
     if (ends.length !== 1) return false;
     if (ends[0]!.invokeId && ends[0]!.invokeId !== start.doc.lambdaRequestId) return false;
     const end = ends[0]!.doc;

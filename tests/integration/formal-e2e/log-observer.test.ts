@@ -134,3 +134,13 @@ void test('absence is not weakened by the ingestion-lag grace: a late-stamped re
   assert.equal(observer.match({ service: 'api', requestId: 'r-refused', status: 401, since: 90, until: 110, mode: 'absent' }), false);
   assert.equal(observer.match({ service: 'api', requestId: 'r-other', status: 401, since: 90, until: 110, mode: 'absent' }), true);
 });
+void test('cleanup pair stamped shortly after the invoke returned still matches, but a following invoke start does not join it', () => {
+  const observer = new LogObserver(groups);
+  const expected = { since: 90, until: 120, status: 200, evaluated: 0, deletes: 0 };
+  observer.ingest([event('s', { lambdaRequestId: 'lambda-1', operation: 'cleanup_start' }, 'invoke-1', 'owned-cleanup', 119), event('e', { requestId: 'service-1', operation: 'cleanup', status: 200, evaluated: 0, deletes: 0 }, 'invoke-1', 'owned-cleanup', 125)]);
+  assert.equal(observer.cleanupMatch(expected), true);
+  observer.ingest([event('s2', { lambdaRequestId: 'lambda-2', operation: 'cleanup_start' }, 'invoke-1', 'owned-cleanup', 130), event('e2', { requestId: 'service-2', operation: 'cleanup', status: 200, evaluated: 0, deletes: 0 }, 'invoke-1', 'owned-cleanup', 135)]);
+  assert.equal(observer.cleanupMatch(expected), true);
+  assert.equal(observer.cleanupMatch({ since: 126, until: 140, status: 200, evaluated: 0, deletes: 0 }), true);
+  assert.equal(new LogObserver(groups).cleanupMatch(expected), false);
+});
