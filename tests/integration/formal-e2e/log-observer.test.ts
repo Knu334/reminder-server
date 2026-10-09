@@ -140,7 +140,8 @@ void test('cleanup pair stamped shortly after the invoke returned still matches,
   observer.ingest([event('s', { lambdaRequestId: 'lambda-1', operation: 'cleanup_start' }, 'invoke-1', 'owned-cleanup', 119), event('e', { requestId: 'service-1', operation: 'cleanup', status: 200, evaluated: 0, deletes: 0 }, 'invoke-1', 'owned-cleanup', 125)]);
   assert.equal(observer.cleanupMatch(expected), true);
   observer.ingest([event('s2', { lambdaRequestId: 'lambda-2', operation: 'cleanup_start' }, 'invoke-1', 'owned-cleanup', 130), event('e2', { requestId: 'service-2', operation: 'cleanup', status: 200, evaluated: 0, deletes: 0 }, 'invoke-1', 'owned-cleanup', 135)]);
-  assert.equal(observer.cleanupMatch(expected), true);
+  assert.equal(observer.cleanupMatch(expected), false, 'two starts without a cap are ambiguous');
+  assert.equal(observer.cleanupMatch({ ...expected, nextSince: 126 }), true);
   assert.equal(observer.cleanupMatch({ since: 126, until: 140, status: 200, evaluated: 0, deletes: 0 }), true);
   assert.equal(new LogObserver(groups).cleanupMatch(expected), false);
 });
@@ -156,16 +157,18 @@ void test('a missing own cleanup start is not masked by the next sequential invo
   const ok = new LogObserver(groups); ok.ingest([start('la', 125), end('ea', 128), start('lb', 140), end('eb', 145)]);
   assert.equal(ok.cleanupMatch({ ...a, nextSince: 130 }, doneA), true);
 });
-void test('cleanup start must carry the tracked invoke request id', () => {
+void test('cleanup matches by bounded window even when the invoke metadata id differs from the log lambdaRequestId', () => {
   const observer = new LogObserver(groups); const a = { since: 90, until: 120, status: 200, evaluated: 0, deletes: 0 };
-  const done = (lambdaRequestId?: string) => ({ since: 90, until: 120, completed: true, ...(lambdaRequestId ? { lambdaRequestId } : {}), status: 200, result: { evaluated: 0, deletes: 0, incomplete: false, skippedUnpublished: false }, storageUnchanged: true });
-  observer.ingest([event('s', { lambdaRequestId: 'lambda-1', operation: 'cleanup_start' }, 'i', 'owned-cleanup', 100), event('e', { requestId: 'svc', operation: 'cleanup', status: 200, evaluated: 0, deletes: 0 }, 'i', 'owned-cleanup', 105)]);
-  assert.equal(observer.cleanupMatch(a, done('lambda-1')), true);
-  assert.equal(observer.cleanupMatch(a, done('lambda-other')), false, 'request id mismatch');
-  assert.equal(observer.cleanupMatch(a, done()), true, 'no id: time only');
-  const late = new LogObserver(groups); late.ingest([event('s2', { lambdaRequestId: 'lambda-2', operation: 'cleanup_start' }, 'i', 'owned-cleanup', 125), event('e2', { requestId: 'svc2', operation: 'cleanup', status: 200, evaluated: 0, deletes: 0 }, 'i', 'owned-cleanup', 128)]);
-  assert.equal(late.cleanupMatch(a, done('lambda-1')), false, 'a late start of another request is not ours');
-  assert.equal(late.cleanupMatch(a, done('lambda-2')), true);
+  const done = { since: 90, until: 120, completed: true, lambdaRequestId: 'http-request-id', status: 200, result: { evaluated: 0, deletes: 0, incomplete: false, skippedUnpublished: false }, storageUnchanged: true } as never;
+  observer.ingest([event('s', { lambdaRequestId: 'runtime-invoke-id', operation: 'cleanup_start' }, 'i', 'owned-cleanup', 125), event('e', { requestId: 'svc', operation: 'cleanup', status: 200, evaluated: 0, deletes: 0 }, 'i', 'owned-cleanup', 128)]);
+  assert.equal(observer.cleanupMatch({ ...a, nextSince: 130 }, done), true);
+});
+void test('two cleanup starts in one capped window are ambiguous and fail', () => {
+  const a = { since: 90, until: 120, status: 200, evaluated: 0, deletes: 0 };
+  const ev = [event('s1', { lambdaRequestId: 'l1', operation: 'cleanup_start' }, 'i', 'owned-cleanup', 119), event('e1', { requestId: 'r1', operation: 'cleanup', status: 200, evaluated: 0, deletes: 0 }, 'i', 'owned-cleanup', 121), event('s2', { lambdaRequestId: 'l2', operation: 'cleanup_start' }, 'i', 'owned-cleanup', 130), event('e2', { requestId: 'r2', operation: 'cleanup', status: 200, evaluated: 0, deletes: 0 }, 'i', 'owned-cleanup', 132)];
+  const observer = new LogObserver(groups); observer.ingest(ev);
+  assert.equal(observer.cleanupMatch(a), false, 'no cap: both starts in the grace');
+  assert.equal(observer.cleanupMatch({ ...a, nextSince: 125 }), true, 'cap excludes the next invoke');
 });
 void test('an uncorrelated refusal is failed by a late-stamped extra result log but not by the next control', () => {
   const absent = { service: 'api' as const, requestId: 'uncorrelated-gateway-refusal', status: 401, since: 95, until: 105, mode: 'absent' as const };

@@ -258,7 +258,7 @@ export async function invokeCleanup(fixture: SuiteFixture, event: unknown = {}):
   const schedule = await state.scheduler.send(new GetScheduleCommand({ Name: `${b.prefix}-production-cleanup`, GroupName: `${b.prefix}-production-cleanup` }));
   requireSetting(schedule.State === 'DISABLED' && !state.cleanupIntervals.some(interval => !interval.completed));
   const storageBefore = await snapshotOwnedStorage(fixture); const interval: CleanupCompletion = { since: Date.now(), until: 0, completed: false }; state.cleanupIntervals.push(interval);
-  const result = await fixture.clients.lambda.send(new InvokeCommand({ FunctionName: b.cleanup_alias_arn!, InvocationType: 'RequestResponse', Payload: Buffer.from(payload) })); interval.until = Date.now(); interval.completed = true; interval.status = result.StatusCode ?? 0; if (typeof result.$metadata?.requestId === 'string' && result.$metadata.requestId) interval.lambdaRequestId = result.$metadata.requestId;
+  const result = await fixture.clients.lambda.send(new InvokeCommand({ FunctionName: b.cleanup_alias_arn!, InvocationType: 'RequestResponse', Payload: Buffer.from(payload) })); interval.until = Date.now(); interval.completed = true; interval.status = result.StatusCode ?? 0;
   if (result.Payload) {
     const parsed: unknown = JSON.parse(Buffer.from(result.Payload.buffer, result.Payload.byteOffset, result.Payload.byteLength).toString());
     if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {

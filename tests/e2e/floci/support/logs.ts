@@ -3,7 +3,7 @@ import type { CloudWatchLogsClient } from '@aws-sdk/client-cloudwatch-logs';
 import type { CleanupResult } from '../../../../src/images/types.ts';
 import type { LogExpectation, PendingLogCheck, LogCheckResult, SuiteFixture, OutputResult } from './types.ts';
 export type ObservedEvent = { eventId: string; message: string; logStreamName: string; group: string; timestamp: number };
-export type CleanupCompletion = { since: number; until: number; completed: boolean; lambdaRequestId?: string; failed?: string; status?: number; result?: CleanupResult; storageUnchanged?: boolean };
+export type CleanupCompletion = { since: number; until: number; completed: boolean; failed?: string; status?: number; result?: CleanupResult; storageUnchanged?: boolean };
 export type CleanupExpectation = { since: number; until: number; nextSince?: number; status?: number; evaluated?: number; deletes?: number; skippedUnpublished?: boolean };
 /** Floci stamps Lambda log events when it ingests them, slightly after the HTTP response returns. */
 export const LOG_TIMESTAMP_GRACE_MS = 500;
@@ -50,11 +50,8 @@ export class LogObserver {
     const limit = this.limit(expected.until, LOG_TIMESTAMP_GRACE_MS, expected.nextSince);
     const events = [...this.events.values()].filter(e => e.group === this.groups.cleanup && e.timestamp >= expected.since && e.timestamp <= limit);
     const isStart = (e: Parsed): boolean => e.doc.operation === 'cleanup_start' && typeof e.doc.lambdaRequestId === 'string';
-    const wantedId = completion?.lambdaRequestId;
-    // With the invoke's own Lambda request id, the start is identified by id alone (time only bounds the search); otherwise by time.
-    const identified = wantedId === undefined ? events.filter(isStart) : events.filter(e => isStart(e) && e.doc.lambdaRequestId === wantedId);
-    const strictStarts = identified.filter(e => e.timestamp <= expected.until);
-    const starts = strictStarts.length > 0 ? strictStarts : identified.sort((a, b) => a.timestamp - b.timestamp).slice(0, 1);
+    // The invoke is identified by its bounded window alone (the HTTP invoke id is not the runtime invokeId): exactly one start, or the pairing is ambiguous.
+    const starts = events.filter(isStart);
     if (starts.length !== 1) return false;
     const start = starts[0]!;
     const nextStart = Math.min(Infinity, ...events.filter(e => isStart(e) && e !== start && e.timestamp >= start.timestamp).map(e => e.timestamp));

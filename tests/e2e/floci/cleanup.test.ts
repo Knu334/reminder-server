@@ -142,12 +142,3 @@ void test('a thrown invoke keeps quiescence unsatisfied and later invokes name t
   assert.equal(state.cleanupIntervals.at(-1)?.completed, false, 'an unknown outcome never satisfies quiescence'); assert.equal(state.cleanupIntervals.every(interval => interval.completed), false);
   await assert.rejects(invokeCleanup(sim.fixture), (error: Error) => error.message === 'CLEANUP_PREVIOUS_INVOKE_FAILED');
 });
-
-void test('the tracked interval records the invoke response request id only when the response provides one', async () => {
-  const sim = createSim(); const state = fixtureStates.get(sim.fixture) as unknown as { cleanupIntervals: { lambdaRequestId?: string }[] }; const original = cleanupIo.invoke;
-  try {
-    cleanupIo.invoke = async (fixture, payload) => ({ ...(await original(fixture, payload)), requestId: 'req-from-metadata' });
-    await invokeCleanup(sim.fixture); assert.equal(state.cleanupIntervals.at(-1)?.lambdaRequestId, 'req-from-metadata');
-    cleanupIo.invoke = original; await invokeCleanup(sim.fixture); assert.equal(state.cleanupIntervals.at(-1)?.lambdaRequestId, undefined);
-  } finally { cleanupIo.invoke = original; }
-});

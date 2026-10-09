@@ -29,11 +29,11 @@ export const cleanupIo = {
   gsiDeadlineMs: 30_000,
   ownedTable: (fixture: SuiteFixture): boolean => fixture.config.imageJobsTable.startsWith(`${fixture.prefix}-`) && fixture.config.imageJobsTable.endsWith('image-jobs'),
   async stopped(fixture: SuiteFixture): Promise<boolean> { const state = fixtureState(fixture); const b = state.stack.bindings; const schedule = await state.scheduler.send(new GetScheduleCommand({ Name: `${b.prefix}-production-cleanup`, GroupName: `${b.prefix}-production-cleanup` })); return schedule.State === 'DISABLED'; },
-  async invoke(fixture: SuiteFixture, payload: Buffer): Promise<{ status: number; requestId?: string; functionError?: string; payload?: Buffer }> {
+  async invoke(fixture: SuiteFixture, payload: Buffer): Promise<{ status: number; functionError?: string; payload?: Buffer }> {
     const state = fixtureState(fixture); const budget = state.budget?.allow('cleanupInvoke') ?? 700_000; if (budget <= 0) throw new Error('CLEANUP_BUDGET_EXHAUSTED');
     // RequestResponse only: an accepted asynchronous event (202) is never treated as processed work.
     const out = await fixture.clients.lambda.send(new InvokeCommand({ FunctionName: state.stack.bindings.cleanup_alias_arn!, InvocationType: 'RequestResponse', Payload: payload }), { requestTimeout: budget, abortSignal: AbortSignal.timeout(budget) });
-    return { status: out.StatusCode ?? 0, ...(out.$metadata?.requestId ? { requestId: out.$metadata.requestId } : {}), ...(out.FunctionError ? { functionError: out.FunctionError } : {}), ...(out.Payload ? { payload: Buffer.from(out.Payload) } : {}) };
+    return { status: out.StatusCode ?? 0, ...(out.FunctionError ? { functionError: out.FunctionError } : {}), ...(out.Payload ? { payload: Buffer.from(out.Payload) } : {}) };
   },
 };
 
@@ -160,7 +160,7 @@ export async function invokeCleanup(fixture: SuiteFixture, event: unknown = {}):
   let raw: Awaited<ReturnType<typeof cleanupIo.invoke>>;
   // A thrown invoke has an unknown outcome: its interval stays incomplete (quiescence is never satisfied falsely) but records a fixed failure code.
   try { raw = await cleanupIo.invoke(fixture, Buffer.from(payload)); } catch (error) { interval.failed = error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name) ? 'CLEANUP_INVOKE_TIMEOUT' : 'CLEANUP_INVOKE_FAILED'; throw new Error(interval.failed); }
-  interval.until = Date.now(); interval.completed = true; interval.status = raw.status; if (raw.requestId) interval.lambdaRequestId = raw.requestId;
+  interval.until = Date.now(); interval.completed = true; interval.status = raw.status;
   const functionError = raw.functionError === undefined ? undefined : raw.functionError === 'Unhandled' || raw.functionError === 'Handled' ? raw.functionError : 'Unknown' as const;
   let result: CleanupResult | undefined;
   if (!functionError && raw.payload) {
