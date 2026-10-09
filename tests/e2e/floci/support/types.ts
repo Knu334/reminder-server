@@ -35,7 +35,7 @@ export type FixtureAuth = {
   login(owner: 'a' | 'b', scopes: string[], client: 'primary' | 'sibling' | 'foreign'): Promise<AuthSession>;
   refresh(session: AuthSession): Promise<AuthSession>;
   /** Hosted UI login stopping at the one-time code; exchange it with exchangeCode(). */
-  authorize(owner: 'a' | 'b', scopes: string[], client: 'primary' | 'sibling' | 'foreign', options?: { challengeMethod?: 'S256' | 'plain' }): Promise<{ code?: string; verifier: string; callback: string; clientId: string }>;
+  authorize(owner: 'a' | 'b', scopes: string[], client: 'primary' | 'sibling' | 'foreign', options?: { challengeMethod?: 'S256' | 'plain' }): Promise<{ code?: string; rejection?: { status?: number; error?: string }; verifier: string; callback: string; clientId: string }>;
   exchangeCode(fields: Record<string, string>): Promise<{ status: number; error?: string; session?: AuthSession }>;
   requestRefresh(token: string, client: 'primary' | 'sibling'): Promise<{ status: number; error?: string; session?: AuthSession }>;
   revoke(session: AuthSession): Promise<void>;

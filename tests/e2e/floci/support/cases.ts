@@ -69,7 +69,7 @@ export const authDefinitions: CaseDefinition[] = [
   authCase('AUTH-02/pkce-negatives', 'E', ['wrong-verifier-rejected', 'missing-verifier-rejected', 'callback-mismatch-rejected', 'code-reuse-rejected', 'non-s256-rejected', 'independent-valid-control-issued'], 'token-endpoint-only-no-api-result', { ddb: ['token-rejections-storage-unchanged'], s3: ['token-rejections-image-versions-unchanged'] }),
   authCase('AUTH-03/jwt-signature', 'E', ['no-jwt-401', 'signature-only-tamper-401', 'valid-controls-200'], ['no-jwt-api-result-absent', 'signature-tamper-api-result-absent'], refusalStorage),
   authCase('AUTH-04/sibling-client', 'E', ['same-pool-sibling-client-401', 'valid-controls-200'], ['sibling-api-result-absent'], refusalStorage),
-  authCase('AUTH-05/foreign-issuer', 'E', ['foreign-pool-401', 'foreign-key-composite-classification', 'valid-controls-200'], ['foreign-api-result-absent'], refusalStorage),
+  authCase('AUTH-05/foreign-issuer', 'E', ['foreign-pool-401', 'foreign-rejection-classified', 'valid-controls-200'], ['foreign-api-result-absent'], refusalStorage),
   authCase('AUTH-07/scope-and-id-token', 'E', ['read-only-post-403', 'write-only-get-403', 'id-token-403', 'valid-controls-200'], ['read-only-post-api-result-absent', 'write-only-get-api-result-absent', 'id-token-api-result-absent'], refusalStorage),
   authCase('AUTH-09/refresh-rotation', 'E', ['rotation-200', 'new-refresh-token-differs', 'access-lifetime-300s', 'grant-identity-scope-owner-preserved', 'renewed-api-get-200'], ['renewed-get-result-delivered'], { ddbReason: 'positive-control-no-reminder-write' }),
   authCase('AUTH-10/rotation-grace', 'E', ['grace-inner-reuse-200', 'grace-start-not-extended-invalid-grant', 'descendant-refresh-200'], 'token-endpoint-only-no-api-result'),

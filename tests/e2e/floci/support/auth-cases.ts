@@ -73,15 +73,21 @@ run('AUTH-01/pkce-login', async (fixture, recorder, score) => {
 
 run('AUTH-02/pkce-negatives', async (fixture, recorder, score) => {
   const stored = await snapshotOwnedStorage(fixture);
-  const fields = (flow: { code?: string; verifier: string; callback: string; clientId: string }) => ({ grant_type: 'authorization_code', client_id: flow.clientId, redirect_uri: flow.callback, code: flow.code ?? '', code_verifier: flow.verifier });
-  const issue = async (method?: 'plain') => { const flow = await fixture.auth.authorize('a', [READ], 'primary', method ? { challengeMethod: method } : {}); return flow; };
-  let flow = await issue(); const wrong = await fixture.auth.exchangeCode({ ...fields(flow), code_verifier: randomBytes(48).toString('base64url') }); score.ok('http', 'wrong-verifier-rejected', !!flow.code && rejected(wrong));
-  flow = await issue(); const { code_verifier: _omit, ...withoutVerifier } = fields(flow); void _omit; const missing = await fixture.auth.exchangeCode(withoutVerifier); score.ok('http', 'missing-verifier-rejected', !!flow.code && rejected(missing));
-  flow = await issue(); const mismatch = await fixture.auth.exchangeCode({ ...fields(flow), redirect_uri: 'https://extension.example.test/other' }); score.ok('http', 'callback-mismatch-rejected', !!flow.code && rejected(mismatch));
-  flow = await issue(); const first = await fixture.auth.exchangeCode(fields(flow)); const reused = await fixture.auth.exchangeCode(fields(flow)); score.ok('http', 'code-reuse-rejected', first.status === 200 && rejected(reused));
-  flow = await issue('plain'); const plain = flow.code ? await fixture.auth.exchangeCode(fields(flow)) : { status: 400, error: 'invalid_request' }; score.ok('http', 'non-s256-rejected', rejected(plain));
-  flow = await issue(); const control = await fixture.auth.exchangeCode(fields(flow)); score.ok('http', 'independent-valid-control-issued', control.status === 200 && !!control.session);
-  recorder.recordInput({ httpStatus: control.status });
+  type Flow = { code?: string; rejection?: { status?: number; error?: string }; verifier: string; callback: string; clientId: string };
+  const fields = (flow: Flow) => ({ grant_type: 'authorization_code', client_id: flow.clientId, redirect_uri: flow.callback, code: flow.code ?? '', code_verifier: flow.verifier });
+  // One negative never aborts the others; an unexpected failure is simply not a rejection.
+  const attempt = async (name: string, check: () => Promise<boolean>) => { let result = false; try { result = await check(); } catch { result = false; } score.ok('http', name, result); return result; };
+  const issue = (method?: 'plain') => fixture.auth.authorize('a', [READ], 'primary', method ? { challengeMethod: method } : {});
+  const grant = ['invalid_grant'];
+  await attempt('wrong-verifier-rejected', async () => { const flow = await issue(); return !!flow.code && rejected(await fixture.auth.exchangeCode({ ...fields(flow), code_verifier: randomBytes(48).toString('base64url') }), grant); });
+  await attempt('missing-verifier-rejected', async () => { const flow = await issue(); const { code_verifier: _omit, ...rest } = fields(flow); void _omit; return !!flow.code && rejected(await fixture.auth.exchangeCode(rest)); });
+  await attempt('callback-mismatch-rejected', async () => { const flow = await issue(); return !!flow.code && rejected(await fixture.auth.exchangeCode({ ...fields(flow), redirect_uri: 'https://extension.example.test/other' }), grant); });
+  await attempt('code-reuse-rejected', async () => { const flow = await issue(); const first = await fixture.auth.exchangeCode(fields(flow)); return first.status === 200 && rejected(await fixture.auth.exchangeCode(fields(flow)), grant); });
+  // Rejected only when the authorize side visibly refused (error redirect or 4xx) or the exchange of an issued code was refused.
+  await attempt('non-s256-rejected', async () => { const flow = await issue('plain'); if (flow.rejection) return flow.rejection.error !== undefined ? flow.rejection.error === 'invalid_request' : (flow.rejection.status ?? 0) >= 400; return !!flow.code && rejected(await fixture.auth.exchangeCode(fields(flow))); });
+  const control = { status: 0 };
+  await attempt('independent-valid-control-issued', async () => { const flow = await issue(); const result = await fixture.auth.exchangeCode(fields(flow)); control.status = result.status; return result.status === 200 && !!result.session; });
+  recorder.recordInput({ httpStatus: control.status || 400 });
   const unchanged = stored === await snapshotOwnedStorage(fixture); score.ok('dynamodb', 'token-rejections-storage-unchanged', unchanged); score.ok('s3', 'token-rejections-image-versions-unchanged', unchanged);
 });
 
@@ -100,9 +106,10 @@ run('AUTH-04/sibling-client', async (fixture, recorder, score) => {
 
 run('AUTH-05/foreign-issuer', async (fixture, recorder, score) => {
   const control = await fixture.auth.login('a', [READ], 'primary'); const foreign = await fixture.auth.login('a', [READ], 'foreign');
-  // The classification records whether the expected JWKS could reject this token by signature alone; issuer-only evidence is the separate I case.
-  const verifiable = fixture.auth.verifiesAgainstPrimaryKeys(foreign); score.ok('http', 'foreign-key-composite-classification', typeof verifiable === 'boolean');
+  // Classification is observed, never assumed: a verifiable foreign signature means the rejection can only be the issuer (or other claims), not a different key.
+  const verifiable = fixture.auth.verifiesAgainstPrimaryKeys(foreign);
   await refusals(fixture, recorder, score, 'AUTH-05/foreign-issuer', control.accessToken, [{ token: foreign.accessToken, status: 401, http: 'foreign-pool-401', log: 'foreign-api-result-absent' }]);
+  score.ok('http', 'foreign-rejection-classified', true); recorder.recordInput({ code: verifiable ? 'FOREIGN_SIGNATURE_VERIFIABLE' : 'FOREIGN_KEY_COMPOSITE' });
 });
 
 run('AUTH-07/scope-and-id-token', async (fixture, recorder, score) => {

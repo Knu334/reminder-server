@@ -8,7 +8,7 @@ import { requireOwner } from '../../../src/api/identity.ts';
 import { ApiError } from '../../../src/shared/errors.ts';
 import type { Config } from '../../../src/config.ts';
 import type { GatewayRequest } from '../../../src/api/event.ts';
-import { tamperSignature, verifyJwt, verifySignature } from '../../e2e/floci/support/auth.ts';
+import { classifyAuthorize, tamperSignature, verifyJwt, verifySignature } from '../../e2e/floci/support/auth.ts';
 
 const AUTH_E = ['AUTH-01/pkce-login', 'AUTH-02/pkce-negatives', 'AUTH-03/jwt-signature', 'AUTH-04/sibling-client', 'AUTH-05/foreign-issuer', 'AUTH-07/scope-and-id-token', 'AUTH-09/refresh-rotation', 'AUTH-10/rotation-grace', 'AUTH-11/revoke-disable', 'AUTH-12/refresh-negatives', 'AUTH-06/token-expiry'];
 void test('AUTH cases are fully registered: E actions exist, expiry waits last, I cases are inventoried', async () => {
@@ -69,4 +69,16 @@ void test('real requireOwner rejects token_use and issuer each as the only wrong
   assert.equal(status(() => requireOwner(request({ token_use: undefined }), config, 'read')), 401);
   assert.equal(status(() => requireOwner(request({}, ['reminder-api/write'], 'POST'), config, 'write')), undefined);
   assert.equal(status(() => requireOwner(request({ token_use: 'id' }, ['reminder-api/write'], 'POST'), config, 'write')), 401);
+});
+
+const callback = 'https://extension.example.test/callback';
+void test('authorize classification reads an error redirect without following it and never invents a rejection', () => {
+  assert.deepEqual(classifyAuthorize({ status: 302, location: `${callback}?error=invalid_request&state=x` }, callback), { kind: 'rejected', error: 'invalid_request' });
+  assert.deepEqual(classifyAuthorize({ status: 302, location: `${callback}?code=abc&state=x` }, callback), { kind: 'unexpected' });
+  assert.deepEqual(classifyAuthorize({ status: 302, location: `${callback}?error=BAD%20VALUE` }, callback), { kind: 'unexpected' });
+  assert.deepEqual(classifyAuthorize({ status: 302, location: '/login?client_id=c' }, callback), { kind: 'login' });
+  assert.deepEqual(classifyAuthorize({ status: 200 }, callback), { kind: 'login' });
+  assert.deepEqual(classifyAuthorize({ status: 400 }, callback), { kind: 'rejected', status: 400 });
+  assert.deepEqual(classifyAuthorize({ status: 500 }, callback), { kind: 'unexpected' });
+  assert.deepEqual(classifyAuthorize({ status: 302 }, callback), { kind: 'unexpected' });
 });

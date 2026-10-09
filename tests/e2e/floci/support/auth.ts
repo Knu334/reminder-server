@@ -76,18 +76,24 @@ export async function createCaseAuth(fixture: SuiteFixture, caseId: string): Pro
     // Discovery is read for the exact selected owned pool; no foreign host auto-allow.
     const discovery = await localRequest(fixture.target, new URL(`/${selected.pool}/.well-known/openid-configuration`, fixture.target.endpoint), {}); const doc = JSON.parse(discovery.bytes.toString()) as Record<string, string>; const identity = discoveredCognitoIdentity(fixture.target, selected.pool, doc); const authTarget = identity.target;
     const authorize = new URL(doc.authorization_endpoint!); for (const [key, value] of Object.entries({ client_id: selected.client, response_type: 'code', redirect_uri: callback, scope: scopes.join(' '), state: nonce, code_challenge: challenge, code_challenge_method: challengeMethod })) authorize.searchParams.set(key, value);
-    let page = await localRequest(authTarget, authorize, {}); let login = authorize; if (page.status === 302) { login = new URL(page.headers.get('location')!, authorize); page = await localRequest(authTarget, login, {}); }
-    if (page.status !== 200) return { verifier, clientId: selected.client, doc, authTarget, pool: selected.pool, code: undefined as string | undefined }; const html = page.bytes.toString(); const csrf = /name=["']_csrf["'][^>]*value=["']([^"']+)/.exec(html)?.[1]; const cookie = page.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
+    const refused = (rejection: Rejection) => ({ verifier, clientId: selected.client, doc, authTarget, pool: selected.pool, code: undefined as string | undefined, rejection });
+    const empty = { verifier, clientId: selected.client, doc, authTarget, pool: selected.pool, code: undefined as string | undefined, rejection: undefined as Rejection | undefined };
+    let page = await localRequest(authTarget, authorize, {}); let login = authorize;
+    // An error redirect to the callback is read from Location only; the callback host is never fetched.
+    const first = classifyAuthorize({ status: page.status, ...(page.headers.get('location') ? { location: page.headers.get('location')! } : {}) }, callback);
+    if (first.kind === 'rejected') return refused(first); if (first.kind === 'unexpected') return empty;
+    if (page.status === 302) { login = new URL(page.headers.get('location')!, authorize); page = await localRequest(authTarget, login, {}); if (page.status >= 400 && page.status < 500) return refused({ kind: 'rejected', status: page.status }); }
+    if (page.status !== 200) return empty; const html = page.bytes.toString(); const csrf = /name=["']_csrf["'][^>]*value=["']([^"']+)/.exec(html)?.[1]; const cookie = page.headers.getSetCookie().map(value => value.split(';')[0]).join('; ');
     const form = new URLSearchParams({ username: user.username, password: user.password, ...(csrf ? { _csrf: csrf } : {}) });
-    const signed = await localRequest(authTarget, login, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', ...(cookie ? { cookie } : {}) }, body: form.toString() }); const location = signed.headers.get('location'); if (signed.status !== 302 || !location) return { verifier, clientId: selected.client, doc, authTarget, pool: selected.pool, code: undefined as string | undefined }; const returned = new URL(location); if (returned.origin + returned.pathname !== callback || returned.searchParams.get('state') !== nonce) throw new Error('HOSTED_UI_FAILED');
-    return { verifier, clientId: selected.client, doc, authTarget, pool: selected.pool, code: returned.searchParams.get('code') ?? undefined };
+    const signed = await localRequest(authTarget, login, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded', ...(cookie ? { cookie } : {}) }, body: form.toString() }); const location = signed.headers.get('location'); if (signed.status !== 302 || !location) return empty; const returned = new URL(location); if (returned.origin + returned.pathname !== callback || returned.searchParams.get('state') !== nonce) throw new Error('HOSTED_UI_FAILED');
+    return { ...empty, code: returned.searchParams.get('code') ?? undefined };
   }
   const keys = async (issuer: string, doc: Record<string, string>, authTarget: typeof fixture.target) => { if (auth.jwks.has(issuer)) return; const response = await localRequest(authTarget, new URL(doc.jwks_uri!), {}); if (response.status !== 200) throw new Error('JWKS_FAILED'); auth.jwks.set(issuer, (JSON.parse(response.bytes.toString()) as { keys: JsonWebKey[] }).keys); };
   const result: FixtureAuth = { async login(owner, scopes, kind) {
     const flow = await begin(owner, scopes, kind); if (!flow.code) throw new Error('HOSTED_UI_FAILED');
     const token = await localRequest(flow.authTarget, new URL(flow.doc.token_endpoint!), { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', client_id: flow.clientId, redirect_uri: callback, code: flow.code, code_verifier: flow.verifier }).toString() }); if (token.status !== 200) throw new Error('TOKEN_EXCHANGE_FAILED'); const created = session(token.bytes); await keys(created.claims.iss, flow.doc, flow.authTarget); return created;
   }, async refresh(current) { const refreshed = await postToken({ grant_type: 'refresh_token', client_id: current.claims.client_id, refresh_token: current.refreshToken }); if (refreshed.status !== 200 || !refreshed.session) throw new Error('TOKEN_EXCHANGE_FAILED'); return refreshed.session; },
-  async authorize(owner, scopes, kind, options = {}) { const flow = await begin(owner, scopes, kind, options.challengeMethod); return { ...(flow.code ? { code: flow.code } : {}), verifier: flow.verifier, callback, clientId: flow.clientId }; },
+  async authorize(owner, scopes, kind, options = {}) { const flow = await begin(owner, scopes, kind, options.challengeMethod); return { ...(flow.code ? { code: flow.code } : {}), ...(flow.rejection ? { rejection: { ...(flow.rejection.status !== undefined ? { status: flow.rejection.status } : {}), ...(flow.rejection.error ? { error: flow.rejection.error } : {}) } } : {}), verifier: flow.verifier, callback, clientId: flow.clientId }; },
   exchangeCode(fields) { return postToken(fields); },
   async requestRefresh(token, kind) { return postToken({ grant_type: 'refresh_token', client_id: (await control(kind)).client, refresh_token: token }); },
   async revoke(current) { const response = await localRequest(fixture.target, new URL(state.stack.bindings.cognito_auth_base_url!.replace(/\/$/, '') + '/oauth2/revoke'), { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: current.refreshToken, client_id: current.claims.client_id }).toString() }); if (response.status !== 200) throw new Error('TOKEN_REVOKE_FAILED'); },
@@ -97,6 +103,16 @@ export async function createCaseAuth(fixture: SuiteFixture, caseId: string): Pro
   await createUser(primaryPool, 'a'); await createUser(primaryPool, 'b'); auth.cases.set(caseId, result); return result;
 }
 function session(bytes: Buffer, fallbackRefresh?: string): AuthSession { const raw = JSON.parse(bytes.toString()) as { access_token: string; id_token?: string; refresh_token?: string }; const refreshToken = raw.refresh_token ?? fallbackRefresh; if (!raw.access_token || !refreshToken) throw new Error('TOKEN_EXCHANGE_FAILED'); const claims = JSON.parse(Buffer.from(raw.access_token.split('.')[1] ?? '', 'base64url').toString()) as AuthSession['claims']; return { accessToken: raw.access_token, refreshToken, claims, ...(raw.id_token ? { idToken: raw.id_token } : {}) }; }
+type Rejection = { kind: 'rejected'; status?: number; error?: string };
+/** Classifies one authorize response from observed status/Location only; anything unrecognised is 'unexpected', never a rejection. */
+export function classifyAuthorize(response: { status: number; location?: string }, callback: string): Rejection | { kind: 'login' } | { kind: 'unexpected' } {
+  if (response.status === 200) return { kind: 'login' };
+  if (response.status >= 400 && response.status < 500) return { kind: 'rejected', status: response.status };
+  if (response.status !== 302 || !response.location) return { kind: 'unexpected' };
+  let target: URL; try { target = new URL(response.location, callback); } catch { return { kind: 'unexpected' }; }
+  if (target.origin + target.pathname !== callback) return { kind: 'login' };
+  const error = target.searchParams.get('error'); return error && /^[a-z_]{1,40}$/.test(error) && !target.searchParams.has('code') ? { kind: 'rejected', error } : { kind: 'unexpected' };
+}
 /** Verifies an RS256 JWT signature against a JWKS; throws a fixed code and never echoes token content. */
 export function verifySignature(token: string, jwks: JsonWebKey[]): Record<string, unknown> {
   const [header, payload, signature] = token.split('.'); if (!header || !payload || !signature || token.split('.').length !== 3) throw new Error('JWT_REJECTED');
