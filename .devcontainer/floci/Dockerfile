@@ -35,7 +35,7 @@ RUN --mount=type=cache,target=/root/.m2 mvn -B -DskipTests -Dnative package \
 
 FROM registry.access.redhat.com/ubi9-micro:9.8
 
-ENV FLOCI_VERSION=2.2.0-local-refresh.2-native \
+ENV FLOCI_VERSION=2.2.0-local-refresh.3-native \
     FLOCI_STORAGE_PERSISTENT_PATH=/app/data
 
 # Floci公式nativeイメージと同じ起動・権限切替方式を使う。

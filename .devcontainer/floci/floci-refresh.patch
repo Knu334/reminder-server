@@ -790,10 +790,25 @@ index 0000000..6fb06db
 +    }
 +}
 diff --git a/src/main/java/io/github/hectorvent/floci/services/lambda/LambdaService.java b/src/main/java/io/github/hectorvent/floci/services/lambda/LambdaService.java
-index 97fd19f..918fb6f 100644
+index 97fd19f..e04fb9a 100644
 --- a/src/main/java/io/github/hectorvent/floci/services/lambda/LambdaService.java
 +++ b/src/main/java/io/github/hectorvent/floci/services/lambda/LambdaService.java
-@@ -3556,10 +3556,15 @@ public class LambdaService implements ResourceProvider {
+@@ -2865,7 +2865,13 @@ public class LambdaService implements ResourceProvider {
+ 
+     public List<LambdaFunction> listVersionsByFunction(String region, String functionName) {
+         LambdaFunction fn = getFunction(region, functionName); // verify function exists
+-        return functionStore.listVersions(region, fn.getFunctionName());
++        // The store scans a hash map, so its order is arbitrary. AWS lists $LATEST first and then the
++        // published versions in ascending numeric order, and clients such as the Terraform AWS provider
++        // read the last entry as the newest version.
++        List<LambdaFunction> versions = new ArrayList<>(functionStore.listVersions(region, fn.getFunctionName()));
++        versions.sort(java.util.Comparator.comparingLong(v ->
++                v.getVersion() == null || "$LATEST".equals(v.getVersion()) ? -1L : Long.parseLong(v.getVersion())));
++        return versions;
+     }
+ 
+     /**
+@@ -3556,10 +3562,15 @@ public class LambdaService implements ResourceProvider {
              }
              statement.put("Action", action);
              statement.put("Resource", resourceArn);
@@ -1477,7 +1492,7 @@ index 0000000..0d70854
 +    }
 +}
 diff --git a/src/test/java/io/github/hectorvent/floci/services/lambda/LambdaServiceTest.java b/src/test/java/io/github/hectorvent/floci/services/lambda/LambdaServiceTest.java
-index 21b1bb5..da41ece 100644
+index 21b1bb5..9f18174 100644
 --- a/src/test/java/io/github/hectorvent/floci/services/lambda/LambdaServiceTest.java
 +++ b/src/test/java/io/github/hectorvent/floci/services/lambda/LambdaServiceTest.java
 @@ -1341,6 +1341,48 @@ class LambdaServiceTest {
@@ -1529,3 +1544,34 @@ index 21b1bb5..da41ece 100644
      @Test
      void publishVersionWaitsForAConcurrentHolderOfTheFunctionsConcurrencyLock() throws Exception {
          // publishVersion reads codeLocalPath and persists a snapshot of it with no
+@@ -2052,6 +2094,30 @@ class LambdaServiceTest {
+         )));
+     }
+ 
++    /**
++     * The store scans a ConcurrentHashMap, so ListVersionsByFunction returned versions in hash order.
++     * For this name the scan puts {@code $LATEST} last and "10" before "9", which made the Terraform
++     * AWS provider (it reads the last entry as the newest version) report {@code $LATEST}. AWS lists
++     * {@code $LATEST} first, then the published versions in ascending numeric order.
++     */
++    @Test
++    void listVersionsByFunctionReturnsLatestFirstThenNumericAscending() {
++        String name = "list-versions-order-fn-2";
++        service.createFunction(REGION, baseRequest(name));
++        List<String> expected = new ArrayList<>(List.of("$LATEST"));
++        for (int i = 1; i <= 10; i++) {
++            // A distinct description per publish keeps unchanged-publish dedup from reusing a version.
++            service.publishVersion(REGION, name, "version " + i);
++            expected.add(String.valueOf(i));
++        }
++
++        List<String> actual = service.listVersionsByFunction(REGION, name).stream()
++                .map(LambdaFunction::getVersion)
++                .toList();
++
++        assertEquals(expected, actual);
++    }
++
+     @Test
+     void functionExists_resolvesQualifiersAndRegions() {
+         service.createFunction(REGION, baseRequest("exists-fn"));
