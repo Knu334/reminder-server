@@ -562,3 +562,62 @@ void test('resource ID ownership rules reject unknown kinds, foreign accounts, c
   ]) assert.throws(() => driver.assertOwnedIdentity(resource, owner), /FOREIGN_STATE_REJECTED/);
   driver.assertOwnedIdentity({ type: 'aws_apigatewayv2_stage', identity: '$default', parent: 'abcdefghij' }, owner);
 });
+
+const restoredOwner = { prefix: 'e2e-0a1b2c3d', account: '123456789012', region: 'ap-northeast-1' };
+async function restoredHelpers() {
+  const driver = await import('../../../scripts/e2e/terraform.ts'); const tables = await import('../../e2e/floci/support/restored-tables.ts');
+  const target = tables.restoredTargetFor(tables.restoredTableNames(restoredOwner.prefix, 'r1'), restoredOwner);
+  return { driver, target };
+}
+const arnOfTable = (name: string): string => `arn:aws:dynamodb:${restoredOwner.region}:${restoredOwner.account}:table/${name}`;
+const originalNames = { reminders: `${restoredOwner.prefix}-production-reminders`, owner_state: `${restoredOwner.prefix}-production-owner-state`, image_jobs: `${restoredOwner.prefix}-production-image-jobs` };
+function rootState(root: 'bootstrap' | 'platform' | 'application', names: Record<string, string>, map: Record<string, string>) {
+  const policy = JSON.stringify({ Resource: Object.values(names).map(arnOfTable) });
+  const function_ = (): { mode: string; type: string; name: string; instances: { attributes: Record<string, unknown> }[] } => ({ mode: 'managed', type: 'aws_lambda_function', name: 'fn', instances: [{ attributes: { environment: [{ variables: { REMINDERS_TABLE: names.reminders, OWNER_STATE_TABLE: names.owner_state, IMAGE_JOBS_TABLE: names.image_jobs } }] } }] });
+  if (root === 'bootstrap') return { resources: [{ mode: 'managed', type: 'aws_iam_policy', name: 'ceiling', instances: [{ attributes: { policy } }] }] };
+  if (root === 'platform') return { resources: [{ mode: 'managed', type: 'aws_iam_role_policy', name: 'api', instances: [{ attributes: { policy } }] }, ...(Object.keys(map).length ? Object.values(map).map(name => ({ mode: 'data', type: 'aws_dynamodb_table', name: 'restored', instances: [{ attributes: { name, arn: arnOfTable(name) } }] })) : [])],
+    outputs: { reminders_table: { value: names.reminders }, reminders_table_arn: { value: arnOfTable(names.reminders!) }, owner_state_table: { value: names.owner_state }, owner_state_table_arn: { value: arnOfTable(names.owner_state!) }, image_jobs_table: { value: names.image_jobs }, image_jobs_table_arn: { value: arnOfTable(names.image_jobs!) }, restored_tables: { value: map } } };
+  return { resources: [function_(), function_()], outputs: { runtime_data: { value: { restored_tables: map, reminders_table: names.reminders, owner_state_table: names.owner_state, image_jobs_table: names.image_jobs } } } };
+}
+
+void test('the restored_tables controller turns inconsistent before the first root and reaches restored or original only after a complete read back', async () => {
+  const { driver, target } = await restoredHelpers(); const seen: unknown[] = [];
+  const controller = driver.createRestoreController({ context: restoredOwner, async applyRoots(map) { seen.push([controller.state(), map]); } });
+  assert.equal(controller.state(), 'original');
+  await controller.set(target); assert.equal(controller.state(), 'restored'); assert.deepEqual(seen.at(-1), ['inconsistent', target.tableNames]);
+  await controller.set(null); assert.equal(controller.state(), 'original'); assert.deepEqual(seen.at(-1), ['inconsistent', {}]);
+});
+
+void test('a failed switch or return keeps the state inconsistent, blocks a second switch and allows only a retried return to {}', async () => {
+  const { driver, target } = await restoredHelpers(); let fail = true; const maps: Record<string, string>[] = [];
+  const controller = driver.createRestoreController({ context: restoredOwner, async applyRoots(map) { maps.push(map); if (fail) throw new Error('ROOT_MISMATCH'); } });
+  await assert.rejects(controller.set(target), /ROOT_MISMATCH/); assert.equal(controller.state(), 'inconsistent');
+  await assert.rejects(controller.set(target), /RESTORED_TABLES_REJECTED/); assert.equal(maps.length, 1, 'a second switch does not reach any root');
+  await assert.rejects(controller.set(null), /ROOT_MISMATCH/); assert.equal(controller.state(), 'inconsistent');
+  fail = false; await controller.set(null); assert.equal(controller.state(), 'original'); assert.deepEqual(maps.at(-1), {});
+  await controller.set(target); await assert.rejects(controller.set(target), /RESTORED_TABLES_REJECTED/); assert.equal(controller.state(), 'restored');
+});
+
+void test('a foreign or malformed restored target is refused before any root is applied, and applies do not overlap', async () => {
+  const { driver, target } = await restoredHelpers(); let applied = 0; let release: () => void = () => undefined;
+  const controller = driver.createRestoreController({ context: restoredOwner, async applyRoots() { applied++; await new Promise<void>(resolve => { release = resolve; }); } });
+  await assert.rejects(controller.set({ ...target, tableArns: { ...target.tableArns, reminders: target.tableArns.reminders!.replace('123456789012', '999999999999') } }), /RESTORED_TARGET_REJECTED/);
+  assert.equal(applied, 0); assert.equal(controller.state(), 'original');
+  const first = controller.set(target); await new Promise(resolve => setImmediate(resolve)); await assert.rejects(controller.set(null), /RESTORED_TABLES_REJECTED/); release(); await first; assert.equal(applied, 1); assert.equal(controller.state(), 'restored');
+});
+
+void test('root read back accepts the consistent restored set and the original set, and rejects any root that disagrees', async () => {
+  const { driver, target } = await restoredHelpers(); const map = target.tableNames;
+  for (const root of ['bootstrap', 'platform', 'application'] as const) {
+    assert.doesNotThrow(() => driver.assertRestoredState(root, rootState(root, map, map), map, restoredOwner), `${root} restored`);
+    assert.doesNotThrow(() => driver.assertRestoredState(root, rootState(root, originalNames, {}), {}, restoredOwner), `${root} original`);
+    assert.throws(() => driver.assertRestoredState(root, rootState(root, originalNames, {}), map, restoredOwner), /RESTORED_TABLES_REJECTED/, `${root} still original after a switch`);
+    assert.throws(() => driver.assertRestoredState(root, rootState(root, map, map), {}, restoredOwner), /RESTORED_TABLES_REJECTED/, `${root} still restored after the return`);
+  }
+  const mixed = { ...map, image_jobs: originalNames.image_jobs };
+  for (const root of ['bootstrap', 'platform', 'application'] as const) assert.throws(() => driver.assertRestoredState(root, rootState(root, mixed, map), map, restoredOwner), /RESTORED_TABLES_REJECTED/, `${root} partially switched`);
+  const noData = rootState('platform', map, map); noData.resources = noData.resources!.filter(resource => resource.mode !== 'data');
+  assert.throws(() => driver.assertRestoredState('platform', noData, map, restoredOwner), /RESTORED_TABLES_REJECTED/, 'the platform data source must have validated the three tables');
+  const wrongEnv = rootState('application', map, map); ((wrongEnv.resources![1]!.instances[0]!.attributes as Record<string, unknown>).environment as { variables: Record<string, string> }[])[0]!.variables.OWNER_STATE_TABLE = originalNames.owner_state;
+  assert.throws(() => driver.assertRestoredState('application', wrongEnv, map, restoredOwner), /RESTORED_TABLES_REJECTED/, 'both functions must carry the selection');
+});

@@ -5,7 +5,9 @@ import { join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import type { HttpHandlerOptions } from '@smithy/types';
 import { S3Client, ListObjectVersionsCommand, DeleteObjectsCommand, DeleteBucketPolicyCommand, HeadBucketCommand } from '@aws-sdk/client-s3';
-import type { ArtifactSnapshot, CleanupSummary, Evidence, FixtureOptions, LocalTarget, PreparedTerraformRoots, ProvisionedStack, RequiredReadApi } from '../../tests/e2e/floci/support/types.ts';
+import { isDeepStrictEqual } from 'node:util';
+import type { ArtifactSnapshot, CleanupSummary, Evidence, FixtureOptions, LocalTarget, PreparedTerraformRoots, ProvisionedStack, RequiredReadApi, RestoredState, RestoredTarget } from '../../tests/e2e/floci/support/types.ts';
+import { assertRestoredTarget, TABLE_KEYS, type RestoredContext } from '../../tests/e2e/floci/support/restored-tables.ts';
 import { localRequest } from '../../tests/e2e/floci/support/transport.ts';
 import { evidenceContext, markResource, reserveResource, recordProcess, bindResourceIdentities, measureRequiredApiUnsupported, MeasuredRequiredApiUnsupported } from '../../tests/e2e/floci/support/evidence.ts';
 import { registerArtifact, verifyArtifactSnapshot } from '../../tests/e2e/floci/support/artifact.ts';
@@ -55,6 +57,53 @@ export function localS3(target: LocalTarget): S3Client {
 }
 type Resource = { mode: string; type: string; name: string; instances: { attributes: Record<string, unknown> }[] };
 type OwnedState = { resources?: Resource[]; outputs?: Record<string, { value: unknown }> };
+const restoredRejected = (): Error => new Error('RESTORED_TABLES_REJECTED');
+/**
+ * The restored_tables switch as a small state machine. The state turns inconsistent BEFORE the first root is touched and only a complete
+ * switch (or a complete return to {}) read back on all three roots moves it to restored (or original). While it is not original no API
+ * input may be sent; a second switch is refused until the roots are back at {}; a failed return stays inconsistent and can be retried.
+ */
+export function createRestoreController(options: { context: RestoredContext; applyRoots(map: Record<string, string>): Promise<void> }): { set(target: RestoredTarget | null): Promise<void>; state(): RestoredState } {
+  let state: RestoredState = 'original'; let busy = false;
+  return {
+    state: () => state,
+    async set(target) {
+      if (busy) throw restoredRejected();
+      if (target !== null) { assertRestoredTarget(target, options.context); if (state !== 'original') throw restoredRejected(); }
+      busy = true; state = 'inconsistent';
+      try { await options.applyRoots(target === null ? {} : { ...target.tableNames }); state = target === null ? 'original' : 'restored'; }
+      finally { busy = false; }
+    },
+  };
+}
+/** Read-back of one root's state against the expected map: the roles' table selection must be the restored set, or the originals with no trace of any restored name. */
+export function assertRestoredState(root: RootName, state: OwnedState, map: Record<string, string>, owner: RestoredContext): void {
+  const original: Record<string, string> = { reminders: `${owner.prefix}-production-reminders`, owner_state: `${owner.prefix}-production-owner-state`, image_jobs: `${owner.prefix}-production-image-jobs` };
+  const switched = Object.keys(map).length > 0; const names = switched ? map : original;
+  const arn = (name: string): string => `arn:aws:dynamodb:${owner.region}:${owner.account}:table/${name}`;
+  const check = (condition: boolean): void => { if (!condition) throw restoredRejected(); };
+  const attributes = (mode: string, type: string) => (state.resources ?? []).filter(resource => resource.mode === mode && resource.type === type).flatMap(resource => resource.instances.map(instance => instance.attributes));
+  if (root !== 'application') {
+    const policies = [...attributes('managed', 'aws_iam_policy'), ...attributes('managed', 'aws_iam_role_policy')].map(item => typeof item.policy === 'string' ? item.policy : '').join('\n');
+    check(policies.length > 0);
+    for (const key of TABLE_KEYS) check(policies.includes(arn(names[key]!)));
+    if (!switched) check(!policies.includes(`table/${owner.prefix}-rst`));
+  }
+  if (root === 'platform') {
+    const outputs = state.outputs ?? {};
+    for (const key of TABLE_KEYS) check(outputs[`${key}_table`]?.value === names[key] && outputs[`${key}_table_arn`]?.value === arn(names[key]!));
+    check(isDeepStrictEqual(outputs.restored_tables?.value, map));
+    const described = attributes('data', 'aws_dynamodb_table');
+    check(switched ? described.length === 3 && TABLE_KEYS.every(key => described.some(item => item.name === names[key] && item.arn === arn(names[key]!))) : described.length === 0);
+  }
+  if (root === 'application') {
+    const data = state.outputs?.runtime_data?.value as { restored_tables?: unknown; reminders_table?: unknown; owner_state_table?: unknown; image_jobs_table?: unknown } | undefined;
+    check(!!data && isDeepStrictEqual(data.restored_tables, map) && data.reminders_table === names.reminders && data.owner_state_table === names.owner_state && data.image_jobs_table === names.image_jobs);
+    const functions = attributes('managed', 'aws_lambda_function'); check(functions.length === 2);
+    for (const fn of functions) { const environment = (fn.environment as { variables?: Record<string, string> }[] | undefined)?.[0]?.variables; check(environment?.REMINDERS_TABLE === names.reminders && environment?.OWNER_STATE_TABLE === names.owner_state && environment?.IMAGE_JOBS_TABLE === names.image_jobs); }
+  }
+}
+export async function setRestoredTables(stack: ProvisionedStack, target: RestoredTarget | null): Promise<void> { await stack.setRestoredTables(target); }
 export type OwnedResource = { type: string; identity: string; parent?: string; address?: string };
 export function assertOwnedIdentity(resource: OwnedResource, owner: { prefix: string; account: string }): void {
   const { type, identity, parent } = resource; const { prefix, account } = owner;
@@ -248,7 +297,18 @@ export async function provisionStack(target: LocalTarget, options: FixtureOption
     const result = state.outputs?.[name]?.value;
     if (typeof result !== 'string' || result.length > 2048) throw new Error('OUTPUT_REJECTED'); return result;
   }
+  const restoreContext: RestoredContext = { prefix, account, region: target.region };
+  const restore = createRestoreController({ context: restoreContext, async applyRoots(map) {
+    if (disposed || !roots || stack.constructionOutputs.length === 0) throw restoredRejected();
+    for (const root of ['bootstrap', 'platform', 'application'] as RootName[]) inputs[root]!.restored_tables = map;
+    // Bootstrap must select the identical set first, then platform validates the tables, then application receives the platform's selection.
+    await apply('bootstrap'); assertRestoredState('bootstrap', await ownedState('bootstrap'), map, restoreContext);
+    await apply('platform'); const platformNow = await ownedState('platform'); assertRestoredState('platform', platformNow, map, restoreContext);
+    for (const name of ['reminders_table', 'owner_state_table', 'image_jobs_table']) inputs.application![name] = value(platformNow, name);
+    await apply('application'); assertRestoredState('application', await ownedState('application'), map, restoreContext);
+  } });
   const stack: ProvisionedStack = { target, artifact, manifest: context.manifest, bindings, stateDirectory, constructionOutputs: [],
+    setRestoredTables: target => restore.set(target), restoredTablesState: () => restore.state(),
     setQuiescenceGuard(check: () => Promise<void>) { if (disposed || quiescence) throw new Error('QUIESCENCE_REJECTED'); quiescence = check; },
     async destroy(): Promise<CleanupSummary> {
       if (disposed || !evidenceContext(evidence).finalized) throw new Error('CLEANUP_REJECTED');

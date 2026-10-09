@@ -289,6 +289,41 @@ export const cleanupDefinitions: CaseDefinition[] = [
 definitions.push(...cleanupDefinitions);
 
 /**
+ * Synthetic migration, recovery and uncertain-outcome cases (OPS-01..04, STORE-07, IMG-08, API-01 dependency). The L cases run the real
+ * migrateJson/verifyRecovery entry points through explicit local runtimes over owned synthetic data; every case owns its tables, owners and
+ * inputs (no dependency groups) and starts from empty owned storage. Recovery uses three owned SDK tables with the production schema; the
+ * Terraform switch of restored_tables and its return to {} is its own case. STORE-07, IMG-08 and the API-01 probe fault are I cases whose
+ * evidence is the same-named tests in tests/integration/formal-e2e/faults.test.ts and are never an E action.
+ */
+function opsCase(id: string, layer: Layer, http: string[], ddb: string[], s3: string[], logs: string[], s3Na = 'no-image-effect', logsNa = 'cli-only-no-api-result'): CaseDefinition {
+  return { id, requirementId: id.split('/')[0]!, layer, required: true, acceptance: 'behavior', suite: 'operations', source: `formal-e2e-coverage/${id.split('/')[0]!}`, outputs: [
+    { kind: 'http', assertions: http }, { kind: 'dynamodb', assertions: ddb },
+    s3.length ? { kind: 's3', assertions: s3 } : { kind: 's3', assertions: [], notApplicableReason: s3Na },
+    logs.length ? { kind: 'logs', assertions: logs } : { kind: 'logs', assertions: [], notApplicableReason: logsNa },
+  ] };
+}
+function opsInteg(id: string, assertions: string[]): CaseDefinition {
+  const na = (reason: string) => ({ assertions: [] as string[], notApplicableReason: reason });
+  return { id, requirementId: id.split('/')[0]!, layer: 'I', required: true, acceptance: 'behavior', suite: 'operations', source: `formal-e2e-coverage/${id.split('/')[0]!}`, outputs: [
+    { kind: 'http', ...na('real-adapters-over-injected-wire-fake-no-gateway') }, { kind: 'dynamodb', assertions }, { kind: 's3', ...na('injected-wire-fake-no-real-service-stop') }, { kind: 'logs', ...na('handler-boundary-no-delivery') },
+  ] };
+}
+export const operationDefinitions: CaseDefinition[] = [
+  opsCase('OPS-01/two-owners-import-verify-publish', 'L', ['dry-run-valid-without-aws-exit0', 'unpublished-ready-503', 'published-ready-200-and-owner-reads-match'], ['items-fields-counters-exact-empty-owner-zero-row', 'checkpoint-and-gate-bound-to-run'], ['pinned-original-bytes-exact-and-source-hash-unchanged'], ['ready-503-result-delivered', 'ready-200-result-delivered', 'list-result-delivered']),
+  opsCase('OPS-02/interrupted-import-resumes-without-duplicates', 'L', ['before-commit-fault-exit2-unpublished-ready-503', 'after-commit-fault-exit2-unpublished-ready-503', 'exact-rerun-completes-publishes-ready-200'], ['resume-adds-no-item-version-or-counter', 'published-rerun-rejected-state-unchanged'], ['one-version-per-image-pinned-bytes-exact'], ['ready-503-result-delivered', 'ready-200-result-delivered']),
+  opsCase('OPS-02/changed-inputs-rejected-state-unchanged', 'L', ['changed-source-mapping-and-limits-exit2-ready-503'], ['rejected-runs-leave-all-tables-unchanged', 'exact-rerun-resumes-after-rejections'], ['rejected-runs-add-no-object-version'], ['ready-503-result-delivered']),
+  opsCase('OPS-02/corrupt-image-and-checksum-mismatch-never-publish', 'L', ['corrupt-image-dry-run-and-import-exit2', 'tampered-job-verify-exit2-publish-refused-ready-503', 'restored-row-verifies-and-publishes-ready-200'], ['corrupt-source-writes-nothing', 'tampered-checksum-keeps-gate-false'], ['rejected-source-stores-no-object'], ['ready-503-result-delivered', 'ready-200-result-delivered']),
+  opsCase('OPS-03/restored-prepare-verify-preserve-rerun', 'L', ['api-input-stopped-source-unpublished-ready-503', 'verify-reports-only-noncurrent-image', 'preserve-and-rerun-ready-to-switch-exit0'], ['source-tables-unchanged', 'restored-created-revision-counters-unchanged-gate-false', 'default-verify-leaves-restored-unchanged'], ['source-owned-versions-unchanged', 'new-unique-current-key-holds-original-bytes'], ['ready-503-result-delivered']),
+  opsCase('OPS-03/restored-tables-switch-and-return', 'L', ['restored-descriptors-match-production-schema', 'switch-reads-back-restored-then-return-reads-back-empty', 'api-resumed-ready-200-after-return'], ['bad-restored-descriptors-rejected-before-switch', 'bootstrap-platform-application-readback-consistent'], [], ['api-resumed-ready-result-delivered'], 'tables-only-no-image-effect'),
+  opsCase('OPS-04/no-automatic-mapping-explicit-remap', 'L', ['recreated-sub-verify-not-ready-exit2', 'explicit-map-remap-exit0', 'rerun-remap-idempotent'], ['old-owner-moved-only-by-explicit-map', 'counters-follow-owner', 'cognito-credentials-restored-false'], ['moved-images-keep-original-bytes'], []),
+  opsCase('OPS-04/collision-and-bad-counter-never-ready', 'L', ['collision-and-bad-counter-exit2-not-ready'], ['target-collision-rejected-nothing-moved', 'bad-counter-ready-to-switch-false'], [], []),
+  opsInteg('STORE-07/transaction-uncertain-outcomes-i', ['store_07_commit_response_lost_is_confirmed_by_strong_read_without_a_second_send_or_double_count', 'store_07_commit_before_send_resends_the_same_command_and_commits_exactly_once', 'store_07_reconciliation_read_failure_is_503_while_the_committed_item_image_and_counter_stay_protected', 'store_07_rate_failure_before_and_after_the_send_is_503_and_never_retried_into_a_second_increment']),
+  opsInteg('IMG-08/real-adapter-fault-positions-i', ['img_08_put_before_send_is_503_with_one_tracked_pending_job_and_no_object', 'img_08_put_response_lost_leaves_one_unrecorded_pending_key_and_never_puts_that_key_again', 'img_08_upload_record_failure_leaves_the_object_under_a_pending_job_and_commits_nothing', 'img_08_commit_failure_never_exposes_or_deletes_the_image_and_keeps_the_pending_job_for_cleanup']),
+  opsInteg('API-01/ready-dependency-failure-keeps-health200-i', ['api_01_ready_dependency_probe_fault_is_503_with_the_logged_code_while_health_stays_200_without_dependency_calls']),
+];
+definitions.push(...operationDefinitions);
+
+/**
  * Cases whose result the runner records itself because it may be `unsupported` (compatibility acceptance): the probe returns the
  * measured outcome and the runner maps it. The matching caseActions entry only makes the case selectable; it is never run through runCase.
  */

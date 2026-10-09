@@ -61,11 +61,18 @@ export type PreparedTerraformRoots = {
   validationDiffs: { location: string; kind: 'owned-url-validation' }[];
   generatedChanges: { category: 'connection' | 'isolation' | 'cleanup'; destinations: string[] }[];
 };
+/** Three owned SDK tables standing in for a PITR restore; names and ARNs keyed reminders/owner_state/image_jobs. */
+export type RestoredTarget = { tableNames: Record<string, string>; tableArns: Record<string, string> };
+export type RestoredState = 'original' | 'restored' | 'inconsistent';
 export type ProvisionedStack = {
   target: LocalTarget; artifact: ArtifactSnapshot; manifest: OwnedManifest;
   bindings: Readonly<Record<string, string>>; stateDirectory: string;
   /** Register before invoking Lambda/enabling Scheduler; verifies tracked work has ended. */
   setQuiescenceGuard(check: () => Promise<void>): void;
+  /** Applies the same consistent restored_tables map to all three roots (bootstrap, platform, application) and reads it back; null returns every root to {}. Only while the API input is stopped. */
+  setRestoredTables(target: RestoredTarget | null): Promise<void>;
+  /** original: all roots read back with {}; restored: all roots read back with the map; inconsistent: a switch or return did not complete, so no API input may follow. */
+  restoredTablesState(): RestoredState;
   constructionOutputs: OutputResult[];
   destroy(): Promise<CleanupSummary>;
 };

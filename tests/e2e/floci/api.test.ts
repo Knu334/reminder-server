@@ -52,7 +52,7 @@ void test('every API requirement has E cases with four output expectations and a
     assert.equal(caseActions.has(def.id), true, `${def.id} action`);
   }
   assert.ok(api.every(def => def.outputs.find(output => output.kind === 's3')!.assertions.length > 0), 'S3 no-additional-image-version is asserted for every API case');
-  for (const guarded of caseGuards.keys()) assert.equal(api.some(def => def.id === guarded), true, guarded);
+  for (const guarded of caseGuards.keys()) assert.equal(api.some(def => def.id === guarded) || definitions.some(def => def.id === guarded && def.suite === 'operations'), true, guarded); // operations cases are blocked by the restored_tables state, not by API cases
 });
 
 // ---- Real runner path against the real API handler (in-process Gateway stand-in, no network, no Floci) ----
