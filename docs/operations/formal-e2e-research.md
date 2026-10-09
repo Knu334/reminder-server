@@ -11,6 +11,7 @@
 | root / app | feature/aws-modernization / linked feature/aws-sdd-implementation、app HEAD c13272424a3bcb65b6a4613682889be02335c978 | reset/checkout不要 |
 | user changes | root FW/Floci README、app event/API/boundaries修正、過去untracked docs | 全て保持、今回のコミット対象にしない |
 | Floci health | GET http://floci:4566/_floci/health、HTTP200、2.2.0-local-refresh.1-native | service表示runningは必要APIの動作保証ではない |
+| Floci health（2026-10-09追補） | approved rebuild後、GET http://floci:4566/_floci/health、HTTP200、2.2.0-local-refresh.2-native | 上の2026-10-08時点の観測（refresh.1）は履歴として保持。Lambda AddPermissionのSourceAccount保持修正（root commit 7a9b60f）を含む |
 | tools | PATH prefixでNode24.21.0 / Python3.13.16 | product testは今回未実行 |
 | npm | 準備PATHの11.19.0→/tmp/aws-sdd-toolsへnpm11.11.1復元→11.11.1確認 | 不足tool準備のみ。app依存/lockを変更しない |
 | Floci設定位置 | root docker-compose.ymlには旧reminder-server記述、Flociはroot .devcontainer/docker-compose.yml | 手順で後者を参照。どちらも編集しない |
