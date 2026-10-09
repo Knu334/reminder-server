@@ -259,3 +259,18 @@ void test('the real runner path starts the first OPS case on a suite created pub
   const failure = await action(fixture, recorder).then(() => undefined, (error: unknown) => error as Error);
   assert.notEqual(failure?.message, 'OPERATION_NOT_QUIESCENT'); assert.ok(order.indexOf('publication:false') >= 0 && order.indexOf('publication:false') < order.indexOf('schedule') + 1, 'publication was stopped');
 });
+
+void test('restoredTablesAccepted is false only for a non-conforming restored set and rethrows any other failure', async t => {
+  const { restoredTablesAccepted } = await import('./support/restored-tables.ts');
+  const evidence = await evidenceIn(t); const memory = memoryDynamo(); const local = { ...ctx, prefix: `e2e-${evidence.runId.slice(4, 12)}` };
+  const created = await createRestoredTables(memory.client, evidence, local, 'a1');
+  assert.equal(await restoredTablesAccepted(memory.client, created, local), true);
+  memory.tables.get(created.tableNames.owner_state!)!.protection = false;
+  assert.equal(await restoredTablesAccepted(memory.client, created, local), false, 'a deviation is a refusal, not an escaping error');
+  memory.tables.get(created.tableNames.owner_state!)!.protection = true;
+  assert.equal(await restoredTablesAccepted(memory.client, created, local), true);
+  memory.tables.get(created.tableNames.reminders!)!.pitr = false;
+  assert.equal(await restoredTablesAccepted(memory.client, created, local), false);
+  memory.tables.delete(created.tableNames.image_jobs!);
+  await assert.rejects(restoredTablesAccepted(memory.client, created, local), (error: Error) => error.name === 'ResourceNotFoundException', 'a describe API failure is not a rejection');
+});

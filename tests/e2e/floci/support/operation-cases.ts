@@ -15,7 +15,7 @@ import type { Probe } from './api-cases.ts';
 import { exactObject, inspect, isCommitted, versionsOf } from './image-cases.ts';
 import { fixtureState, readDeployedSettings } from './fixture.ts';
 import { resetStorage } from './storage.ts';
-import { TABLE_KEYS, assertRestoredTables, createRestoredTables, describeRestoredTables, removeRestoredTables, restoredTableNames, restoredTargetFor, type RestoredContext } from './restored-tables.ts';
+import { TABLE_KEYS, createRestoredTables, removeRestoredTables, restoredTableNames, restoredTablesAccepted, restoredTargetFor, type RestoredContext } from './restored-tables.ts';
 import { buildOperationInputs, captureIo, localMigrationRuntime, localRecoveryRuntime, migrationFault, operationBlocked, projectCliResult, snapshotTables } from './operation-fixtures.ts';
 import type { CliProjection, MigrationFault, OperationInputs } from './operation-fixtures.ts';
 import { migrationMain } from '../../../../scripts/operations/migrate-json.ts';
@@ -291,7 +291,7 @@ async function selection(c: Ctx, names: Record<string, string>): Promise<boolean
 
 register('OPS-03/restored-tables-switch-and-return', async c => {
   await begin(c, 'sw'); const target = c.restored!; const ctx = context(c.fixture); const stack = fixtureState(c.fixture).stack; const db = c.fixture.clients.dynamodb;
-  const accepted = (): Promise<boolean> => describeRestoredTables(db, target).then(described => { assertRestoredTables(described, target, ctx); return true; }, () => false);
+  const accepted = (): Promise<boolean> => restoredTablesAccepted(db, target, ctx);
   const schemaOk = await accepted();
   c.score.ok('http', 'restored-descriptors-match-production-schema', schemaOk);
   // Real mutations of the owned set: each one-condition deviation must be refused, and the restored condition accepted again.

@@ -91,6 +91,12 @@ export async function describeTable(db: DynamoSender, name: string): Promise<Des
 export async function describeRestoredTables(db: DynamoSender, target: RestoredTarget): Promise<Record<string, DescribedTable>> {
   return Object.fromEntries(await Promise.all(TABLE_KEYS.map(async key => [key, await describeTable(db, target.tableNames[key]!)] as const)));
 }
+/** True when the described set conforms; false ONLY for a restored-table rejection. Any other failure (describe API error, bad target) is rethrown, never counted as a refusal. */
+export async function restoredTablesAccepted(db: DynamoSender, target: RestoredTarget, ctx: RestoredContext): Promise<boolean> {
+  const described = await describeRestoredTables(db, target);
+  try { assertRestoredTables(described, target, ctx); return true; }
+  catch (error) { if (error instanceof Error && error.message === 'RESTORED_TABLE_REJECTED') return false; throw error; }
+}
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 export async function createRestoredTables(db: DynamoSender, evidence: Evidence, ctx: RestoredContext, tag: string, options: { attempts?: number; delayMs?: number } = {}): Promise<RestoredTarget> {
   const target = restoredTargetFor(restoredTableNames(ctx.prefix, tag), ctx); assertRestoredTarget(target, ctx);
