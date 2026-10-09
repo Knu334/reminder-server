@@ -43,11 +43,13 @@ export async function fetchOwnedImage(fixture: SuiteFixture, url: string, ref: I
   const bucket = fixture.config.imagesBucket; let parsed: URL;
   try { parsed = new URL(url); } catch { return REJECT(); }
   if (!KEY.test(ref.key) || ref.versionId.length === 0 || parsed.protocol !== 'http:' || parsed.port !== '4566' || parsed.username || parsed.password || parsed.hash) return REJECT();
-  const pathStyle = parsed.hostname === 'floci' && parsed.pathname === `/${bucket}/${ref.key}`;
+  // Floci issues path-style URLs on its own address; only the pinned address (never another IP) is accepted besides the names.
+  const pinned = fixture.target.addresses.get('floci');
+  const pathStyle = (parsed.hostname === 'floci' || (pinned !== undefined && parsed.hostname === pinned)) && parsed.pathname === `/${bucket}/${ref.key}`;
   const hostStyle = parsed.hostname === `${bucket}.floci` && parsed.pathname === `/${ref.key}`;
   const versions = parsed.searchParams.getAll('versionId'); const signatures = parsed.searchParams.getAll('X-Amz-Signature');
   if (!(pathStyle || hostStyle) || versions.length !== 1 || versions[0] !== ref.versionId || signatures.length !== 1 || !/^[0-9a-f]{64}$/.test(signatures[0]!)) return REJECT();
-  let target; try { target = withOwnedBucketHost(fixture.target, bucket); } catch { return REJECT(); }
+  let target; try { const owned = withOwnedBucketHost(fixture.target, bucket); target = parsed.hostname === pinned ? { ...owned, addresses: new Map([...owned.addresses, [parsed.hostname, pinned!]]) } : owned; } catch { return REJECT(); }
   const result = await localRequest(target, parsed, { method: 'GET' });
   if (result.status >= 300 && result.status < 400) throw new Error('IMAGE_REDIRECT_REJECTED');
   return result;

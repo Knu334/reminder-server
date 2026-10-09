@@ -487,3 +487,21 @@ void test('image_url_signature_helpers_alter_only_the_signature_and_the_probe_se
   for (const status of [404, 500, 301]) { assert.equal(await probeSignatureEnforcement(make(200, status, 200, 403)), 'unexpected', `tamper ${status}`); assert.equal(await probeSignatureEnforcement(make(200, 403, 200, status)), 'unexpected', `expired ${status}`); }
   assert.equal(await probeSignatureEnforcement(make(200, 403, 200, 403, Buffer.from('other'))), 'control-failed');
 });
+
+void test('image_url_fetch_accepts_the_path_style_url_floci_issues_on_its_own_pinned_address_only', async t => {
+  const { fetchOwnedImage } = await import('../../e2e/floci/support/image-fixtures.ts');
+  const seen: { host: string; address: string[] }[] = [];
+  t.mock.method(http, 'request', (url: URL, options: http.RequestOptions, callback: (response: http.IncomingMessage) => void) => {
+    const lookupAddresses: string[] = [];
+    (options.lookup as (host: string, options: { all: boolean }, callback: (error: null, addresses: { address: string; family: number }[]) => void) => void)(url.hostname, { all: true }, (_error, addresses) => lookupAddresses.push(...addresses.map(item => item.address)));
+    seen.push({ host: String((options.headers as Record<string, string>).host), address: lookupAddresses });
+    const response = Readable.from([Buffer.from('original-bytes')]) as http.IncomingMessage; response.statusCode = 200; response.rawHeaders = ['content-type', 'image/png'];
+    process.nextTick(() => callback(response)); return new PassThrough();
+  });
+  const result = await fetchOwnedImage(imageFixture, signed('172.18.0.2', `/owned-images/${imageRef.key}`), imageRef);
+  assert.equal(result.status, 200);
+  assert.deepEqual(seen, [{ host: '172.18.0.2:4566', address: ['172.18.0.2'] }]);
+  for (const host of ['172.18.0.9', '169.254.169.254']) await assert.rejects(fetchOwnedImage(imageFixture, signed(host, `/owned-images/${imageRef.key}`), imageRef), /IMAGE_URL_REJECTED|LOCAL_TARGET_REJECTED/);
+  await assert.rejects(fetchOwnedImage(imageFixture, signed('172.18.0.2', `/other-bucket/${imageRef.key}`), imageRef), /IMAGE_URL_REJECTED/);
+  assert.equal(seen.length, 1);
+});
