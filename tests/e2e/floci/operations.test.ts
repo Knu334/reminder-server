@@ -107,10 +107,10 @@ void test('created restored tables carry the production schema, protection and 3
   assert.equal(memory.tables.size, 3); for (const table of memory.tables.values()) assert.equal(table.protection, true); assert.equal(memory.tables.get(created.tableNames.owner_state!)!.ttl, true);
   const manifest = evidenceContext(evidence).manifest.resources.filter(resource => resource.kind === 'sdk-table'); assert.equal(manifest.length, 3); assert.ok(manifest.every(resource => resource.created && !resource.removed));
   assert.ok(memory.log.findIndex(entry => entry.startsWith('CreateTableCommand')) >= 0);
-  await removeRestoredTables(memory.client, created); assert.equal(memory.tables.size, 0);
+  await removeRestoredTables(memory.client, created, evidence); assert.equal(memory.tables.size, 0);
   assert.ok(memory.log.indexOf(`UpdateTableCommand:${created.tableNames.reminders!}`) < memory.log.indexOf(`DeleteTableCommand:${created.tableNames.reminders!}`), 'protection is released only to delete the owned table');
   await finalizeResults(evidence); const swept = await sweepRestoredTables(memory.client, evidence);
-  assert.deepEqual(swept, { attempted: 3, succeeded: 3, errors: 0, leaks: 0 }); assert.ok(evidenceContext(evidence).manifest.resources.filter(resource => resource.kind === 'sdk-table').every(resource => resource.removed));
+  assert.deepEqual(swept, { attempted: 0, succeeded: 0, errors: 0, leaks: 0 }); assert.ok(evidenceContext(evidence).manifest.resources.filter(resource => resource.kind === 'sdk-table').every(resource => resource.removed));
 });
 
 void test('the run-end sweep removes a leaked owned table, counts one that cannot be removed and never touches an unreserved table', async t => {
@@ -228,4 +228,34 @@ void test('a table read by the harness never uses a default credential chain: th
   const source = await readFile(join(__dirname, 'support/operation-fixtures.ts'), 'utf8');
   assert.ok(!/createMigrationDeps|createRecoveryDeps|createAwsClients|fromNodeProviderChain|new (S3|STS|DynamoDB)Client/.test(source));
   void createHash; void GetCommand; void markResource; void reserveResource;
+});
+
+void test('per-case removal marks the owned tables removed so the run-end sweep does not count them a second time', async t => {
+  const evidence = await evidenceIn(t); const memory = memoryDynamo(); const local = { ...ctx, prefix: `e2e-${evidence.runId.slice(4, 12)}` };
+  const first = await createRestoredTables(memory.client, evidence, local, 'c1'); await removeRestoredTables(memory.client, first, evidence);
+  const second = await createRestoredTables(memory.client, evidence, local, 'c2'); await removeRestoredTables(memory.client, second, evidence);
+  const owned = (): { removed: boolean }[] => evidenceContext(evidence).manifest.resources.filter(resource => resource.kind === 'sdk-table');
+  assert.equal(owned().length, 6); assert.ok(owned().every(resource => resource.removed), 'absence was read back per case, so the manifest says removed');
+  await finalizeResults(evidence); assert.deepEqual(await sweepRestoredTables(memory.client, evidence), { attempted: 0, succeeded: 0, errors: 0, leaks: 0 });
+});
+
+void test('the real runner path starts the first OPS case on a suite created published: the input is stopped before the quiescence check', async () => {
+  const rows = new Map<string, Record<string, unknown>>([['GLOBAL#PUBLICATION', { pk: 'GLOBAL', sk: 'PUBLICATION', published: true, runId: 'run' }]]);
+  const gateKey = 'GLOBAL#PUBLICATION'; const order: string[] = [];
+  const dynamodb = { async send(command: unknown) {
+    const input = (command as { input: { Key?: { pk: string; sk: string }; Item?: Record<string, unknown> } }).input; const name = (command as object).constructor.name;
+    if (name === 'GetCommand') return { Item: rows.get(`${input.Key!.pk}#${input.Key!.sk}`) };
+    if (name === 'PutCommand') { rows.set(`${input.Item!.pk}#${input.Item!.sk}`, input.Item!); return {}; }
+    if (name === 'ScanCommand') return { Items: [...rows.values()] };
+    if (name === 'DeleteCommand') { rows.delete(`${input.Key!.pk}#${input.Key!.sk}`); return {}; }
+    throw new Error(`unexpected ${name}`);
+  } };
+  const s3 = { async send() { return { Versions: [], DeleteMarkers: [], IsTruncated: false }; } };
+  const { fixture } = syntheticFixture();
+  (fixture.clients as unknown as Record<string, unknown>).dynamodb = dynamodb; (fixture.clients as unknown as Record<string, unknown>).s3 = s3;
+  fixture.setPublication = async published => { order.push(`publication:${published}`); rows.set(gateKey, { pk: 'GLOBAL', sk: 'PUBLICATION', published, runId: 'run' }); };
+  fixtureStates.set(fixture, { stack: { bindings: { account_id: ctx.account, prefix: ctx.prefix } }, outstanding: 0, cleanupIntervals: [], scheduler: { async send() { order.push('schedule'); return { State: 'DISABLED' }; } }, evidence: undefined } as never);
+  const action = caseActions.get('OPS-01/two-owners-import-verify-publish')!; const recorder = { recordInput() { return undefined; }, recordOutput() { return undefined; }, deferLogs() { return undefined; } };
+  const failure = await action(fixture, recorder).then(() => undefined, (error: unknown) => error as Error);
+  assert.notEqual(failure?.message, 'OPERATION_NOT_QUIESCENT'); assert.ok(order.indexOf('publication:false') >= 0 && order.indexOf('publication:false') < order.indexOf('schedule') + 1, 'publication was stopped');
 });

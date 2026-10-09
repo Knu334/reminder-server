@@ -257,7 +257,7 @@ export async function reserveResource(evidence: Evidence, resource: { kind: stri
 }
 export async function markResource(evidence: Evidence, id: string, status: 'created' | 'removed'): Promise<void> {
   const state = stateOf(evidence); const resource = state.resources.find(item => item.id === id);
-  if (!resource || resource.removed || (status === 'created' && state.finalized) || (status === 'removed' && !state.finalized && !(resource.suite && ['sdk-user', 'sdk-control'].includes(resource.kind) && state.finalizedSuites.has(resource.suite) && state.pending.size === 0 && state.active.size === 0 && resource.identities?.length))) throw new Error('RESOURCE_REJECTED');
+  if (!resource || resource.removed || (status === 'created' && state.finalized) || (status === 'removed' && !state.finalized && resource.kind !== 'sdk-table' && !(resource.suite && ['sdk-user', 'sdk-control'].includes(resource.kind) && state.finalizedSuites.has(resource.suite) && state.pending.size === 0 && state.active.size === 0 && resource.identities?.length))) throw new Error('RESOURCE_REJECTED');
   resource[status] = true; await save(evidence, state);
 }
 export function evidenceContext(evidence: Evidence): { directory: string; finalized: boolean; manifest: OwnedManifest } {

@@ -125,8 +125,13 @@ async function removeOne(db: DynamoSender, name: string): Promise<void> {
   await db.send(new DeleteTableCommand({ TableName: name }));
   if (!await absent(db, name)) throw new Error('RESTORED_TABLE_REMOVAL_FAILED');
 }
-export async function removeRestoredTables(db: DynamoSender, target: RestoredTarget): Promise<void> {
-  for (const key of TABLE_KEYS) await removeOne(db, target.tableNames[key]!);
+export async function removeRestoredTables(db: DynamoSender, target: RestoredTarget, evidence?: Evidence): Promise<void> {
+  for (const key of TABLE_KEYS) {
+    const name = target.tableNames[key]!; await removeOne(db, name);
+    // removeOne has read the absence back; the run-end sweep must not count this table again.
+    const resource = evidence ? evidenceContext(evidence).manifest.resources.find(item => item.kind === 'sdk-table' && item.name === name && !item.removed) : undefined;
+    if (evidence && resource) await markResource(evidence, resource.id, 'removed');
+  }
 }
 /** Run-end recovery: every reserved sdk-table that is not removed is deleted when present and its absence is read back independently. */
 export async function sweepRestoredTables(db: DynamoSender, evidence: Evidence): Promise<CleanupSummary> {

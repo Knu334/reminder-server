@@ -45,12 +45,12 @@ const register = (id: string, run: (c: Ctx) => Promise<void>): void => {
   caseActions.set(id, async (fixture, recorder) => {
     const c: Ctx = { fixture, recorder, caseId: id, score: new Score(), directory: await mkdtemp(join(tmpdir(), 'ops-case-')), restored: undefined };
     let failure: unknown; let failed = false;
-    try { await quiescent(fixture); await resetStorage(fixture); await run(c); } catch (error) { failure = error; failed = true; }
+    try { await fixture.setPublication(false); await quiescent(fixture); await resetStorage(fixture); await run(c); } catch (error) { failure = error; failed = true; }
     // Always: back to the original tables first (only then may the owned SDK tables go), no stray inputs, empty owned storage.
     const closing = async (): Promise<void> => {
       const stack = fixtureState(fixture).stack; let returned = true;
       if (stack.restoredTablesState() !== 'original') { try { await stack.setRestoredTables(null); } catch (error) { returned = false; if (!failed) { failure = error; failed = true; } } }
-      if (c.restored && returned) await removeRestoredTables(fixture.clients.dynamodb, c.restored);
+      if (c.restored && returned) await removeRestoredTables(fixture.clients.dynamodb, c.restored, fixtureState(fixture).evidence);
       await rm(c.directory, { recursive: true, force: true }); await resetStorage(fixture);
     };
     try { await closing(); } catch (error) { if (!failed) { failure = error; failed = true; } }
@@ -175,11 +175,14 @@ register('OPS-02/interrupted-import-resumes-without-duplicates', async c => {
   const closedFirst = await ready(c, 503, 'ready-503-result-delivered'); const afterFirst = (await rows(c.fixture, tables.reminders)).length;
   c.score.ok('http', 'before-commit-fault-exit2-unpublished-ready-503', failedCli(first) && closedFirst && afterFirst === 1 && (await gateOf(c.fixture, tables))?.published === false);
   const second = await migrate(c, 'import', inputs.files, runId, { method: 'putImported', nth: 1, phase: 'after' });
-  const afterSecond = (await rows(c.fixture, tables.reminders)).length;
-  c.score.ok('http', 'after-commit-fault-exit2-unpublished-ready-503', failedCli(second) && await ready(c, 503) && afterSecond === 2 && (await gateOf(c.fixture, tables))?.published === false);
-  const resumed = await migrate(c, 'import', inputs.files, runId); const verified = await migrate(c, 'verify', inputs.files, runId); const publish = await migrate(c, 'publish', inputs.files, runId);
+  // migration.ts:147-150 (docs/operations/migration.md step 6): a lost putImported response is confirmed by a strong re-read of the item and job and the
+  // run continues (progress is saved at :155-156, owners at :158), so the run completes unpublished with exit 0, all 3 rows and no duplicate.
+  const afterSecond = await importedState(c, tables, inputs, runId, 'importing'); const sealed = await strictState(c, inputs, tables);
+  c.score.ok('http', 'after-commit-fault-reconciled-completes-unpublished-ready-503', ok(second, 'import', { completed: true, owners: 2, items: 3 }) && await ready(c, 503) && (await gateOf(c.fixture, tables))?.published === false);
+  c.score.ok('dynamodb', 'reconciled-run-matches-source-and-checkpoint', afterSecond.items && afterSecond.counters && afterSecond.jobs && afterSecond.objects && afterSecond.run && afterSecond.count === 3);
+  const resumed = await migrate(c, 'import', inputs.files, runId); const idempotent = sealed === await strictState(c, inputs, tables); const verified = await migrate(c, 'verify', inputs.files, runId); const publish = await migrate(c, 'publish', inputs.files, runId);
   const open = await ready(c, 200, 'ready-200-result-delivered'); const state = await importedState(c, tables, inputs, runId, 'published');
-  c.score.ok('http', 'exact-rerun-completes-publishes-ready-200', ok(resumed, 'import', { completed: true, owners: 2, items: 3 }) && ok(verified, 'verify', { exactMatch: true, mismatchCount: 0 }) && ok(publish, 'publish', { exactMatch: true }) && open);
+  c.score.ok('http', 'exact-rerun-completes-publishes-ready-200', ok(resumed, 'import', { completed: true, owners: 2, items: 3 }) && idempotent && ok(verified, 'verify', { exactMatch: true, mismatchCount: 0 }) && ok(publish, 'publish', { exactMatch: true }) && open);
   const versions = await owned(c, inputs);
   c.score.ok('dynamodb', 'resume-adds-no-item-version-or-counter', state.items && state.counters && state.jobs && state.count === 3 && state.run);
   c.score.ok('s3', 'one-version-per-image-pinned-bytes-exact', state.objects && versions.versions.length === 2 && versions.markers.length === 0);
