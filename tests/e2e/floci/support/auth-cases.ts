@@ -157,10 +157,10 @@ run('AUTH-11/revoke-disable', async (fixture, recorder, score) => {
   score.ok('http', 'disabled-user-refresh-refused', rejected(await fixture.auth.requestRefresh(issued.refreshToken, 'primary'), ['invalid_grant']));
 });
 
-// Compatibility measurement of the hosted /oauth2/revoke endpoint: any 4xx/5xx is unsupported; a 2xx must really invalidate the refresh token. Only the observed status is kept.
+// Compatibility measurement of the hosted /oauth2/revoke endpoint: only 404/405 (route not served) is unsupported; every other non-2xx is a failure; a 2xx must really invalidate the refresh token. Only the observed status is kept.
 caseMeasurements.set('AUTH-11/hosted-revoke-endpoint', async fixture => {
   const session = await fixture.auth.login('a', [READ], 'primary'); const status = await fixture.auth.hostedRevoke(session);
-  if (status >= 400 && status <= 599) return { outcome: 'unsupported', httpStatus: status };
+  if (status === 404 || status === 405) return { outcome: 'unsupported', httpStatus: status };
   if (status < 200 || status > 299) return { outcome: 'fail', httpStatus: status };
   return { outcome: rejected(await fixture.auth.requestRefresh(session.refreshToken, 'primary'), ['invalid_grant']) ? 'pass' : 'fail', httpStatus: status };
 });

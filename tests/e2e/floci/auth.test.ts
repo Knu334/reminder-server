@@ -103,7 +103,8 @@ void test('hosted revoke measurement: 404 is unsupported with a fixed reason, 2x
   const unsupported = await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(404, { status: 200 }));
   assert.equal(unsupported.status, 'unsupported'); assert.equal(unsupported.reason, 'hosted-revoke-unsupported'); assert.equal(unsupported.httpStatus, 404);
   assert.deepEqual(unsupported.outputs?.find(output => output.kind === 'http')?.assertions, [{ name: 'hosted-revoke-endpoint-measured', status: 'pass' }]);
-  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(501, { status: 200 }))).status, 'unsupported');
+  assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(405, { status: 200 }))).status, 'unsupported');
+  for (const code of [400, 401, 403, 500, 501, 503]) { const failed = await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(code, { status: 200 })); assert.equal(failed.status, 'fail', String(code)); assert.equal(failed.httpStatus, code, 'a failed measurement still records the observed status'); assert.equal(failed.reason, 'action-failed'); }
   const works = await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(200, { status: 400, error: 'invalid_grant' })); assert.equal(works.status, 'pass'); assert.equal(works.httpStatus, 200);
   assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth(200, { status: 200 }))).status, 'fail', 'a 200 that leaves the token usable is a failure');
   assert.equal((await savedAuth11('AUTH-11/hosted-revoke-endpoint', hostedAuth('throw', { status: 200 }))).status, 'fail');
