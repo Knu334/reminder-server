@@ -59,6 +59,152 @@ index adebb5e..9c80646 100644
 +cross-client tokens and disabled or deleted users return `invalid_grant`. Client credential
 +failures return `invalid_client`, and clients without the code flow return
 +`unauthorized_client`.
+diff --git a/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteController.java b/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteController.java
+index f106a90..f63df67 100644
+--- a/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteController.java
++++ b/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteController.java
+@@ -2497,6 +2497,56 @@ public class ApiGatewayExecuteController {
+     private Response dispatchV2(String httpMethod, String apiId, String stageName,
+                                 String proxy, HttpHeaders headers, UriInfo uriInfo,
+                                 byte[] body, String region) {
++        Response response = dispatchV2Route(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, region);
++        return withHttpApiCors(response, httpMethod, apiId, headers, region);
++    }
++
++    /**
++     * Applies the API's CorsConfiguration to an actual (non-preflight) response, as API Gateway does
++     * for HTTP APIs: only when the request Origin is allowed, and never otherwise. CORS headers the
++     * integration returned are replaced, because API Gateway ignores them once CORS is configured.
++     */
++    private Response withHttpApiCors(Response response, String httpMethod, String apiId,
++                                     HttpHeaders headers, String region) {
++        if (headers == null || headers.getHeaderString("Origin") == null) {
++            return response;
++        }
++        if ("OPTIONS".equalsIgnoreCase(httpMethod)
++                && headers.getHeaderString("Access-Control-Request-Method") != null) {
++            return response;
++        }
++        Api api;
++        try {
++            api = apiGatewayV2Service.getApi(region, apiId);
++        } catch (AwsException e) {
++            return response;
++        }
++        Api.Cors cors = api.getCorsConfiguration();
++        if (cors == null) {
++            return response;
++        }
++        String allowOrigin = matchingCorsOrigin(cors.allowOrigins(), headers.getHeaderString("Origin"));
++        if (allowOrigin == null) {
++            return response;
++        }
++        Response.ResponseBuilder builder = Response.fromResponse(response)
++                .header("Access-Control-Allow-Origin", null)
++                .header("Access-Control-Expose-Headers", null)
++                .header("Access-Control-Allow-Credentials", null)
++                .header("Access-Control-Allow-Origin", allowOrigin);
++        if (!"*".equals(allowOrigin)) {
++            builder.header("Vary", "Origin");
++        }
++        putCorsListHeader(builder, "Access-Control-Expose-Headers", cors.exposeHeaders());
++        if (Boolean.TRUE.equals(cors.allowCredentials())) {
++            builder.header("Access-Control-Allow-Credentials", "true");
++        }
++        return builder.build();
++    }
++
++    private Response dispatchV2Route(String httpMethod, String apiId, String stageName,
++                                String proxy, HttpHeaders headers, UriInfo uriInfo,
++                                byte[] body, String region) {
+         // disableExecuteApiEndpoint is enforced here rather than in the caller because both the
+         // host-based route (*.execute-api.localhost.*, already rejected by ApiGatewayExecuteApiHostFilter)
+         // and the direct /execute-api/{apiId}/{stage}/... route land here. Checking at the single
+@@ -2525,7 +2575,14 @@ public class ApiGatewayExecuteController {
+ 
+         String path = "/" + (proxy == null ? "" : proxy);
+ 
+-        Route route = apiGatewayV2Service.findMatchingRoute(region, apiId, httpMethod, path);
++        // The JAX-RS {proxy} binding is percent-decoded, which loses the difference between an
++        // encoded %2F and a real separator and turns %25 into a bare %. API Gateway matches routes
++        // on the path as received and decodes only the extracted pathParameters, so match on the
++        // still-encoded path. `path` stays decoded for the authorizer and HTTP proxy paths.
++        String routePath = encodedRoutePath(path,
++                uriInfo == null || uriInfo.getRequestUri() == null ? null : uriInfo.getRequestUri().getRawPath());
++
++        Route route = apiGatewayV2Service.findMatchingRoute(region, apiId, httpMethod, routePath);
+         if (route == null) {
+             return Response.status(404)
+                     .entity(jsonMessage("Not Found"))
+@@ -2599,7 +2656,7 @@ public class ApiGatewayExecuteController {
+         }
+ 
+         String requestId = UUID.randomUUID().toString();
+-        String eventJson = buildV2ProxyEvent(httpMethod, path, route.getRouteKey(),
++        String eventJson = buildV2ProxyEvent(httpMethod, routePath, route.getRouteKey(),
+                 apiId, region, stageName, headers, uriInfo, body, requestId, jwtClaims, jwtScopes,
+                 lambdaAuthorizerContext, iamIdentity);
+ 
+@@ -3459,10 +3516,12 @@ public class ApiGatewayExecuteController {
+             }
+         }
+ 
++        // `path` is the path as received (percent-encoded), so rawPath stays encoded; API Gateway
++        // decodes each extracted path parameter exactly once.
+         Map<String, String> pathParams = extractV2PathParams(routeKey, path);
+         if (!pathParams.isEmpty()) {
+             ObjectNode pp = event.putObject("pathParameters");
+-            pathParams.forEach(pp::put);
++            pathParams.forEach((name, value) -> pp.put(name, decodePathParameter(value)));
+         }
+ 
+         ObjectNode ctx = event.putObject("requestContext");
+@@ -3853,6 +3912,45 @@ public class ApiGatewayExecuteController {
+ 
+     // ──────────────────────────── Path matching ────────────────────────────
+ 
++    private static final Pattern EXECUTE_API_RAW_PATH =
++            Pattern.compile("^(?:/_aws)?/execute-api/[^/]+/[^/]+(/.*)?$");
++
++    /**
++     * Returns the part of the raw (still percent-encoded) request path after the
++     * {@code /execute-api/{apiId}/{stage}} prefix, without a trailing slash, in the same shape as the
++     * decoded {@code decodedPath}. Falls back to {@code decodedPath} when the raw path does not have
++     * the execute-api shape.
++     */
++    static String encodedRoutePath(String decodedPath, String rawRequestPath) {
++        if (rawRequestPath == null) {
++            return decodedPath;
++        }
++        Matcher m = EXECUTE_API_RAW_PATH.matcher(rawRequestPath);
++        if (!m.matches()) {
++            return decodedPath;
++        }
++        String remainder = m.group(1);
++        if (remainder == null || remainder.isEmpty()) {
++            return "/";
++        }
++        while (remainder.length() > 1 && remainder.endsWith("/")) {
++            remainder = remainder.substring(0, remainder.length() - 1);
++        }
++        return remainder;
++    }
++
++    /** Percent-decodes one path parameter once; a literal {@code +} stays a plus. */
++    static String decodePathParameter(String value) {
++        if (value == null || value.indexOf('%') < 0) {
++            return value;
++        }
++        try {
++            return URLDecoder.decode(value.replace("+", "%2B"), StandardCharsets.UTF_8);
++        } catch (IllegalArgumentException e) {
++            return value;
++        }
++    }
++
+     /**
+      * Re-appends a trailing slash that the JAX-RS {@code {proxy}} path-param binding strips.
+      * A trailing slash is significant in the proxy event path (many routers treat {@code /x}
 diff --git a/src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2Service.java b/src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2Service.java
 index bd4230a..faaae9c 100644
 --- a/src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2Service.java
@@ -944,6 +1090,136 @@ index 97fd19f..e04fb9a 100644
              }
  
              fn.getPolicies().add(statement);
+diff --git a/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayPreflightRoutingIntegrationTest.java b/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayPreflightRoutingIntegrationTest.java
+index 5c1a098..426e4bf 100644
+--- a/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayPreflightRoutingIntegrationTest.java
++++ b/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayPreflightRoutingIntegrationTest.java
+@@ -12,6 +12,7 @@ import org.junit.jupiter.api.TestMethodOrder;
+ import static io.restassured.RestAssured.given;
+ import static org.hamcrest.Matchers.equalTo;
+ import static org.hamcrest.Matchers.notNullValue;
++import static org.hamcrest.Matchers.nullValue;
+ 
+ /**
+  * End-to-end coverage for CORS preflight (OPTIONS) handling on deployed API Gateway
+@@ -240,12 +241,48 @@ class ApiGatewayPreflightRoutingIntegrationTest {
+                 .header("Access-Control-Allow-Credentials", equalTo("true"));
+     }
+ 
++    /**
++     * For an actual (non-preflight) request API Gateway adds the API's CORS headers when the Origin
++     * is allowed. The route has no integration, so the body is a gateway error; the headers apply
++     * to whatever the gateway answers.
++     */
++    @Test @Order(9)
++    void httpApiActualResponseCarriesCorsHeadersForAllowedOrigin() {
++        given()
++                .header("Origin", ORIGIN)
++                .when().get("/execute-api/" + httpApiId + "/$default/items")
++                .then()
++                .header("Access-Control-Allow-Origin", equalTo(ORIGIN))
++                .header("Access-Control-Expose-Headers", equalTo("x-request-id"))
++                .header("Access-Control-Allow-Credentials", equalTo("true"))
++                .header("Vary", equalTo("Origin"));
++    }
++
++    @Test @Order(10)
++    void httpApiActualResponseHasNoCorsHeadersForDisallowedOrigin() {
++        given()
++                .header("Origin", "http://not-allowed.example")
++                .when().get("/execute-api/" + httpApiId + "/$default/items")
++                .then()
++                .header("Access-Control-Allow-Origin", nullValue())
++                .header("Access-Control-Expose-Headers", nullValue())
++                .header("Access-Control-Allow-Credentials", nullValue());
++    }
++
++    @Test @Order(11)
++    void httpApiActualResponseHasNoCorsHeadersWithoutOrigin() {
++        given()
++                .when().get("/execute-api/" + httpApiId + "/$default/items")
++                .then()
++                .header("Access-Control-Allow-Origin", nullValue());
++    }
++
+     /**
+      * The discriminator: a preflight to a non-deployed management path ({@code /restapis}) is
+      * still owned by the global CORS filter — short-circuited with 204 and CORS headers, never
+      * routed to an integration. Proves the deployed-path exclusion is scoped, not blanket.
+      */
+-    @Test @Order(9)
++    @Test @Order(12)
+     void preflightToManagementPathIsShortCircuitedByFilter() {
+         given()
+                 .header("Origin", ORIGIN)
+@@ -257,7 +294,7 @@ class ApiGatewayPreflightRoutingIntegrationTest {
+                 .body(equalTo(""));
+     }
+ 
+-    @Test @Order(10)
++    @Test @Order(13)
+     void cleanup() {
+         given().when().delete("/restapis/" + apiId).then().statusCode(202);
+         given().when().delete("/v2/apis/" + httpApiId).then().statusCode(204);
+diff --git a/src/test/java/io/github/hectorvent/floci/services/apigateway/BuildV2ProxyEventPathParametersTest.java b/src/test/java/io/github/hectorvent/floci/services/apigateway/BuildV2ProxyEventPathParametersTest.java
+index a69497a..72fcad7 100644
+--- a/src/test/java/io/github/hectorvent/floci/services/apigateway/BuildV2ProxyEventPathParametersTest.java
++++ b/src/test/java/io/github/hectorvent/floci/services/apigateway/BuildV2ProxyEventPathParametersTest.java
+@@ -87,4 +87,54 @@ class BuildV2ProxyEventPathParametersTest {
+         JsonNode event = new ObjectMapper().readTree(json);
+         assertFalse(event.has("pathParameters"), "pathParameters must be absent for $default route");
+     }
++
++    @Test
++    void rawPathKeepsPercentEncodingAndPathParametersAreDecodedOnce() throws Exception {
++        // id values 100%25, %252F and a%2Fb as the client sent them: rawPath must keep them verbatim
++        // (real API Gateway never decodes rawPath) while pathParameters carry one decoding.
++        String[][] cases = {
++                {"100%25", "100%"},
++                {"%252F", "%2F"},
++                {"a%2Fb", "a/b"},
++                {"a+b%20c", "a+b c"},
++        };
++        for (String[] c : cases) {
++            String path = "/v2/reminders/" + c[0];
++            when(uriInfo.getRequestUri()).thenReturn(
++                    new URI("http://localhost:4566/execute-api/abc123/$default" + path));
++            String json = controller.buildV2ProxyEvent(
++                    "GET", path, "GET /v2/reminders/{id}",
++                    "abc123", "us-east-1", "$default", headers, uriInfo, null, "req-enc");
++            JsonNode event = new ObjectMapper().readTree(json);
++            assertEquals(path, event.get("rawPath").asText(), "rawPath for " + c[0]);
++            assertEquals(path, event.get("requestContext").get("http").get("path").asText());
++            assertEquals(c[1], event.get("pathParameters").get("id").asText(), "pathParameters.id for " + c[0]);
++        }
++    }
++
++    @Test
++    void greedyPathParameterIsDecodedOnceWithoutSplittingEncodedSlash() throws Exception {
++        String path = "/files/a%2Fb/c%25";
++        when(uriInfo.getRequestUri()).thenReturn(
++                new URI("http://localhost:4566/execute-api/abc123/$default" + path));
++        String json = controller.buildV2ProxyEvent(
++                "GET", path, "ANY /files/{proxy+}",
++                "abc123", "us-east-1", "$default", headers, uriInfo, null, "req-greedy");
++        JsonNode event = new ObjectMapper().readTree(json);
++        assertEquals(path, event.get("rawPath").asText());
++        assertEquals("a/b/c%", event.get("pathParameters").get("proxy").asText());
++    }
++
++    @Test
++    void encodedRoutePathIsTakenFromRawRequestUri() {
++        assertEquals("/v2/reminders/a%2Fb", ApiGatewayExecuteController.encodedRoutePath(
++                "/v2/reminders/a/b", "/execute-api/abc123/$default/v2/reminders/a%2Fb"));
++        assertEquals("/v2/reminders/100%25", ApiGatewayExecuteController.encodedRoutePath(
++                "/v2/reminders/100%", "/_aws/execute-api/abc123/stage/v2/reminders/100%25"));
++        assertEquals("/x", ApiGatewayExecuteController.encodedRoutePath(
++                "/x", "/execute-api/abc123/$default/x/"));
++        assertEquals("/", ApiGatewayExecuteController.encodedRoutePath(
++                "/", "/execute-api/abc123/$default/"));
++        assertEquals("/other", ApiGatewayExecuteController.encodedRoutePath("/other", "/unrelated/shape"));
++    }
+ }
 diff --git a/src/test/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2RouteSelectionTest.java b/src/test/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2RouteSelectionTest.java
 new file mode 100644
 index 0000000..6795752

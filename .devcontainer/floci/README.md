@@ -15,11 +15,12 @@ refresh token rotation、新tokenの発行、旧tokenの猶予期間後の拒否
 Lambda AddPermissionでは、`SourceArn`と`SourceAccount`の両方を指定した場合に両方の条件を保持する（実AWSと同じ。上流は`SourceArn`があると`SourceAccount`を捨てていた）。片方だけの場合の動作は変えない。回帰テストは`LambdaServiceTest`の`addPermissionKeepsSourceArnAndSourceAccountOnQualifiedPolicy`と`addPermissionWithOnlySourceAccountKeepsOnlyStringEquals`。
 Lambda ListVersionsByFunctionは、実AWSと同じ順序（`$LATEST`が先頭、続いて数値版を数値の昇順）で返す。上流はhash順のまま返しており、AWS providerが最後の要素を最新版として扱うため、aliasが`$LATEST`を指すことがあった。回帰テストは`LambdaServiceTest`の`listVersionsByFunctionReturnsLatestFirstThenNumericAscending`。
 CloudWatchのPutMetricAlarm/DescribeAlarmsは`ExtendedStatistic`と`EvaluateLowSampleCountPercentile`を保存して返す（上流は両方を捨てていた。JSONとQueryの両handler、`MetricAlarm`が対象）。また、alarm evaluatorは`Statistic`がなく`ExtendedStatistic`だけを持つalarmで例外を投げず、評価を飛ばす（percentileの評価は実装していない）。回帰テストは`CloudWatchMetricsJsonHandlerTest`の`describeAlarms_keepsExtendedStatisticAndLowSampleCountPercentileWithoutStatistic`、`CloudWatchMetricsQueryHandlerTest`の`putMetricAlarmKeepsExtendedStatisticAndLowSampleCountPercentile`と`describeAlarmsReturnsExtendedStatisticAndLowSampleCountPercentileWithoutStatistic`、`AlarmEvaluatorTest`の`alarmWithOnlyExtendedStatisticIsSkippedWithoutThrowing`。
+HTTP APIのexecute-apiは、`cors_configuration`がある場合、許可されたOriginの通常（preflightでない）レスポンスにも`access-control-allow-origin`、`vary: Origin`、`access-control-expose-headers`（`allowCredentials`がtrueなら`access-control-allow-credentials`も）を付ける。許可されないOriginには何も付けない（実AWSと同じ。上流はpreflightにしか付けていなかった）。また、HTTP APIのLambda event v2の`rawPath`を受信したままのpercent-encodingで渡し、route照合もencodedなpathで行い、`pathParameters`は1回だけdecodeする（上流はdecode済みのpathを渡し、`100%25`や`a%2Fb`で不一致や二重decodeが起きた）。回帰テストは`ApiGatewayPreflightRoutingIntegrationTest`の`httpApiActualResponse*`と`BuildV2ProxyEventPathParametersTest`の`rawPathKeepsPercentEncodingAndPathParametersAreDecodedOnce`、`greedyPathParameterIsDecodedOnceWithoutSplittingEncodedSlash`、`encodedRoutePathIsTakenFromRawRequestUri`。
 このパッチでissuer/JWKS接続や全AWSサービスの互換性を保証するものではない。
 
 ## ビルドと起動
 
-Composeの`floci`は`floci-local:2.2.0-refresh.4-native`と、このディレクトリの`build`を指定している。
+Composeの`floci`は`floci-local:2.2.0-refresh.5-native`と、このディレクトリの`build`を指定している。
 native-imageのビルドは数分〜十数分かかる。heap上限はbuild引数`NATIVE_IMAGE_XMX`（既定`6g`）で固定している。
 未指定だとDocker VMのメモリを使い切り、開発コンテナのimage buildと並行した際に
 `cannot allocate memory`で失敗した（Docker VM約12GB）。失敗する場合は下の手順でFlociだけを先にbuildする。
@@ -78,6 +79,8 @@ FlociのソースでJava 25を使い、次のコマンドで実行する。
 ./mvnw -B -Dtest=ApiGatewayV2RouteSelectionTest test
 ./mvnw -B -Dtest='LambdaServiceTest#addPermission*' test
 ./mvnw -B -Dtest='LambdaServiceTest#listVersionsByFunction*' test
+./mvnw -B -Dtest='ApiGatewayPreflightRoutingIntegrationTest' test
+./mvnw -B -Dtest=BuildV2ProxyEventPathParametersTest test
 ./mvnw -B -Dtest='CloudWatchMetricsJsonHandlerTest#describeAlarms*' test
 ./mvnw -B -Dtest='CloudWatchMetricsQueryHandlerTest#putMetricAlarmKeepsExtendedStatistic*+describeAlarmsReturnsExtendedStatistic*' test
 ./mvnw -B -Dtest='AlarmEvaluatorTest#alarmWithOnlyExtendedStatistic*' test
