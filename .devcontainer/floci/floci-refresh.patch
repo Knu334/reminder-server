@@ -59,11 +59,108 @@ index adebb5e..9c80646 100644
 +cross-client tokens and disabled or deleted users return `invalid_grant`. Client credential
 +failures return `invalid_client`, and clients without the code flow return
 +`unauthorized_client`.
+diff --git a/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostFilter.java b/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostFilter.java
+index 7d1fe41..9b25f4c 100644
+--- a/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostFilter.java
++++ b/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostFilter.java
+@@ -197,6 +197,9 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
+         // AWS_IAM dispatch rebuilds the caller's canonical request, which covers the path they
+         // signed: the virtual-host path, not the /execute-api/... form this rewrite produces.
+         routeContext.recordSignedRequestPath(originalPath);
++        // setRequestUri leaves the path decoded once, so keep the raw path after the stage for
++        // route matching, rawPath and pathParameters.
++        routeContext.recordHostRoutedRawPath("/" + remainingPath);
+         requestContext.setRequestUri(newUri);
+     }
+ 
 diff --git a/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteController.java b/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteController.java
-index f106a90..f63df67 100644
+index f106a90..74f26b0 100644
 --- a/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteController.java
 +++ b/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteController.java
-@@ -2497,6 +2497,56 @@ public class ApiGatewayExecuteController {
+@@ -260,7 +260,8 @@ public class ApiGatewayExecuteController {
+     public Response handleGet(@Context HttpHeaders headers, @Context UriInfo uriInfo,
+                               @PathParam("apiId") String apiId,
+                               @PathParam("stageName") String stageName,
+-                              @PathParam("proxy") String proxy) {
++                              @Encoded @PathParam("proxy") String encodedProxy) {
++        String proxy = decodeProxy(encodedProxy);
+         if (isWebSocketConnectionRequest(apiId, proxy)) {
+             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
+             return handleGetConnectionInfo(connectionId);
+@@ -274,8 +275,9 @@ public class ApiGatewayExecuteController {
+     public Response handlePost(@Context HttpHeaders headers, @Context UriInfo uriInfo,
+                                @PathParam("apiId") String apiId,
+                                @PathParam("stageName") String stageName,
+-                               @PathParam("proxy") String proxy,
++                               @Encoded @PathParam("proxy") String encodedProxy,
+                                byte[] body) {
++        String proxy = decodeProxy(encodedProxy);
+         if (isWebSocketConnectionRequest(apiId, proxy)) {
+             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
+             return handlePostToConnection(connectionId, body);
+@@ -289,8 +291,9 @@ public class ApiGatewayExecuteController {
+     public Response handlePut(@Context HttpHeaders headers, @Context UriInfo uriInfo,
+                               @PathParam("apiId") String apiId,
+                               @PathParam("stageName") String stageName,
+-                              @PathParam("proxy") String proxy,
++                              @Encoded @PathParam("proxy") String encodedProxy,
+                               byte[] body) {
++        String proxy = decodeProxy(encodedProxy);
+         return dispatch("PUT", apiId, stageName, proxy, headers, uriInfo, body);
+     }
+ 
+@@ -300,7 +303,8 @@ public class ApiGatewayExecuteController {
+     public Response handleDelete(@Context HttpHeaders headers, @Context UriInfo uriInfo,
+                                  @PathParam("apiId") String apiId,
+                                  @PathParam("stageName") String stageName,
+-                                 @PathParam("proxy") String proxy) {
++                                 @Encoded @PathParam("proxy") String encodedProxy) {
++        String proxy = decodeProxy(encodedProxy);
+         if (isWebSocketConnectionRequest(apiId, proxy)) {
+             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
+             return handleDeleteConnection(connectionId);
+@@ -314,8 +318,9 @@ public class ApiGatewayExecuteController {
+     public Response handlePatch(@Context HttpHeaders headers, @Context UriInfo uriInfo,
+                                 @PathParam("apiId") String apiId,
+                                 @PathParam("stageName") String stageName,
+-                                @PathParam("proxy") String proxy,
++                                @Encoded @PathParam("proxy") String encodedProxy,
+                                 byte[] body) {
++        String proxy = decodeProxy(encodedProxy);
+         return dispatch("PATCH", apiId, stageName, proxy, headers, uriInfo, body);
+     }
+ 
+@@ -325,11 +330,28 @@ public class ApiGatewayExecuteController {
+     public Response handleOptions(@Context HttpHeaders headers, @Context UriInfo uriInfo,
+                                   @PathParam("apiId") String apiId,
+                                   @PathParam("stageName") String stageName,
+-                                  @PathParam("proxy") String proxy,
++                                  @Encoded @PathParam("proxy") String encodedProxy,
+                                   byte[] body) {
++        String proxy = decodeProxy(encodedProxy);
+         return dispatch("OPTIONS", apiId, stageName, proxy, headers, uriInfo, body);
+     }
+ 
++    /**
++     * The {proxy} binding is {@code @Encoded}, so JAX-RS no longer percent-decodes it. For a
++     * host-style HTTP API request the pre-matching host filter has already made RESTEasy Reactive
++     * keep the path decoded once, and a second decode in the binding turned {@code 100%25} into a
++     * bare {@code %} that the URI decoder rejects with a 500 before dispatch. Decode exactly once
++     * here: from the raw path the host filter recorded, or from the binding value otherwise.
++     */
++    private String decodeProxy(String encodedProxy) {
++        String hostRoutedRawPath = routeContext.hostRoutedRawPath();
++        if (hostRoutedRawPath == null) {
++            return decodePathParameter(encodedProxy);
++        }
++        String routePath = hostRoutedRoutePath(hostRoutedRawPath);
++        return decodePathParameter("/".equals(routePath) ? "" : routePath.substring(1));
++    }
++
+     // ──────────────────────────── Core dispatch ────────────────────────────
+ 
+     Response dispatch(String httpMethod, String apiId, String stageName,
+@@ -2497,6 +2519,56 @@ public class ApiGatewayExecuteController {
      private Response dispatchV2(String httpMethod, String apiId, String stageName,
                                  String proxy, HttpHeaders headers, UriInfo uriInfo,
                                  byte[] body, String region) {
@@ -120,7 +217,7 @@ index f106a90..f63df67 100644
          // disableExecuteApiEndpoint is enforced here rather than in the caller because both the
          // host-based route (*.execute-api.localhost.*, already rejected by ApiGatewayExecuteApiHostFilter)
          // and the direct /execute-api/{apiId}/{stage}/... route land here. Checking at the single
-@@ -2525,7 +2575,14 @@ public class ApiGatewayExecuteController {
+@@ -2525,7 +2597,19 @@ public class ApiGatewayExecuteController {
  
          String path = "/" + (proxy == null ? "" : proxy);
  
@@ -129,14 +226,19 @@ index f106a90..f63df67 100644
 +        // encoded %2F and a real separator and turns %25 into a bare %. API Gateway matches routes
 +        // on the path as received and decodes only the extracted pathParameters, so match on the
 +        // still-encoded path. `path` stays decoded for the authorizer and HTTP proxy paths.
-+        String routePath = encodedRoutePath(path,
-+                uriInfo == null || uriInfo.getRequestUri() == null ? null : uriInfo.getRequestUri().getRawPath());
++        // A host-style request had its URI rewritten by ApiGatewayExecuteApiHostFilter, so the
++        // UriInfo path is no longer the raw one; use the raw path the filter recorded instead.
++        String hostRoutedRawPath = routeContext.hostRoutedRawPath();
++        String routePath = hostRoutedRawPath != null
++                ? hostRoutedRoutePath(hostRoutedRawPath)
++                : encodedRoutePath(path,
++                        uriInfo == null || uriInfo.getRequestUri() == null ? null : uriInfo.getRequestUri().getRawPath());
 +
 +        Route route = apiGatewayV2Service.findMatchingRoute(region, apiId, httpMethod, routePath);
          if (route == null) {
              return Response.status(404)
                      .entity(jsonMessage("Not Found"))
-@@ -2599,7 +2656,7 @@ public class ApiGatewayExecuteController {
+@@ -2599,7 +2683,7 @@ public class ApiGatewayExecuteController {
          }
  
          String requestId = UUID.randomUUID().toString();
@@ -145,7 +247,7 @@ index f106a90..f63df67 100644
                  apiId, region, stageName, headers, uriInfo, body, requestId, jwtClaims, jwtScopes,
                  lambdaAuthorizerContext, iamIdentity);
  
-@@ -3459,10 +3516,12 @@ public class ApiGatewayExecuteController {
+@@ -3459,10 +3543,12 @@ public class ApiGatewayExecuteController {
              }
          }
  
@@ -159,7 +261,7 @@ index f106a90..f63df67 100644
          }
  
          ObjectNode ctx = event.putObject("requestContext");
-@@ -3853,6 +3912,45 @@ public class ApiGatewayExecuteController {
+@@ -3853,6 +3939,57 @@ public class ApiGatewayExecuteController {
  
      // ──────────────────────────── Path matching ────────────────────────────
  
@@ -190,6 +292,18 @@ index f106a90..f63df67 100644
 +        return remainder;
 +    }
 +
++    /**
++     * Returns the raw (still percent-encoded) path after the stage segment that the host filter
++     * recorded, without a trailing slash, in the same shape as {@link #encodedRoutePath}.
++     */
++    static String hostRoutedRoutePath(String rawPathAfterStage) {
++        String remainder = rawPathAfterStage;
++        while (remainder.length() > 1 && remainder.endsWith("/")) {
++            remainder = remainder.substring(0, remainder.length() - 1);
++        }
++        return remainder.isEmpty() ? "/" : remainder;
++    }
++
 +    /** Percent-decodes one path parameter once; a literal {@code +} stays a plus. */
 +    static String decodePathParameter(String value) {
 +        if (value == null || value.indexOf('%') < 0) {
@@ -205,6 +319,37 @@ index f106a90..f63df67 100644
      /**
       * Re-appends a trailing slash that the JAX-RS {@code {proxy}} path-param binding strips.
       * A trailing slash is significant in the proxy event path (many routers treat {@code /x}
+diff --git a/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteRouteContext.java b/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteRouteContext.java
+index b406abd..9cfbef6 100644
+--- a/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteRouteContext.java
++++ b/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteRouteContext.java
+@@ -73,6 +73,7 @@ public class ApiGatewayExecuteRouteContext {
+     private String httpApiRegion;
+     private boolean restApiRoute;
+     private String signedRequestPath;
++    private String hostRoutedRawPath;
+ 
+     void routeToHttpApi(String region) {
+         this.httpApiRegion = region;
+@@ -103,4 +104,18 @@ public class ApiGatewayExecuteRouteContext {
+     String signedRequestPath() {
+         return signedRequestPath;
+     }
++
++    /**
++     * Records the raw (still percent-encoded) path after the stage segment of a host-style HTTP API
++     * request, taken from the original request before the filter rewrote the request URI. The
++     * rewrite makes RESTEasy Reactive keep the path decoded once, so {@code UriInfo} can no longer
++     * tell {@code %2F} from a separator or {@code %25} from a bare {@code %}.
++     */
++    void recordHostRoutedRawPath(String rawPathAfterStage) {
++        this.hostRoutedRawPath = rawPathAfterStage;
++    }
++
++    String hostRoutedRawPath() {
++        return hostRoutedRawPath;
++    }
+ }
 diff --git a/src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2Service.java b/src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2Service.java
 index bd4230a..faaae9c 100644
 --- a/src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2Service.java
@@ -1090,6 +1235,161 @@ index 97fd19f..e04fb9a 100644
              }
  
              fn.getPolicies().add(statement);
+diff --git a/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostEncodedPathIntegrationTest.java b/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostEncodedPathIntegrationTest.java
+new file mode 100644
+index 0000000..29239b0
+--- /dev/null
++++ b/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostEncodedPathIntegrationTest.java
+@@ -0,0 +1,149 @@
++package io.github.hectorvent.floci.services.apigateway;
++
++import com.fasterxml.jackson.databind.JsonNode;
++import com.fasterxml.jackson.databind.ObjectMapper;
++import io.github.hectorvent.floci.services.lambda.LambdaService;
++import io.github.hectorvent.floci.services.lambda.model.InvocationType;
++import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
++import io.quarkus.test.InjectMock;
++import io.quarkus.test.junit.QuarkusTest;
++import io.restassured.http.ContentType;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.CsvSource;
++import org.mockito.ArgumentCaptor;
++
++import java.nio.charset.StandardCharsets;
++
++import static io.restassured.RestAssured.given;
++import static org.hamcrest.Matchers.equalTo;
++import static org.hamcrest.Matchers.notNullValue;
++import static org.junit.jupiter.api.Assertions.assertEquals;
++import static org.mockito.ArgumentMatchers.any;
++import static org.mockito.ArgumentMatchers.anyString;
++import static org.mockito.ArgumentMatchers.eq;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.when;
++
++/**
++ * Requests that reach an HTTP API through the virtual host ({@code {apiId}.execute-api.*}) go
++ * through {@link ApiGatewayExecuteApiHostFilter}, which rewrites the request URI. RESTEasy Reactive
++ * then keeps the path decoded once, so the raw path has to be taken from the original request.
++ * The unit tests build the event from a mocked UriInfo and the integration tests use path-style
++ * URLs, so neither goes through the filter plus controller path covered here.
++ */
++@QuarkusTest
++class ApiGatewayExecuteApiHostEncodedPathIntegrationTest {
++
++    private static final ObjectMapper MAPPER = new ObjectMapper();
++    private static final String FUNCTION = "host-encoded-path";
++
++    @InjectMock
++    LambdaService lambdaService;
++
++    private String apiId;
++
++    @BeforeEach
++    void createApiWithLambdaRoute() {
++        apiId = given()
++                .contentType(ContentType.JSON)
++                .body("""
++                        {"name":"host-encoded-path","protocolType":"HTTP"}
++                        """)
++                .when().post("/v2/apis")
++                .then()
++                .statusCode(201)
++                .body("apiId", notNullValue())
++                .extract().path("apiId");
++
++        for (String stageName : new String[] {"$default", "dev"}) {
++            given()
++                    .contentType(ContentType.JSON)
++                    .body("""
++                            {"stageName":"%s","autoDeploy":true}
++                            """.formatted(stageName))
++                    .when().post("/v2/apis/" + apiId + "/stages")
++                    .then()
++                    .statusCode(201);
++        }
++
++        String integrationId = given()
++                .contentType(ContentType.JSON)
++                .body("""
++                        {
++                          "integrationType":"AWS_PROXY",
++                          "integrationUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations",
++                          "integrationMethod":"POST",
++                          "payloadFormatVersion":"2.0"
++                        }
++                        """.formatted(FUNCTION))
++                .when().post("/v2/apis/" + apiId + "/integrations")
++                .then()
++                .statusCode(201)
++                .extract().path("integrationId");
++
++        given()
++                .contentType(ContentType.JSON)
++                .body("""
++                        {"routeKey":"GET /v2/reminders/{id}","target":"integrations/%s"}
++                        """.formatted(integrationId))
++                .when().post("/v2/apis/" + apiId + "/routes")
++                .then()
++                .statusCode(201);
++
++        when(lambdaService.invoke(anyString(), eq(FUNCTION), any(byte[].class), eq(InvocationType.RequestResponse)))
++                .thenReturn(new InvokeResult(200, null,
++                        "{\"statusCode\":200,\"body\":\"ok\"}".getBytes(StandardCharsets.UTF_8), null, "req-1"));
++    }
++
++    @AfterEach
++    void deleteApi() {
++        if (apiId != null) {
++            given().when().delete("/v2/apis/" + apiId).then().statusCode(204);
++        }
++    }
++
++    @ParameterizedTest
++    @CsvSource({
++            "100%25,100%",
++            "a%2Fb,a/b",
++            "%252F,%2F"
++    })
++    void hostRoutedDefaultStageKeepsRawPathAndDecodesPathParametersOnce(String rawId, String decodedId)
++            throws Exception {
++        given()
++                .urlEncodingEnabled(false)
++                .header("Host", apiId + ".execute-api.localhost.floci.io:4566")
++                .when().get("/v2/reminders/" + rawId)
++                .then()
++                .statusCode(200)
++                .body(equalTo("ok"));
++
++        assertInvokedWith("/v2/reminders/" + rawId, decodedId);
++    }
++
++    @Test
++    void hostRoutedExplicitStageKeepsRawPathAfterTheStage() throws Exception {
++        given()
++                .urlEncodingEnabled(false)
++                .header("Host", apiId + ".execute-api.localhost.floci.io:4566")
++                .when().get("/dev/v2/reminders/a%2Fb")
++                .then()
++                .statusCode(200)
++                .body(equalTo("ok"));
++
++        assertInvokedWith("/v2/reminders/a%2Fb", "a/b");
++    }
++
++    private void assertInvokedWith(String expectedRawPath, String expectedId) throws Exception {
++        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
++        verify(lambdaService).invoke(anyString(), eq(FUNCTION), payload.capture(),
++                eq(InvocationType.RequestResponse));
++        JsonNode event = MAPPER.readTree(payload.getValue());
++        assertEquals("GET /v2/reminders/{id}", event.path("routeKey").asText());
++        assertEquals(expectedRawPath, event.path("rawPath").asText());
++        assertEquals(expectedId, event.path("pathParameters").path("id").asText());
++    }
++}
 diff --git a/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayPreflightRoutingIntegrationTest.java b/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayPreflightRoutingIntegrationTest.java
 index 5c1a098..426e4bf 100644
 --- a/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayPreflightRoutingIntegrationTest.java
