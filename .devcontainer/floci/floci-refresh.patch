@@ -60,10 +60,22 @@ index adebb5e..9c80646 100644
 +failures return `invalid_client`, and clients without the code flow return
 +`unauthorized_client`.
 diff --git a/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostFilter.java b/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostFilter.java
-index 7d1fe41..9b25f4c 100644
+index 7d1fe41..fbc6780 100644
 --- a/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostFilter.java
 +++ b/src/main/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostFilter.java
-@@ -197,6 +197,9 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
+@@ -186,7 +186,10 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
+ 
+         String newPath = "/execute-api/" + apiId + "/" + stageName + "/";
+         if (!remainingPath.isEmpty()) {
+-            newPath += remainingPath;
++            // setRequestUri keeps the rewritten path decoded once and UriInfo.getPath() in later
++            // @PreMatching filters decodes it again, so a raw %25 would end as a bare % and fail.
++            // Quote % once more so the stored path is the raw path the caller sent.
++            newPath += remainingPath.replace("%", "%25");
+         }
+ 
+         URI newUri = UriBuilder.fromUri(originalUri)
+@@ -197,6 +200,9 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
          // AWS_IAM dispatch rebuilds the caller's canonical request, which covers the path they
          // signed: the virtual-host path, not the /execute-api/... form this rewrite produces.
          routeContext.recordSignedRequestPath(originalPath);
@@ -1390,6 +1402,39 @@ index 0000000..29239b0
 +        assertEquals(expectedId, event.path("pathParameters").path("id").asText());
 +    }
 +}
+diff --git a/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostFilterTest.java b/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostFilterTest.java
+index 8e9b383..ab0a961 100644
+--- a/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostFilterTest.java
++++ b/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayExecuteApiHostFilterTest.java
+@@ -66,10 +66,27 @@ class ApiGatewayExecuteApiHostFilterTest {
+         new ApiGatewayExecuteApiHostFilter(lookup, new RegionResolver(REGION, "000000000000"))
+                 .filter(request.context());
+ 
+-        assertEquals("/execute-api/abc123/$default/files/a%2Fb", request.routedUri().getRawPath());
++        // setRequestUri keeps URI.getPath() (decoded once), so that value must be the raw path.
++        assertEquals("/execute-api/abc123/$default/files/a%2Fb", request.routedUri().getPath());
+         assertEquals("value=a%2Fb", request.routedUri().getRawQuery());
+     }
+ 
++    @Test
++    void quotesPercentSoTheDecodedRoutedPathKeepsTheRawPath() {
++        FakeApiGatewayLookup lookup = new FakeApiGatewayLookup();
++        lookup.addApi(API_ID);
++        lookup.addStage(API_ID, "$default");
++        RecordingRequest request = new RecordingRequest(
++                "abc123.execute-api.localhost.floci.io",
++                URI.create("http://abc123.execute-api.localhost.floci.io/v2/reminders/100%25"));
++
++        new ApiGatewayExecuteApiHostFilter(lookup, new RegionResolver(REGION, "000000000000"))
++                .filter(request.context());
++
++        assertEquals("/execute-api/abc123/$default/v2/reminders/100%2525", request.routedUri().getRawPath());
++        assertEquals("/execute-api/abc123/$default/v2/reminders/100%25", request.routedUri().getPath());
++    }
++
+     @Test
+     void routesStageRootWithTrailingSlash() {
+         FakeApiGatewayLookup lookup = new FakeApiGatewayLookup();
 diff --git a/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayPreflightRoutingIntegrationTest.java b/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayPreflightRoutingIntegrationTest.java
 index 5c1a098..426e4bf 100644
 --- a/src/test/java/io/github/hectorvent/floci/services/apigateway/ApiGatewayPreflightRoutingIntegrationTest.java
