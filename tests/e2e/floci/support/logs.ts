@@ -83,7 +83,7 @@ export class LogObserver {
     if (completion && (!completion.completed || completion.since !== expected.since || completion.until !== expected.until || completion.status !== 200 || !completion.result || completion.result.evaluated !== end.evaluated || completion.result.deletes !== end.deletes)) return false;
     return (expected.status === undefined || end.status === expected.status) && (expected.evaluated === undefined || end.evaluated === expected.evaluated) && (expected.deletes === undefined || end.deletes === expected.deletes) && (!completion?.result || completion.result.skippedUnpublished === false);
   }
-  async poll(since: number, until?: number): Promise<void> { if (!this.io) return; const deadline = until ?? this.io.clock() + 30_000; for (const [service, group] of Object.entries(this.groups) as [LogExpectation['service'], string][]) { const remaining = deadline - this.io.clock(); if (remaining <= 0) break; try { this.ingest(await this.io.fetch(group, since, remaining)); } catch (error) { throw toObserverFailure(error, service); } } }
+  async poll(since: number, until?: number): Promise<void> { if (!this.io) return; const deadline = until ?? this.io.clock() + 30_000; for (const [service, group] of Object.entries(this.groups) as [LogExpectation['service'], string][]) { const remaining = deadline - this.io.clock(); if (remaining <= 0) throw new ObserverFailure(service, 'deadline-abort', 'other'); try { this.ingest(await this.io.fetch(group, since, remaining)); } catch (error) { throw toObserverFailure(error, service); } } }
   /**
    * Observation window: every poll gets its own bounded budget (never the leftover of the deadline), and the scan only ends once a poll
    * started at or after until + grace, so an absent check is never judged on a scan that stopped inside its window. Any poll failure rejects
@@ -106,7 +106,7 @@ export function sdkObserver(client: CloudWatchLogsClient, groups: Record<LogExpe
   return new LogObserver(groups, { clock: Date.now, sleep: ms => new Promise(resolve => setTimeout(resolve, ms)), async fetch(group, since, remainingMs) {
     const deadline = Date.now() + remainingMs;
     const events: ObservedEvent[] = []; let nextToken: string | undefined; const tokens = new Set<string>();
-    do { const remaining = Math.min(30_000, deadline - Date.now()); if (remaining <= 0) break; const page = await client.send(new FilterLogEventsCommand({ logGroupName: group, startTime: since, ...(nextToken ? { nextToken } : {}) }), { requestTimeout: remaining, abortSignal: AbortSignal.timeout(remaining) });
+    do { const remaining = Math.min(30_000, deadline - Date.now()); if (remaining <= 0) throw Object.assign(new Error('LOG_BUDGET_EXHAUSTED'), { name: 'AbortError' }); const page = await client.send(new FilterLogEventsCommand({ logGroupName: group, startTime: since, ...(nextToken ? { nextToken } : {}) }), { requestTimeout: remaining, abortSignal: AbortSignal.timeout(remaining) });
       for (const event of page.events ?? []) if (event.eventId && event.message && event.logStreamName && event.timestamp !== undefined) events.push({ eventId: event.eventId, message: event.message, logStreamName: event.logStreamName, timestamp: event.timestamp, group });
       if (page.nextToken && tokens.has(page.nextToken)) throw new Error('LOG_PAGINATION_FAILED'); nextToken = page.nextToken; if (nextToken) tokens.add(nextToken);
     } while (nextToken); return events;

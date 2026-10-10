@@ -67,22 +67,22 @@ register('OBS-02/input-rejection-result-logs', async (fixture, recorder, score) 
   score.ok('s3', 'no-image-versions-added', versions === await s3Versions(fixture));
 });
 
-/** A normal GET 200 whose delivery is later required; it must carry a request id. */
-async function control(fixture: SuiteFixture, who: Actor): Promise<LogExpectation> {
+/** A normal GET whose delivery is later required; the observed HTTP status is kept so the 200 is a real assertion. */
+async function control(fixture: SuiteFixture, who: Actor): Promise<{ log: LogExpectation; httpStatus: number }> {
   const probe = await send(fixture, LIST, { token: who.token });
-  if (probe.status !== 200 || !probe.requestId) throw new Error('LOGGING_CONTROL_FAILED');
-  return logOf(probe, 200, { operation: 'list' });
+  if (!probe.requestId) throw new Error('LOGGING_CONTROL_FAILED');
+  return { log: logOf(probe, 200, { operation: 'list' }), httpStatus: probe.status };
 }
 register('OBS-02/gateway-refusal-result-absence', async (fixture, recorder, score) => {
   const id = 'OBS-02/gateway-refusal-result-absence'; const who = await actor(fixture, 'a'); const writeOnly = await fixture.auth.login('a', [WRITE], 'primary');
-  let before = await control(fixture, who); let controlsOk = before.status === 200;
+  let before = await control(fixture, who); let controlsOk = before.httpStatus === 200;
   for (const item of [{ token: undefined, status: 401, http: 'no-jwt-401', log: 'no-jwt-api-result-absent' }, { token: writeOnly.accessToken, status: 403, http: 'write-only-get-403', log: 'write-only-api-result-absent' }] as const) {
     await tick(); const stored = await snapshotOwnedStorage(fixture); const since = Date.now();
     const refused: Probe = await send(fixture, LIST, item.token ? { token: item.token } : {}); const until = Date.now(); const unchanged = stored === await snapshotOwnedStorage(fixture); await tick();
     recorder.recordInput({ httpStatus: refused.status });
     score.ok('http', item.http, refused.status === item.status); score.ok('dynamodb', 'refusal-owner-rate-storage-unchanged', unchanged); score.ok('s3', 'refusal-image-versions-unchanged', unchanged);
-    const after = await control(fixture, who); controlsOk &&= after.status === 200 && after.requestId !== before.requestId;
-    defer(recorder, id, item.log, { service: 'api', requestId: edgeId(refused), since, until, status: item.status, mode: 'absent' }, { before, after });
+    const after = await control(fixture, who); controlsOk &&= after.httpStatus === 200 && after.log.requestId !== before.log.requestId;
+    defer(recorder, id, item.log, { service: 'api', requestId: edgeId(refused), since, until, status: item.status, mode: 'absent' }, { before: before.log, after: after.log });
     before = after;
   }
   score.ok('http', 'valid-controls-200', controlsOk);

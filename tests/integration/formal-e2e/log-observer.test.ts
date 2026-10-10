@@ -34,7 +34,7 @@ void test('cleanup pairs differing Lambda/service IDs only in one stream and una
   observer.ingest([event('s2', { lambdaRequestId: 'lambda-2', operation: 'cleanup_start' }, 'invoke-1', 'owned-cleanup', 105)]);
   assert.equal(observer.cleanupMatch(expected), false);
 });
-void test('all negative checks share one poll deadline; missing required delivery fails', async () => {
+void test('missing required delivery fails after observing through until plus grace', async () => {
   let now = 100; let polls = 0;
   const observer = new LogObserver(groups, { clock: () => now, sleep: async ms => { now += ms; }, fetch: async () => { polls++; return []; } });
   const checks = Array.from({ length: 8 }, (_, i) => ({ caseId: `case${i}`, assertion: 'delivery', expectation: { service: 'api' as const, requestId: `r${i}`, status: 200, since: 100, mode: 'present' as const } }));
@@ -229,4 +229,18 @@ void test('an observer failure is recorded as service, fixed cause and allowlist
   for (const [error, cause, errorName] of cases) { const safe = safeObserverFailure(toObserverFailure(error, 'cleanup')); assert.deepEqual(safe, { service: 'cleanup', cause, errorName }); assert.equal(JSON.stringify(safe).includes('CANARY') || JSON.stringify(safe).includes('Secret'), false); }
   assert.deepEqual(safeObserverFailure(new Error('RAW_CANARY')), { service: 'unknown', cause: 'other', errorName: 'other' });
   assert.deepEqual(safeObserverFailure({ service: 'RAW_CANARY', cause: 'RAW_CANARY', errorName: 'RAW_CANARY' }), { service: 'unknown', cause: 'other', errorName: 'other' });
+});
+
+// Budget exhaustion must truncate nothing silently: a scan that cannot finish inside its budget fails with a fixed code.
+void test('a scan that exhausts its budget with groups remaining fails the absent check instead of passing', async () => {
+  let now = 1000;
+  const observer = new LogObserver(groups, { clock: () => now, sleep: async ms => { now += ms; }, fetch: async () => { now += 20_000; return []; } });
+  const absent = { service: 'api' as const, requestId: 'refused', status: 401, since: 900, until: 950, mode: 'absent' as const };
+  await assert.rejects(observer.flush([{ caseId: 'c', assertion: 'absent', expectation: absent }], 1000, 1000), (error: unknown) => error instanceof ObserverFailure && error.cause === 'deadline-abort');
+});
+void test('a partially paginated fetch at the end of the budget fails instead of returning the partial pages', async () => {
+  let calls = 0;
+  const client = { async send(): Promise<unknown> { calls++; await new Promise(resolve => setTimeout(resolve, 150)); return { events: [], nextToken: `t${calls}` }; } }; // ignores the abort signal
+  const observer = sdkObserver(client as never, groups);
+  await assert.rejects(observer.poll(Date.now() - 1000, Date.now() + 100), (error: unknown) => error instanceof ObserverFailure && error.cause === 'deadline-abort');
 });

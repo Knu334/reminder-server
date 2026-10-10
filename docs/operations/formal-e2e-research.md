@@ -331,4 +331,5 @@ Schedule受付だけでは成功としない。passには、job done、delete ma
 - 原因は、Task 11で追加したコードではなく、既存の観測処理の競合である（`tests/e2e/floci/support/logs.ts`の`flush`）。api suiteには`absent`チェックがあるため、観測は60秒の期限まで続く。最後のpollは期限までの残り時間（0〜1000ミリ秒）しか予算を持たず、Floci側の応答がそれより遅いと`AbortSignal.timeout`が中断し、一括観測全体が失敗した。実際のSDK clientを使った遅延clientのoffline再現では、300ミリ秒の遅延で8回中3回、この中断が起きた。
 - run 3で実際に起きた例外は記録されていなかった（旧実装は例外を真偽値に潰していた）。このため、上記は再現とコード解析から導いた原因であり、live上の例外で確認したものではない。
 - 修正は、各pollに期限とは別の独立した予算（30秒）を与え、`until`＋猶予（500ミリ秒）以降に開始したpollが完了するまで観測を終えないことにした。pollが失敗した場合は一括観測が失敗し、不在チェックは不完全な走査では合格しない。観測失敗は、service、固定のcause（deadline-abort、request-timeout、pagination-repeat、sdk-error、other）、許可リストにあるSDKエラー名だけを`observer-failure.json`へ記録する。生のメッセージは保存しない。
-- この修正後のlive結果は、下の再実行の記録を参照する。
+- 修正後のlive結果（refresh.5、commit 51e2c5e）: `--suite api`（e2e-6f7fc0e7）は140件中138件が合格し、失敗はAPI-09/id-percentとAPI-09/id-slashの2件（action-failed、Floci側のpath decode）だった。全体run（e2e-f4d81679、816秒）は268件中239件が合格、2件失敗、24件not-run、3件unsupportedで、observer-failedは0件、cleanupは18/18（errors 0、leaks 0）だった。
+- 追加の修正（fix round 2）: 予算切れで走査が途中で打ち切られる場合（残りのgroupを飛ばす、または途中のページで終わる）も、黙って終わらずに固定code（deadline-abort）で一括観測を失敗させる。不完全な走査で不在チェックが合格することはない。
