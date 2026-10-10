@@ -27,7 +27,7 @@ Floci本体へのパッチ（refresh.2のSourceAccount、refresh.3のListVersion
 | AUTH-11/hosted-revoke-endpoint | Flociにhosted `/oauth2/revoke` のrouteが無く、S3のcatch-all 400が返る。失効自体はRevokeToken APIで確認した |
 | IMG-09/signature-enforcement | 改ざんした署名と期限切れのURLを、Flociは拒否しない。S3の署名・期限の強制は検証できていない。対照は正常に取得できる |
 
-互換性調査としては、実際の採否と制限が記録されたので完了である。各機能の動作確認とは区別する。
+互換性調査としては、Flociが対応しているかどうかと、その制限が記録されたので完了である。各機能の動作確認とは区別する。
 
 ## 実施していないこと
 

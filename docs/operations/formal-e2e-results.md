@@ -28,7 +28,15 @@ APIとcleanup Lambdaの実CodeSha256は、TF-03/settings（pass）がZIPのdiges
 
 ## 全suiteの結果
 
-run ID: `e2e-4e5b822a-19de-46c4-8f1e-bbc3b27d8bc6`、コマンド `npm run test:e2e:floci`、exit 1、821秒（約13.7分）。期限は実行75分と回収15分である。exit 1の理由はlayer Iのnot-runで、failは0件である。
+run ID: `e2e-4e5b822a-19de-46c4-8f1e-bbc3b27d8bc6`、コマンド `npm run test:e2e:floci`、exit 1、821秒（約13.7分）。821秒はnpmの起動を含む、controllerが測った経過時間である。results内の時刻だけで測ると、17:18:34〜17:32:12の818秒になる。期限は実行75分と回収15分である。exit 1の理由はlayer Iのnot-runで、failは0件である。
+
+| layer | 件数 | pass | not-run | unsupported |
+| --- | --- | --- | --- | --- |
+| E（実Floci、実HTTP） | 228 | 228 | 0 | 0 |
+| L（実Lambdaなど） | 16 | 13 | 0 | 3 |
+| I（offline） | 24 | 0 | 24 | 0 |
+
+268件は全て必須である。件数は `results.json` から数えた。
 
 | suite | pass | fail | not-run | unsupported | case時間の合計 |
 | --- | --- | --- | --- | --- | --- |
@@ -77,7 +85,7 @@ Floci側のJava回帰試験は、Temurin JDK 25.0.1+8と `./mvnw` で実行し�
 
 - **API-09/id-percent**: refresh.6では、作成は201でも `Location` による読み戻しがFlociの500になり、失敗した（e2e-90d3b042）。host filterが保存したpathを後続の `@PreMatching` filterが `UriInfo.getPath()` で再度decodeし、単独の `%` で例外になるためである。refresh.7はhost filterで `%` を `%25` に直し、e2e-4e5b822aでid-percent、id-slash、id-percent2fを含むAPI-09の全21件が合格した。
 - **rate消費とgateの順**: 認証済みで、入力検証や未公開gateに拒否された要求は、rateを1消費する。rateの確認は、gateと意味検査（`src/api/event.ts` 51行付近の注記）より前にあるためである。API-01とAPI-14が確認する。認証に拒否された要求はrateを消費しない。
-- **API-14**: 対応表のAPI-14は `API-14/rate-boundary-seeded` に対応する。合成のcount 119から実GETの200、次の429とRetry-Afterの一致を確認した。121回の送信や120並行ではない。
+- **API-14**: 対応表のAPI-14は、4件のcase（`API-14/auth-refusal-rate-unchanged`、`API-14/input-422-rate-plus-one`、`API-14/unpublished-503-rate-plus-one`、`API-14/rate-boundary-seeded`）に対応する。上限の確認は `API-14/rate-boundary-seeded` である。合成のcount 119から実GETの200、次の429とRetry-Afterの一致を確認した。121回の送信や120並行ではない。
 - **AUTH-11**: 失効はRevokeToken APIで行い、原tokenとdescendantの拒否を確認した。hosted `/oauth2/revoke` は、Flociにrouteが無く、S3のcatch-all 400が返るため、別caseでunsupportedとした。S3のInvalidArgument署名を持つ400だけをunsupportedとし、他の400はfailとする。
 - **CLEAN-01**: 開始・skip・終了のログとFunctionErrorは実Lambdaで確認した。heartbeatの不在は、L（実Lambda）ではCloudWatchを読んでおらず、tests/runtimeとcleanup-resume.test.tsのU/I証拠である。
 - **清掃ログの「60秒以内」**: 最後の入力から60.5秒までの観測窓と、その後の有界な完了pollを指す。最悪で約120.5秒になる。ハードな60秒の打ち切りではない。走査が途中で打ち切られた場合は、不在をpassにせずfailにする。
@@ -88,7 +96,7 @@ Floci側のJava回帰試験は、Temurin JDK 25.0.1+8と `./mvnw` で実行し�
 
 ## review・rulingsの要約
 
-Task 1〜11の各taskはreview済みで、live中に見つかったharnessの欠陥は修正し、再reviewした。主なrulingは、Floci patch（refresh.2〜6）のユーザー承認、`-refresh=false` を回収時だけに限る判断、S3 Controlの限定relay、観測失敗と走査の途中打ち切りをfailとする判断である。全文は台帳（`.superpowers/sdd/2026-10-08-reminder-server-formal-e2e/progress.md`）にある。台帳はgit管理外の作業記録である。
+Task 1〜11の各taskはreview済みで、live中に見つかったharnessの欠陥は修正し、再reviewした。主なrulingは、Floci patch（refresh.2〜7）と、devcontainerへのJDK導入のユーザー承認、`-refresh=false` を回収時だけに限る判断、S3 Controlの限定relay、観測失敗と走査の途中打ち切りをfailとする判断である。全文は台帳（`.superpowers/sdd/2026-10-08-reminder-server-formal-e2e/progress.md`）にある。台帳はgit管理外の作業記録である。
 このtaskの後に、controllerが全task範囲の最終reviewを行う。
 
 ## 全case一覧と結果

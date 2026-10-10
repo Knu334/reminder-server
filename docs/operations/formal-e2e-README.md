@@ -6,7 +6,7 @@
 
 ## 前提
 
-- Node 24.21.0、npm 11.11.1、Python 3.13.16、Terraform 1.16.5、AWS provider 6.67.0。`scripts/e2e/preflight.ts` がNodeとnpmとPythonの版、`package.json` の固定版と `node_modules` の一致、`floci` のDNSが単一のprivate IPv4であること、health の版を確認する。一つでも違えば試験前に終了する（exit 2）。
+- Node 24.21.0、npm 11.11.1、Python 3.13.16、Terraform 1.16.5、AWS provider 6.67.0。npm、Python、Terraform、provider pluginは、リポジトリ直下の `.superpowers/tools/aws-sdd` に置く。子processのPATHは、この場所の `node_modules/.bin` と `bin` をリポジトリ直下から組み立てる。`scripts/e2e/preflight.ts` がNodeとnpmとPythonとTerraformの版、`package.json` の固定版と `node_modules` の一致、`floci` のDNSが単一のprivate IPv4であること、health の版を確認する。一つでも違えば試験前に終了する（exit 2）。
 - Floci imageは `floci-local:2.2.0-refresh.7-native`（healthの版は `2.2.0-local-refresh.7-native`）。preflightはこの版でないと試験前に終了する。host側のbuildと再作成は、ホストの `.devcontainer/floci/README.md` に従う。この手順では `.devcontainer` を編集しない。
 - Flociのパッチ（refresh.2〜7）は、SourceAccountの保持、ListVersionsByFunctionの順序、CloudWatch alarmのpercentile項目、HTTP APIのCORSとraw path、host経由のraw path、`%25` の再encodeである。Java回帰試験はTemurin JDK 25と `./mvnw` で実行し、refresh.7では対象11クラスが300/300合格した。上流のDocker依存の試験は動かせず、全件実行はしていない。詳細は[限界](formal-e2e-limitations.md)にある。
 - 依存の準備は `npm ci`。ZIPはE2E自身が現行の `npm run build` / `npm run package` から作り直す。古いZIPや固定hashは使わない。
@@ -16,7 +16,7 @@
 
 | 目的 | コマンド | 要する時間 |
 | --- | --- | --- |
-| offlineの結合試験（layer I、E2E harness、本書の対応表照合） | `npm run test:integration:e2e` | 約5秒（161件） |
+| offlineの結合試験（layer I、E2E harness、本書の対応表照合） | `npm run test:integration:e2e` | 約5秒（163件） |
 | 全suite（Floci必須group全て、TF caseを含む） | `npm run test:e2e:floci` | 約12〜14分（実測751〜833秒。最新は821秒） |
 | Terraform構築だけの診断 | `npm run test:e2e:terraform` | 構築は約2分（実測128秒） |
 | 一つのsuiteだけ | `npx tsx scripts/e2e/run.ts --layer floci --suite api` | suiteによる |
@@ -24,7 +24,7 @@
 
 実測前の見積りは22〜65分だった。期限は実行75分と回収15分で、全suiteの実測はその約6分の1である。
 suite名は `harness`、`terraform`、`fixture`、`auth`、`api`、`storage`、`images`、`cleanup`、`operations`、`logging`、`scheduler` で、この順に逐次実行する。一部だけを選んだ実行は `partial: true` になり、成功しても全体の完了とは扱わない。
-`npm run test:e2e:terraform` は構築とTF-01/03の診断だけで、全suite成功後に同じ構築を再実行する目的では使わない。
+`npm run test:e2e:terraform` はTF-01/applyだけを実行する構築の診断で、全suite成功後に同じ構築を再実行する目的では使わない。
 
 ## 実行の流れ
 
@@ -42,9 +42,9 @@ suite名は `harness`、`terraform`、`fixture`、`auth`、`api`、`storage`、`
 
 出力の最後のJSONに `selected`、`passed`、`failed`、`notRun`、`unsupported`、`cleanup`、`exitCode`、`complete` が出る。
 
-- `complete` が真になるのは、registry全件を選び、failとnot-runが0で、回収に失敗も漏れも無いときだけである。部分選択やlayer Iのnot-runが残る場合は偽になる。
+- `complete` が真になるのは、registry全件を選び、failとnot-runが0で、回収に失敗も漏れも無いときだけである。部分選択や、layer Iのnot-runが残る場合は偽になる。測定済みの互換性調査のunsupportedは、`complete` を妨げない。最新のrunで偽になった原因は、layer Iの24件のnot-runだけである。
 - layer Iのcaseはliveでは実行されず、not-run（implementation-pending）として残る。offlineの試験は `npm run test:integration:e2e` が行う。各Iのcaseと試験fileの対応は[結果](formal-e2e-results.md)にあり、`tests/integration/formal-e2e/coverage.test.ts` が存在を確認する。
-- `unsupported` は、互換性調査の項目で、測定した結果として未対応と判明した場合だけである。behaviorのcaseがunsupportedになることはなく、failとして数える。
+- `unsupported` は、互換性調査の項目で、測定した結果として未対応と判明した場合に付く。この場合は終了コードに影響しない。behaviorのcaseは、TF-01/applyで必須APIの未対応を測定した場合（required-api-unsupported）だけがunsupportedになり、終了コードは1になる。それ以外のbehaviorのcaseは、failとして数える。
 - `fail` は、入力を送った後の不一致である。not-runへ戻さない。
 - 結果は `artifacts/formal-e2e/<run ID>/` の `results.json`（case別）、`inventory.json`、`manifest.json`（所有リソースとprocess）、`independent-absence.json` に保存する。token、code、URL、本文、生ログは保存しない。このdirectoryはgit管理外である。
 
@@ -58,12 +58,12 @@ suite名は `harness`、`terraform`、`fixture`、`auth`、`api`、`storage`、`
 ## 回収と手動の再開
 
 通常は実行の最後に、`manifest.json` に記録した所有リソースだけを回収し、独立した読み取りで不在を確認する（最新のrunでは83件が不在、leak 0）。
-processが強制終了（SIGKILL）された場合は、finallyが走らない。次の順で手動回収する。
+processが強制終了（SIGKILL）された場合は、finallyが走らない。SIGINTとSIGTERMのhandlerは最初の1回だけ有効なので、2回目のSIGINTも、SIGKILLと同じく回収を飛ばす。次の順で手動回収する。
 
-1. 他にE2Eのprocessが動いていないことを確認し、`.superpowers/locks/` に残ったlockを確認する。動作中のrunがあるときはlockを消さない。
+1. 他にE2Eのprocessが動いていないことを確認し、`.superpowers/locks/` と `artifacts/.formal-e2e-build.lock` に残ったlockを確認する。後者はZIPの作成中に強制終了されると残り、次のrunが開始時に失敗する。動作中のrunがあるときはlockを消さない。
 2. 該当runの `manifest.json` と `cleanup-identities.json` で、所有リソースの名前とIDを確認する。名前の先頭は `e2e-<8桁hex>-` である。
 3. その一覧にあるリソースだけを、Floci（`http://floci:4566`）上で削除する。同じ名前でも、一覧に無いものには触れない。
-4. 削除後に不在を読み戻し、lockを消す。
+4. 削除後に不在を読み戻し、残ったlockを消す。
 
 ## CI runnerの準備
 
