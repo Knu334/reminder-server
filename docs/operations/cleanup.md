@@ -108,3 +108,15 @@ notBreaching. Reviewed scheduler enablement changes heartbeat missing data to
 breaching/actions enabled together; other alarm evaluation continues. Unpublished
 cleanup skips work rather than implying a successful heartbeat. Logs contain
 request/operation/count/status/duration only, no private IDs/titles/images/tokens.
+
+## 2026-10-10 ローカル実測に基づくログの読み方（追記）
+
+以下はローカルのFloci（refresh.6）で実測した内容であり、実AWSでの清掃の実績ではない。本番操作の手順は上の各節に従い、ここでは混同しない。
+実行手順と結果は[正式E2E手順](formal-e2e-README.md)、[結果](formal-e2e-results.md)にある。
+
+- 1回の同期invokeは、同じlog streamに2種類のログを出す。開始ログは `operation: cleanup_start` と、Lambdaの `lambdaRequestId` を持つ。終了ログは `operation: cleanup` と、サービスが付けた `requestId`（run ID）、`evaluated`、`deletes`、`incomplete`、`durationMs` を持つ。2つのIDは別の値で、同じとは扱わない。同一stream・同一観測区間の開始と終了を1組とする。
+- 未公開（gateがfalse）の場合は、開始ログと `skippedUnpublished: true`、`evaluated 0`、`deletes 0` の応答になり、保存は変わらない。終了ログとheartbeatは期待しない。
+- 公開後は、開始と終了の組と件数が、実際のjobのdone、delete marker、checkpointと一致する。例として、1回目が `evaluated 1 / deletes 1`、同じ入力の2回目が `deletes 0` だった。
+- 不正なeventはFunctionErrorで終わり、開始ログの前に拒否される。保存は変わらない。
+- 観測は、最後の入力から60.5秒までの観測窓と、その後の有界な完了pollで行う。最悪で約120.5秒かかる。不在の確認は、前後に正常な対照ログがあり、走査が最後まで終わったときだけ成立する。途中で打ち切られた走査は失敗として扱う。
+- heartbeatの送信はCloudWatchで読んでいない。未公開でheartbeatが出ないことの根拠は、`tests/runtime/cleanup.test.ts` と `tests/integration/formal-e2e/cleanup-resume.test.ts` のoffline試験である。

@@ -5,7 +5,7 @@ import { mkdtemp, writeFile, rm, readFile, readdir, lstat } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { createEvidence, recordProcess, terraformActions, finalizeResults, runCase, evidenceContext, flushPendingLogs } from '../../tests/e2e/floci/support/evidence.ts';
 import type { ProcessEvidence } from '../../tests/e2e/floci/support/evidence.ts';
-import type { CaseDefinition, Evidence, ProvisionedStack, E2EFixture } from '../../tests/e2e/floci/support/types.ts';
+import type { CaseDefinition, Evidence, ProvisionedStack, E2EFixture, RunSummary } from '../../tests/e2e/floci/support/types.ts';
 import { definitions, caseActions, caseGuards, caseMeasurements, measurementUnsupportedReasons, caseAuthId } from '../../tests/e2e/floci/support/cases.ts';
 import '../../tests/e2e/floci/support/auth-cases.ts';
 import '../../tests/e2e/floci/support/api-cases.ts';
@@ -120,6 +120,11 @@ export async function runConstruction(evidence: Evidence, definition: CaseDefini
 export async function recordConstructionDependents(evidence: Evidence, selected: CaseDefinition[], stack?: ProvisionedStack): Promise<void> {
   for (const def of selected.filter(def => def.id !== 'TF-01/apply')) await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: stack?.constructionOutputs.length ? 'implementation-pending' : 'prerequisite-failed' });
 }
+/** A run claims full completion only for the whole registry with no failure, no not-run case and a clean recovery; a passing subset is partial. */
+export function claimsFullCompletion(summary: RunSummary, selected: number, inventory: number): boolean {
+  return selected === inventory && summary.selected === inventory && summary.exitCode === 0 && summary.failed === 0 && summary.notRun === 0 &&
+    summary.cleanup.errors === 0 && summary.cleanup.leaks === 0 && summary.cleanup.attempted === summary.cleanup.succeeded;
+}
 export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
   // Parse before DNS, files, children or any other external side effect.
   const flags = new Map<string, string>();
@@ -199,7 +204,7 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
       cleanup.errors += suiteErrors + (driverFailed ? 1 : 0);
       const summary = await evidence.finish(cleanup);
       if (exit !== 2) exit = driverFailed ? 1 : summary.exitCode;
-      console.log(JSON.stringify({ runId: evidence.runId, partial, foundationOnly: false, ...summary, exitCode: exit }));
+      console.log(JSON.stringify({ runId: evidence.runId, partial, foundationOnly: false, complete: !driverFailed && !partial && claimsFullCompletion(summary, selected.length, definitions.length), ...summary, exitCode: exit }));
     }
   } catch { console.error('E2E_HARNESS_FAILED'); exit = 1; }
   finally { process.removeListener('SIGINT', cancel); process.removeListener('SIGTERM', cancel); }

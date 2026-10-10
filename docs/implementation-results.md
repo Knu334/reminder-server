@@ -157,3 +157,16 @@ API Lambdaの成功・拒否・503を1呼び出し1件で記録する変更を�
 今回のinfra:checkはTerraformが見つからず、initを実行できなかった。3rootの検証成功とは数えず、ツール復旧とinfra確認は正式E2E計画Task3に残す。APIログ変更ではTerraformとAWS設定を変更していない。
 
 今回確認したのは合成fixtureとconsole captureによるローカル動作であり、CloudWatchへの実配信は未検証である。API/清掃Lambdaログの実配信は後続の正式E2Eで確認する。Flociリソース作成、実AWS、GHA、デプロイ、移行、Cognito操作、PITR、push/PR/mergeは行っていない。過去の331件などの結果、承認済み設計、保持方針はこの追補で書き換えていない。
+
+## 2026-10-10 正式E2Eの実測追補
+
+パッチ済みFloci（`floci-local:2.2.0-refresh.6-native`）で、本番3rootと現行ZIPを使う正式ローカルE2Eを実施した。過去の件数・承認済み設計・旧E2E結果は書き換えていない。全case一覧と根拠は[正式E2E結果](operations/formal-e2e-results.md)、制限は[限界](operations/formal-e2e-limitations.md)にある。
+
+- 判定は**未完了**。全suite実行（`e2e-90d3b042-447f-41ed-a28f-44dac22b54a4`、833秒、HEAD 6af5288）は、268件中240件が合格、1件が失敗（API-09/id-percent）、24件が未実行（layer I）、3件が未対応（OBS-04、AUTH-11のhosted revoke、IMG-09）だった。回収は18/18、独立した不在確認は83/83。
+- API-09/id-percentの失敗はFloci側の二重decodeと診断した（ソース読解、確度約90%）。refresh.7の修正案はユーザーの承認待ちである。
+- layer Iの24件はliveでは実行されず、offline試験（`npm run test:integration:e2e`）で実施した。liveの合格には数えていない。
+- Floci patch（refresh.2〜6）のJava回帰試験は、JDKが無く一度もcompile・実行していない。
+- 同日のoffline検証は、`npm test` が runtime 188/188、operations 74/74、delivery 97/97、audit 0 vulnerabilities、typecheck/lint/build/package/verify:zip 成功だった。`npm run infra:check` は、このsandboxでTerraform initがproviderのinstallに失敗し、3rootの検証成功には数えていない。
+- 実AWS、IAMとTLSの強制、PITR、Chromeは実施していない。
+
+API結果ログの実配信（CloudWatch Logs）は、正式E2Eの必須caseとして合格した。Gateway access logの配信は、Floci側の未対応（unsupported）である。

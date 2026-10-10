@@ -103,3 +103,13 @@ PITR does not restore Cognito credentials; code rollback does not restore data.
 No actual migration, publication, image deletion, Cognito operation, PITR or
 rollback has been executed. Fees remain budget inputs with no measured bill or
 latency. Historical audit/approval material remains historical.
+
+## 2026-10-10 追記: 正式ローカルE2Eの結果
+
+以下はローカルのFloci上の実測であり、実AWS・Chrome・PITRの受け入れではない。上の英語の記録と、旧19タスクの検証結果は、そのまま保持する。
+手順は[正式E2E手順](formal-e2e-README.md)、結果は[結果](formal-e2e-results.md)、制限は[限界](formal-e2e-limitations.md)にある。
+
+- 全suite実行（run `e2e-90d3b042-447f-41ed-a28f-44dac22b54a4`、833秒、期限は実行75分と回収15分）は、268件中240件が合格、失敗1件（API-09/id-percent、Floci側の二重decode、未解決）、未実行24件（layer I。offline試験で実施）、未対応3件（OBS-04、AUTH-11のhosted revoke、IMG-09）である。したがって正式E2Eは未完了である。
+- 回収は18/18で、errors 0、leaks 0。所有リソース83件の不在を独立した読み取りで確認した。
+- S3のTLS強制（SecureTransport）は、policyの保持を読み戻しただけで、強制は未検証である。署名と期限の強制も未検証である。
+- 実AWSでの検証（IAMの強制、PITRの実復旧、Chromeの実login、GHA、本番Terraformの適用）は、この追記の対象外であり、別途の承認が必要である。

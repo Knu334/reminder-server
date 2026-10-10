@@ -333,3 +333,14 @@ Schedule受付だけでは成功としない。passには、job done、delete ma
 - 修正は、各pollに期限とは別の独立した予算（30秒）を与え、`until`＋猶予（500ミリ秒）以降に開始したpollが完了するまで観測を終えないことにした。pollが失敗した場合は一括観測が失敗し、不在チェックは不完全な走査では合格しない。観測失敗は、service、固定のcause（deadline-abort、request-timeout、pagination-repeat、sdk-error、other）、許可リストにあるSDKエラー名だけを`observer-failure.json`へ記録する。生のメッセージは保存しない。
 - 修正後のlive結果（refresh.5、commit 51e2c5e）: `--suite api`（e2e-6f7fc0e7）は140件中138件が合格し、失敗はAPI-09/id-percentとAPI-09/id-slashの2件（action-failed、Floci側のpath decode）だった。全体run（e2e-f4d81679、816秒）は268件中239件が合格、2件失敗、24件not-run、3件unsupportedで、observer-failedは0件、cleanupは18/18（errors 0、leaks 0）だった。
 - 追加の修正（fix round 2）: 予算切れで走査が途中で打ち切られる場合（残りのgroupを飛ばす、または途中のページで終わる）も、黙って終わらずに固定code（deadline-abort）で一括観測を失敗させる。不完全な走査で不在チェックが合格することはない。
+
+## 2026-10-10 Task 12: 全case照合と最終実測の記録
+
+最新の全suite実行は `e2e-90d3b042-447f-41ed-a28f-44dac22b54a4`（refresh.6、833秒）で、268件中240件が合格、1件が失敗（API-09/id-percent）、24件が未実行（layer I）、3件が未対応だった。結果は[結果](formal-e2e-results.md)に、全268件を登録caseと一対一で記録した。`tests/integration/formal-e2e/coverage.test.ts` が、対応表の69要件、registryのcase、結果の一覧、layer Iとoffline試験の対応を機械的に照合する。
+
+この文書の過去の節にある実施前の見込みと、途中のrefresh.2〜5の実測は、当時の記録として残した。現在の判定は、結果と限界の文書が優先する。
+
+- API-09/id-percentは、Floci側の二重decodeと診断した。ソース読解による診断で、liveの診断runはしていない。修正案（refresh.7）はユーザーの承認待ちで、未適用である。
+- Floci patch（refresh.2〜6）のJava回帰試験は、JDKが無く一度もcompile・実行していない。
+- 清掃ログの「最後の入力から60秒」は、最後の入力から60.5秒までの観測窓と、その後の有界な完了pollと解釈した。最悪で約120.5秒である。
+- S3 policyはpolicy-present（保持を読み戻した）であり、強制はenforcement-unverified（未検証）である。
