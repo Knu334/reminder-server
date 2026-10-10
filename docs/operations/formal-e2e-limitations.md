@@ -1,19 +1,23 @@
 # 正式E2E 既知の限界と未検証事項
 
-[結果](formal-e2e-results.md)の数値の読み方を補う。ここに書いたものは、合格として扱わない。2026-10-10時点の記録である。
+[結果](formal-e2e-results.md)の数値の読み方を補う。ここに書いたものは、合格として扱わない。2026-10-10〜11の記録である。
 
-## 未解決の失敗（open item）
+## 解決済みの失敗
 
 | 項目 | 内容 | 状態 |
 | --- | --- | --- |
-| API-09/id-percent | `%25` を含むIDの読み戻しがFlociの500になる。host filterが保存したpathを、後続の `@PreMatching` filter（DLM、ResourceExplorer2、EmrServerless、AppConfig、GlobalCors）が `UriInfo.getPath()` で再度decodeし、末尾の `%` で例外になる。診断は[診断記録](../../.superpowers/sdd/2026-10-08-reminder-server-formal-e2e/api09-percent-diagnosis.md)（ソース読解、確度約90%、liveの診断runなし） | Floci側の問題。refresh.7（host filterで残りのpathの `%` を `%25` にしてから組み立てる案）はユーザーの承認待ち。承認・適用・再実行までは失敗のまま |
+| API-09/id-percent | refresh.6では、`%25` を含むIDの読み戻しがFlociの500になった。host filterが保存したpathを、後続の `@PreMatching` filterが `UriInfo.getPath()` で再度decodeし、末尾の `%` で例外になるためである | refresh.7（host filterで `%` を `%25` にしてから組み立てる）で解決。e2e-4e5b822aでAPI-09の全21件が合格 |
 | API-09/id-slash（`a%2Fb`） | refresh.5では失敗だったが、refresh.6で合格した | 解決 |
 
-これが解決しない限り、正式E2Eの完了とは言えない。
+現在、失敗のcaseはない。ただし、下記の未対応・未実施の項目と、layer Iがliveで実行されない点により、正式E2Eはliveの実行としては完了と言えない。
 
-## Floci patchの検証の欠落
+## Floci patchの検証
 
-Floci本体へのパッチ（refresh.2のSourceAccount、refresh.3のListVersionsByFunction順序、refresh.4のCloudWatch alarm percentile項目、refresh.5のHTTP API CORSとraw path、refresh.6のhost経由のraw path）に付けたJava回帰試験は、一度もcompileも実行もしていない。開発コンテナにJDKが無く、Dockerfileが `-DskipTests` でbuildするためである。パッチの動作は、live runでの観測だけで確認している。JDKの導入とJava試験の実行は、ユーザーが検討中である。
+Floci本体へのパッチ（refresh.2のSourceAccount、refresh.3のListVersionsByFunction順序、refresh.4のCloudWatch alarm percentile項目、refresh.5のHTTP API CORSとraw path、refresh.6のhost経由のraw path、refresh.7の `%25` の再encode）のJava回帰試験は、Temurin JDK 25.0.1+8と `./mvnw` で実行した（上流17c99047にパッチを適用したclone）。
+
+- refresh.6のパッチ: パッチの回帰11クラスが299件中1件失敗した（`100%25` が200ではなく500）。API-09/id-percentの診断どおりの失敗である。
+- refresh.7のパッチ: 同じ11クラスが300/300合格した。apigateway・apigatewayv2・coreのpackageは1853件で失敗0（skip 6）、checkstyle:checkも成功した。
+- 未実施: 上流のDocker依存のLambda・WebSocket試験は開発コンテナで動かせないため、`./mvnw test` の全件実行はしていない。
 
 ## 測定の結果、未対応と判明した項目（unsupported）
 
@@ -40,7 +44,7 @@ Floci本体へのパッチ（refresh.2のSourceAccount、refresh.3のListVersion
 - layer Iの24件は、live実行ではnot-runのまま残る（既存のharnessの設計）。offline試験で実施し、[結果](formal-e2e-results.md)に対応を記録した。そのため `complete` はliveの実行だけでは真にならない。この扱いを変える場合は、harnessの設計判断が必要になる。
 - 対応表のOPS-05とTF-04には、専用のcaseがない（TF-01、TF-03のcaseとoffline試験が担う）。AUTH-08、OBS-01、SAFE-04も専用のcaseを持たず、既存の回帰とAに残る。
 - 清掃ログの「60秒以内」は、最後の入力から60.5秒の観測窓と、その後の有界な完了pollである。最悪で約120.5秒かかる。
-- ZIPは、run時点のworking treeから作る。今回のrunには、ユーザーの未commitのnull-body修正（`src/api/event.ts`）が含まれる。
+- ZIPは、run時点のworking treeから作る。最新のrun（e2e-4e5b822a）にも、ユーザーの未commitのnull-body修正（`src/api/event.ts`）が含まれる。
 - `infra:check` は、このsandboxではTerraform initがprovider installで失敗した。3rootの検証としては数えない。
 - Gateway v2のaccess logとScheduler、Terraformの一部のread APIは、Flociの実装に依存する。read APIが501を返す場合は、独立した読み取りで確認したときだけunsupportedとし、それ以外は失敗とする。
 - 画像のS3 URLはBearer相当のcapabilityである。URLを知る者の共有は、別の契約である。

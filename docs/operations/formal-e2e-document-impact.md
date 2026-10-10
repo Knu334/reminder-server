@@ -111,3 +111,5 @@
 | [費用・ログ方針](formal-e2e-cost-and-logging.md) | 前提（保持期間、ログ量）に変更がないため更新していない。東京の総額も再計算していない |
 
 GHAのworkflow、`.devcontainer`、製品コード、本番Terraformは変更していない。
+
+2026-10-11: refresh.7の再実行に合わせて、[結果](formal-e2e-results.md)、[限界](formal-e2e-limitations.md)、[手順](formal-e2e-README.md)、[対応表](formal-e2e-coverage.md)の最終列、implementation-results、acceptance、researchを更新・追記した。過去の記述は残した。

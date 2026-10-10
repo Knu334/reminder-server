@@ -113,3 +113,13 @@ latency. Historical audit/approval material remains historical.
 - 回収は18/18で、errors 0、leaks 0。所有リソース83件の不在を独立した読み取りで確認した。
 - S3のTLS強制（SecureTransport）は、policyの保持を読み戻しただけで、強制は未検証である。署名と期限の強制も未検証である。
 - 実AWSでの検証（IAMの強制、PITRの実復旧、Chromeの実login、GHA、本番Terraformの適用）は、この追記の対象外であり、別途の承認が必要である。
+
+## 2026-10-11 追記: 正式ローカルE2Eの再実行（Floci refresh.7）
+
+2026-10-10の追記（refresh.6の実行）は当時の記録として残す。以下は、ローカルのFlociでの最新の実測である。
+
+- 全suite実行（run `e2e-4e5b822a-19de-46c4-8f1e-bbc3b27d8bc6`、821秒）は、268件中241件が合格、失敗0件、未実行24件（layer I。offline試験で実施）、未対応3件（OBS-04、AUTH-11のhosted revoke、IMG-09）である。前回失敗したAPI-09/id-percentは、refresh.7で合格した。
+- 回収は18/18で、errors 0、leaks 0。所有リソース83件の不在を独立して確認した。
+- layer Iがliveで実行されず、未対応3件があるため、正式E2Eはliveの実行としては完了と言えない。S3のTLS・署名・期限の強制は未検証のままである。
+- Floci patchのJava回帰試験は、Temurin JDK 25で実行し、refresh.7の対象11クラスが300/300合格した。上流のDocker依存の試験は実行していない。
+- 実AWS、IAMの強制、PITR、Chromeは対象外であり、別途の承認が必要である。

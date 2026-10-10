@@ -2,13 +2,13 @@
 
 パッチ済みFloci上で、本番の3 Terraform rootと現行ZIPを構築し、実PKCEログインから認証済みAPI、DynamoDB、S3、CloudWatch Logsまでを照合するローカル試験の手順である。実AWS、GHA、本番Cognito、本番データには触れない。
 設計は[設計](../superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)、要件ごとの対応は[対応表](formal-e2e-coverage.md)、実施結果は[結果](formal-e2e-results.md)、できなかったことは[限界](formal-e2e-limitations.md)に分けて書く。
-ここに書いた値は、2026-10-10のrefresh.6による実測と、同日のoffline試験に基づく。
+ここに書いた値は、2026-10-10のrefresh.7による実測と、offline試験に基づく。
 
 ## 前提
 
 - Node 24.21.0、npm 11.11.1、Python 3.13.16、Terraform 1.16.5、AWS provider 6.67.0。`scripts/e2e/preflight.ts` がNodeとnpmとPythonの版、`package.json` の固定版と `node_modules` の一致、`floci` のDNSが単一のprivate IPv4であること、health の版を確認する。一つでも違えば試験前に終了する（exit 2）。
-- Floci imageは `floci-local:2.2.0-refresh.6-native`（healthの版は `2.2.0-local-refresh.6-native`）。host側のbuildと再作成はホストの `.devcontainer/floci/README.md`に従う。この手順では `.devcontainer` を編集しない。
-- Flociのパッチ（refresh.2〜6）は、SourceAccountの保持、ListVersionsByFunctionの順序、CloudWatch alarmのpercentile項目、HTTP APIのCORSとraw path、host経由のraw pathである。これらのJava回帰試験は、JDKが無くDockerfileが `-DskipTests` のため一度も実行していない。実際のimageでの動作はlive試験で確認したが、Java試験の合格は確認していない。
+- Floci imageは `floci-local:2.2.0-refresh.7-native`（healthの版は `2.2.0-local-refresh.7-native`）。preflightはこの版でないと試験前に終了する。host側のbuildと再作成は、ホストの `.devcontainer/floci/README.md` に従う。この手順では `.devcontainer` を編集しない。
+- Flociのパッチ（refresh.2〜7）は、SourceAccountの保持、ListVersionsByFunctionの順序、CloudWatch alarmのpercentile項目、HTTP APIのCORSとraw path、host経由のraw path、`%25` の再encodeである。Java回帰試験はTemurin JDK 25と `./mvnw` で実行し、refresh.7では対象11クラスが300/300合格した。上流のDocker依存の試験は動かせず、全件実行はしていない。詳細は[限界](formal-e2e-limitations.md)にある。
 - 依存の準備は `npm ci`。ZIPはE2E自身が現行の `npm run build` / `npm run package` から作り直す。古いZIPや固定hashは使わない。
 - 本番のprivate入力、`.env`、Terraform state、認証情報は読まない。必要な値は全て合成値である。
 
@@ -17,7 +17,7 @@
 | 目的 | コマンド | 要する時間 |
 | --- | --- | --- |
 | offlineの結合試験（layer I、E2E harness、本書の対応表照合） | `npm run test:integration:e2e` | 約5秒（161件） |
-| 全suite（Floci必須group全て、TF caseを含む） | `npm run test:e2e:floci` | 約12〜14分（実測751〜833秒） |
+| 全suite（Floci必須group全て、TF caseを含む） | `npm run test:e2e:floci` | 約12〜14分（実測751〜833秒。最新は821秒） |
 | Terraform構築だけの診断 | `npm run test:e2e:terraform` | 構築は約2分（実測128秒） |
 | 一つのsuiteだけ | `npx tsx scripts/e2e/run.ts --layer floci --suite api` | suiteによる |
 | 一つのcaseだけ | `npx tsx scripts/e2e/run.ts --layer floci --case API-09/id-percent` | 構築と回収を含む |

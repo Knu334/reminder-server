@@ -24,7 +24,7 @@ scoped独立re-reviewも完了し、5件すべての修正を確認しました�
 [実装引き継ぎと新セッション用プロンプト](docs/superpowers/handoffs/2026-10-08-reminder-server-formal-e2e-implementation.md)を参照してください。
 本番Terraformの3rootをrunにつき一組だけ構築・設定確認し、入力に対するHTTP・DDB・S3・API/清掃ログを照合する案です。Gatewayログ配信は互換性調査として制限を記録します。
 API結果ログは[独立した先行計画](docs/superpowers/plans/2026-10-08-reminder-server-api-result-logging.md)で承認・検証・コミット後に、E2Eの前提とします。
-API操作の結果ログと正式E2Eのnpm入口（`npm run test:e2e:floci`、`test:e2e:terraform`、`test:integration:e2e`）は2026-10-10に実装済みです。実行手順は[正式E2E手順](docs/operations/formal-e2e-README.md)、実測結果は[結果](docs/operations/formal-e2e-results.md)、制限は[限界](docs/operations/formal-e2e-limitations.md)にあります。最新の全suite実行は268件中240件が合格、1件が失敗（API-09/id-percent、Floci側）、24件が未実行（layer I、offline試験で実施）、3件が未対応で、正式E2Eは未完了です。上記の過去の成功件数には含めません。
+API操作の結果ログと正式E2Eのnpm入口（`npm run test:e2e:floci`、`test:e2e:terraform`、`test:integration:e2e`）は2026-10-10に実装済みです。実行手順は[正式E2E手順](docs/operations/formal-e2e-README.md)、実測結果は[結果](docs/operations/formal-e2e-results.md)、制限は[限界](docs/operations/formal-e2e-limitations.md)にあります。最新の全suite実行（Floci refresh.7）は268件中241件が合格、失敗0件、24件が未実行（layer I、offline試験で実施）、3件が未対応で、liveの実行としては完了と言えません。上記の過去の成功件数には含めません。
 
 ## ローカル検証
 

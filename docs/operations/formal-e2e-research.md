@@ -344,3 +344,9 @@ Schedule受付だけでは成功としない。passには、job done、delete ma
 - Floci patch（refresh.2〜6）のJava回帰試験は、JDKが無く一度もcompile・実行していない。
 - 清掃ログの「最後の入力から60秒」は、最後の入力から60.5秒までの観測窓と、その後の有界な完了pollと解釈した。最悪で約120.5秒である。
 - S3 policyはpolicy-present（保持を読み戻した）であり、強制はenforcement-unverified（未検証）である。
+
+## 2026-10-11 Task 12 更新: refresh.7の再実行
+
+refresh.7で全suiteを再実行した（`e2e-4e5b822a-19de-46c4-8f1e-bbc3b27d8bc6`、821秒）。268件中241件が合格、失敗0件、未実行24件（layer I）、未対応3件だった。API-09/id-percentは、host filterで `%` を `%25` にするrefresh.7の修正で解消した。上の2026-10-10の節（refresh.6、API-09/id-percentのopen item、Java回帰試験の未実行）は当時の記録であり、現在の判定は[結果](formal-e2e-results.md)と[限界](formal-e2e-limitations.md)が優先する。
+
+Floci patchのJava回帰試験は、Temurin JDK 25と `./mvnw` で実行した。refresh.6のパッチでは11クラスが299件中1件失敗し、refresh.7では300/300合格した。上流のDocker依存の試験は動かせず、全件実行はしていない。

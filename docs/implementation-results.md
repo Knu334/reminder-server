@@ -170,3 +170,11 @@ API Lambdaの成功・拒否・503を1呼び出し1件で記録する変更を�
 - 実AWS、IAMとTLSの強制、PITR、Chromeは実施していない。
 
 API結果ログの実配信（CloudWatch Logs）は、正式E2Eの必須caseとして合格した。Gateway access logの配信は、Floci側の未対応（unsupported）である。
+
+## 2026-10-11 追補: 正式E2Eの再実行（Floci refresh.7）
+
+Floci refresh.7（`floci-local:2.2.0-refresh.7-native`）で全suiteを再実行した。上の2026-10-10の記述（refresh.6の実行 `e2e-90d3b042`）は、当時の記録として残す。全case一覧は[正式E2E結果](operations/formal-e2e-results.md)が、現在の判定を示す。
+
+- 全suite実行（`e2e-4e5b822a-19de-46c4-8f1e-bbc3b27d8bc6`、821秒、HEAD 6871291）は、268件中241件が合格、失敗0件、未実行24件（layer I）、未対応3件（OBS-04、AUTH-11のhosted revoke、IMG-09）だった。API-09/id-percentは、refresh.7のhost filter修正で合格した。回収は18/18、独立した不在確認は83/83。
+- layer Iがliveで実行されず、未対応3件が残るため、liveの実行としての `complete` は偽のままで、正式E2Eの完了とは言えない。
+- Floci patchのJava回帰試験は、Temurin JDK 25で実行した。refresh.6のパッチでは対象11クラスで299件中1件が失敗し（`100%25`）、refresh.7では300/300合格した。上流のDocker依存の試験は動かせず、全件実行はしていない。
