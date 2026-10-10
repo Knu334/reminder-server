@@ -7,6 +7,22 @@ export type CleanupCompletion = { since: number; until: number; completed: boole
 export type CleanupExpectation = { since: number; until: number; nextSince?: number; status?: number; evaluated?: number; deletes?: number; skippedUnpublished?: boolean };
 /** Floci stamps Lambda log events when it ingests them, slightly after the HTTP response returns. */
 export const LOG_TIMESTAMP_GRACE_MS = 500;
+/** Bounded budget of every observation poll, including the last one. */
+export const FINAL_POLL_BUDGET_MS = 30_000;
+/** A failed observation, reduced to a fixed vocabulary: never the raw SDK message. */
+export type ObserverCause = 'deadline-abort' | 'request-timeout' | 'pagination-repeat' | 'sdk-error' | 'other';
+const SAFE_ERROR_NAMES = new Set(['TimeoutError', 'AbortError', 'ResourceNotFoundException', 'ThrottlingException', 'InvalidParameterException', 'ServiceUnavailableException', 'InternalFailure', 'UnknownOperationException', 'AccessDeniedException', 'UnrecognizedClientException']);
+export class ObserverFailure extends Error {
+  constructor(readonly service: LogExpectation['service'], readonly cause: ObserverCause, readonly errorName: string) { super('OBSERVER_FAILED'); this.name = 'ObserverFailure'; }
+  toJSON(): { service: string; cause: ObserverCause; errorName: string } { return { service: this.service, cause: this.cause, errorName: this.errorName }; }
+}
+export function toObserverFailure(error: unknown, service: LogExpectation['service']): ObserverFailure {
+  if (error instanceof ObserverFailure) return error;
+  const name = (error as { name?: string })?.name; const message = (error as { message?: string })?.message;
+  const errorName = typeof name === 'string' && SAFE_ERROR_NAMES.has(name) ? name : 'other';
+  const cause: ObserverCause = message === 'LOG_PAGINATION_FAILED' ? 'pagination-repeat' : name === 'TimeoutError' ? 'request-timeout' : name === 'AbortError' ? 'deadline-abort' : errorName !== 'other' || (error as { $metadata?: unknown })?.$metadata ? 'sdk-error' : 'other';
+  return new ObserverFailure(service, cause, errorName);
+}
 type Parsed = ObservedEvent & { invokeId?: string; doc: Record<string, unknown> };
 export class LogObserver {
   private events = new Map<string, Parsed>();
@@ -67,11 +83,22 @@ export class LogObserver {
     if (completion && (!completion.completed || completion.since !== expected.since || completion.until !== expected.until || completion.status !== 200 || !completion.result || completion.result.evaluated !== end.evaluated || completion.result.deletes !== end.deletes)) return false;
     return (expected.status === undefined || end.status === expected.status) && (expected.evaluated === undefined || end.evaluated === expected.evaluated) && (expected.deletes === undefined || end.deletes === expected.deletes) && (!completion?.result || completion.result.skippedUnpublished === false);
   }
-  async poll(since: number, until?: number): Promise<void> { if (!this.io) return; const deadline = until ?? this.io.clock() + 30_000; for (const group of Object.values(this.groups)) { const remaining = deadline - this.io.clock(); if (remaining <= 0) break; this.ingest(await this.io.fetch(group, since, remaining)); } }
+  async poll(since: number, until?: number): Promise<void> { if (!this.io) return; const deadline = until ?? this.io.clock() + 30_000; for (const [service, group] of Object.entries(this.groups) as [LogExpectation['service'], string][]) { const remaining = deadline - this.io.clock(); if (remaining <= 0) break; try { this.ingest(await this.io.fetch(group, since, remaining)); } catch (error) { throw toObserverFailure(error, service); } } }
+  /**
+   * Observation window: every poll gets its own bounded budget (never the leftover of the deadline), and the scan only ends once a poll
+   * started at or after until + grace, so an absent check is never judged on a scan that stopped inside its window. Any poll failure rejects
+   * with a fixed ObserverFailure; nothing is ever passed on an incomplete scan.
+   */
   async flush(checks: PendingLogCheck[], lastInput: number, timeout = 60_000, additionalReady: () => boolean = () => true): Promise<LogCheckResult[]> {
     if (!this.io) return checks.map(check => this.check(check));
     const until = lastInput + Math.min(60_000, timeout); const since = Math.min(lastInput, ...checks.map(check => check.expectation.since), ...checks.flatMap(check => check.controls ? [check.controls.before.since] : []));
-    do { await this.poll(since, until); if (checks.length && checks.every(check => check.expectation.mode === 'present' && this.check(check).matched) && additionalReady()) break; const remaining = until - this.io.clock(); if (remaining <= 0) break; await this.io.sleep(Math.min(1000, remaining)); } while (this.io.clock() < until);
+    const covered = until + LOG_TIMESTAMP_GRACE_MS;
+    for (;;) {
+      const started = this.io.clock(); await this.poll(since, started + FINAL_POLL_BUDGET_MS);
+      if (checks.length && checks.every(check => check.expectation.mode === 'present' && this.check(check).matched) && additionalReady()) break;
+      if (started >= covered) break;
+      await this.io.sleep(Math.max(1, Math.min(1000, covered - this.io.clock())));
+    }
     return checks.map(check => this.check(check));
   }
 }

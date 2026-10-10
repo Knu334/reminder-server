@@ -75,17 +75,17 @@ async function control(fixture: SuiteFixture, who: Actor): Promise<LogExpectatio
 }
 register('OBS-02/gateway-refusal-result-absence', async (fixture, recorder, score) => {
   const id = 'OBS-02/gateway-refusal-result-absence'; const who = await actor(fixture, 'a'); const writeOnly = await fixture.auth.login('a', [WRITE], 'primary');
-  let before = await control(fixture, who);
+  let before = await control(fixture, who); let controlsOk = before.status === 200;
   for (const item of [{ token: undefined, status: 401, http: 'no-jwt-401', log: 'no-jwt-api-result-absent' }, { token: writeOnly.accessToken, status: 403, http: 'write-only-get-403', log: 'write-only-api-result-absent' }] as const) {
     await tick(); const stored = await snapshotOwnedStorage(fixture); const since = Date.now();
     const refused: Probe = await send(fixture, LIST, item.token ? { token: item.token } : {}); const until = Date.now(); const unchanged = stored === await snapshotOwnedStorage(fixture); await tick();
     recorder.recordInput({ httpStatus: refused.status });
     score.ok('http', item.http, refused.status === item.status); score.ok('dynamodb', 'refusal-owner-rate-storage-unchanged', unchanged); score.ok('s3', 'refusal-image-versions-unchanged', unchanged);
-    const after = await control(fixture, who);
+    const after = await control(fixture, who); controlsOk &&= after.status === 200 && after.requestId !== before.requestId;
     defer(recorder, id, item.log, { service: 'api', requestId: edgeId(refused), since, until, status: item.status, mode: 'absent' }, { before, after });
     before = after;
   }
-  score.ok('http', 'valid-controls-200', true);
+  score.ok('http', 'valid-controls-200', controlsOk);
 });
 
 register('OBS-03/cleanup-start-end-pairing', async (fixture, recorder, score) => {

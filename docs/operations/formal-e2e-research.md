@@ -320,6 +320,15 @@ Schedule受付だけでは成功としない。passには、job done、delete ma
 
 ### 未検証・制限
 
-- S3 TLS policy: 設定gateは、Deny policyがFlociへ保持されていること（policy-present）を読み戻した。Flociは`aws:SecureTransport`を評価しないため、HTTPリクエストの成功は強制の証拠にならない。強制はenforcement-unverifiedとして記録し、実AWSでの確認に残す。
+- S3 TLS policy: 設定gateは、Deny policyがFlociへ保持されていること（policy-present）を読み戻した。Flociが`aws:SecureTransport`を評価するかどうかは、今回測定していない。HTTPリクエストの成功は強制の証拠にならないため、強制はenforcement-unverifiedとして記録し、実AWSでの確認に残す。
 - 日次運転（03:00 UTCの実起動）、実AWS IAM（Scheduler roleのtrustやSourceArn）、非同期invokeの再試行（retry 2、event age 3600秒）の同等性は確認していない。one-time probeはretry 0で、1回だけ起動する構成にした。
 - v1直接proxyのログはv2/JWT経路の代用にしていない。Gateway配信の観測は、gateway log groupのeventの有無だけを使う。
+
+### 全体runで起きたAPI結果ログ配信の失敗と修正（Task 11 fix round 1）
+
+`--suite logging`と`--suite scheduler`の後に実施した全体run（e2e-7790bc79、811秒、exit 1）では、必須のAPI CloudWatch配信の評価がapi suiteの136ケースすべてで失敗した（reason `observer-failed`）。各ケースのHTTP、DynamoDB、S3の出力は合格しており、失敗は配信ログの一括観測が例外で終わったことによる。同じ製品ZIP・同じFlociのlive-5では、同じケースが合格していた。
+
+- 原因は、Task 11で追加したコードではなく、既存の観測処理の競合である（`tests/e2e/floci/support/logs.ts`の`flush`）。api suiteには`absent`チェックがあるため、観測は60秒の期限まで続く。最後のpollは期限までの残り時間（0〜1000ミリ秒）しか予算を持たず、Floci側の応答がそれより遅いと`AbortSignal.timeout`が中断し、一括観測全体が失敗した。実際のSDK clientを使った遅延clientのoffline再現では、300ミリ秒の遅延で8回中3回、この中断が起きた。
+- run 3で実際に起きた例外は記録されていなかった（旧実装は例外を真偽値に潰していた）。このため、上記は再現とコード解析から導いた原因であり、live上の例外で確認したものではない。
+- 修正は、各pollに期限とは別の独立した予算（30秒）を与え、`until`＋猶予（500ミリ秒）以降に開始したpollが完了するまで観測を終えないことにした。pollが失敗した場合は一括観測が失敗し、不在チェックは不完全な走査では合格しない。観測失敗は、service、固定のcause（deadline-abort、request-timeout、pagination-repeat、sdk-error、other）、許可リストにあるSDKエラー名だけを`observer-failure.json`へ記録する。生のメッセージは保存しない。
+- この修正後のlive結果は、下の再実行の記録を参照する。

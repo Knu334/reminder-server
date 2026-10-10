@@ -39,7 +39,7 @@ void test('all negative checks share one poll deadline; missing required deliver
   const observer = new LogObserver(groups, { clock: () => now, sleep: async ms => { now += ms; }, fetch: async () => { polls++; return []; } });
   const checks = Array.from({ length: 8 }, (_, i) => ({ caseId: `case${i}`, assertion: 'delivery', expectation: { service: 'api' as const, requestId: `r${i}`, status: 200, since: 100, mode: 'present' as const } }));
   const result = await observer.flush(checks, 100, 60_000);
-  assert.equal(now, 60_100); assert.ok(polls <= 183); assert.ok(result.every(check => !check.matched));
+  assert.equal(now, 60_600, "the scan ends only after a poll started at until plus grace"); assert.ok(polls <= 186); assert.ok(result.every(check => !check.matched));
 });
 
 void test('cleanup rejects a result emitted by a different Lambda invoke in the same stream', () => {
@@ -186,4 +186,47 @@ void test('present checks keyed only by lambdaRequestId or operation get the cap
   assert.equal(observer.match({ ...base, operation: 'gw' }), true);
   assert.equal(observer.match({ ...base, operation: 'gw', notAfter: 111 }), false, 'capped at the next input');
   assert.equal(observer.match({ ...base, operation: 'gw', since: 113, until: 120 }), false);
+});
+
+// Slow-client race: the final poll of an absent-check flush inherited a near-zero budget and its abort failed every pending case.
+import { sdkObserver, ObserverFailure } from '../../e2e/floci/support/logs.ts';
+function slowClient(latencyMs: number, events: Record<string, { eventId: string; message: string; logStreamName: string; timestamp: number }[]>, failAfter = Infinity) {
+  let calls = 0;
+  return { async send(command: { input: { logGroupName: string } }, options?: { abortSignal?: AbortSignal }): Promise<unknown> {
+    calls++; const signal = options?.abortSignal;
+    await new Promise<void>((resolve, reject) => { const timer = setTimeout(resolve, latencyMs); signal?.addEventListener('abort', () => { clearTimeout(timer); reject(Object.assign(new Error('RAW_ABORT_CANARY'), { name: 'AbortError' })); }); });
+    if (calls > failAfter) throw Object.assign(new Error('RAW_SDK_CANARY'), { name: 'TimeoutError' });
+    return { events: events[command.input.logGroupName] ?? [] };
+  } };
+}
+const apiEvent = (id: string, requestId: string, timestamp: number) => ({ eventId: id, message: JSON.stringify({ requestId, status: 200, operation: 'list' }), logStreamName: 's', timestamp });
+void test('the last observation completes with its own bounded budget and absence covers the window up to until plus grace', async () => {
+  const t0 = Date.now();
+  const client = slowClient(200, { 'owned-api': [apiEvent('b', 'before', t0 + 10), apiEvent('a', 'after', t0 + 60)] });
+  const observer = sdkObserver(client as never, groups);
+  const absent = { service: 'api' as const, requestId: 'refused', status: 401, since: t0 + 20, until: t0 + 40, mode: 'absent' as const };
+  const before = { service: 'api' as const, requestId: 'before', status: 200, since: t0, until: t0 + 15, mode: 'present' as const };
+  const after = { ...before, requestId: 'after', since: t0 + 50, until: t0 + 70 };
+  const results = await observer.flush([{ caseId: 'c', assertion: 'absent', expectation: absent, controls: { before, after } }], t0 + 40, 500);
+  assert.equal(results[0]!.matched, true);
+  assert.equal(Date.now() >= t0 + 40 + 500, true, 'the window was observed through until plus grace');
+});
+void test('an incomplete final scan never passes absence and fails with a fixed observer code', async () => {
+  const t0 = Date.now(); const client = slowClient(100, {}, 3);
+  const observer = sdkObserver(client as never, groups);
+  const absent = { service: 'api' as const, requestId: 'refused', status: 401, since: t0 + 20, until: t0 + 40, mode: 'absent' as const };
+  await assert.rejects(observer.flush([{ caseId: 'c', assertion: 'absent', expectation: absent }], t0 + 40, 400), (error: unknown) => error instanceof ObserverFailure && error.cause === 'request-timeout' && ['api', 'cleanup', 'gateway'].includes(error.service) && error.errorName === 'TimeoutError' && !JSON.stringify(error).includes('CANARY') && !error.message.includes('CANARY'));
+});
+
+import { safeObserverFailure } from '../../e2e/floci/support/evidence.ts';
+import { toObserverFailure } from '../../e2e/floci/support/logs.ts';
+void test('an observer failure is recorded as service, fixed cause and allowlisted SDK name only', () => {
+  const cases: [unknown, string, string][] = [
+    [Object.assign(new Error('RAW_CANARY'), { name: 'AbortError' }), 'deadline-abort', 'AbortError'], [Object.assign(new Error('RAW_CANARY'), { name: 'TimeoutError' }), 'request-timeout', 'TimeoutError'],
+    [new Error('LOG_PAGINATION_FAILED'), 'pagination-repeat', 'other'], [Object.assign(new Error('RAW_CANARY'), { name: 'ThrottlingException', $metadata: { httpStatusCode: 400 } }), 'sdk-error', 'ThrottlingException'],
+    [Object.assign(new Error('RAW_CANARY'), { name: 'SecretNamedError', $metadata: {} }), 'sdk-error', 'other'], [new Error('RAW_CANARY'), 'other', 'other'],
+  ];
+  for (const [error, cause, errorName] of cases) { const safe = safeObserverFailure(toObserverFailure(error, 'cleanup')); assert.deepEqual(safe, { service: 'cleanup', cause, errorName }); assert.equal(JSON.stringify(safe).includes('CANARY') || JSON.stringify(safe).includes('Secret'), false); }
+  assert.deepEqual(safeObserverFailure(new Error('RAW_CANARY')), { service: 'unknown', cause: 'other', errorName: 'other' });
+  assert.deepEqual(safeObserverFailure({ service: 'RAW_CANARY', cause: 'RAW_CANARY', errorName: 'RAW_CANARY' }), { service: 'unknown', cause: 'other', errorName: 'other' });
 });

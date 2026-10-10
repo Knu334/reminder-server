@@ -224,11 +224,18 @@ export async function runCase(definition: CaseDefinition, evidence: Evidence, ac
   if (checks.length) { state.pending.set(def.id, { definition: def, result, checks }); await save(evidence, state); }
   else await evidence.record(result);
 }
+const OBSERVER_SERVICES = ['api', 'cleanup', 'gateway']; const OBSERVER_CAUSES = ['deadline-abort', 'request-timeout', 'pagination-repeat', 'sdk-error', 'other'];
+const OBSERVER_ERROR_NAMES = ['TimeoutError', 'AbortError', 'ResourceNotFoundException', 'ThrottlingException', 'InvalidParameterException', 'ServiceUnavailableException', 'InternalFailure', 'UnknownOperationException', 'AccessDeniedException', 'UnrecognizedClientException'];
+/** Fixed vocabulary only: a service, a cause and an allowlisted SDK error name; any other value (and every message) is dropped. */
+export function safeObserverFailure(error: unknown): { service: string; cause: string; errorName: string } {
+  const value = error as { service?: unknown; cause?: unknown; errorName?: unknown } | null; const pick = (candidate: unknown, allowed: string[], fallback: string): string => typeof candidate === 'string' && allowed.includes(candidate) ? candidate : fallback;
+  return { service: pick(value?.service, OBSERVER_SERVICES, 'unknown'), cause: pick(value?.cause, OBSERVER_CAUSES, 'other'), errorName: pick(value?.errorName, OBSERVER_ERROR_NAMES, 'other') };
+}
 export async function flushPendingLogs(evidence: Evidence, observe: (checks: PendingLogCheck[]) => Promise<LogCheckResult[]>): Promise<void> {
   const state = stateOf(evidence); const pending = [...state.pending.values()];
   if (!pending.length) return;
   let matches: LogCheckResult[] = []; let observerFailed = false;
-  try { matches = await observe(structuredClone(pending.flatMap(item => item.checks))); } catch { observerFailed = true; }
+  try { matches = await observe(structuredClone(pending.flatMap(item => item.checks))); } catch (error) { observerFailed = true; await writeFile(join(state.directory, 'observer-failure.json'), JSON.stringify(safeObserverFailure(error), null, 2) + '\n', { mode: 0o600 }).catch(() => undefined); }
   for (const item of pending) {
     const assertions = item.checks.map(check => {
       const found = matches.filter(match => match.caseId === check.caseId && match.assertion === check.assertion);
