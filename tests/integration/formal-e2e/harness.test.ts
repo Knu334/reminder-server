@@ -4,7 +4,7 @@ import http from 'node:http';
 import { PassThrough, Readable } from 'node:stream';
 import { mkdtemp, readFile, readdir, rm, stat, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createEvidence, runCase, flushPendingLogs, recordProcess } from '../../e2e/floci/support/evidence.ts';
 import { localRequest } from '../../e2e/floci/support/transport.ts';
 import { definitions } from '../../e2e/floci/support/cases.ts';
@@ -205,6 +205,23 @@ void test('child_env_discards_ambient_credentials_proxy_and_node_hooks', () => {
   assert.equal(env.AWS_SHARED_CREDENTIALS_FILE, '/dev/null'); assert.equal(env.AWS_CONFIG_FILE, '/dev/null');
   assert.equal(env.AWS_EC2_METADATA_DISABLED, 'true'); assert.equal(env.AWS_ACCESS_KEY_ID, 'local');
   assert.equal(env.AWS_REGION, 'ap-northeast-1');
+});
+
+void test('child_path_is_built_from_the_repository_root', () => {
+  const root = resolve(__dirname, '../../..');
+  const [first, second, ...rest] = childEnvironment().PATH!.split(':');
+  assert.equal(first, join(root, '.superpowers/tools/aws-sdd/node_modules/.bin'));
+  assert.equal(second, join(root, '.superpowers/tools/aws-sdd/bin'));
+  assert.deepEqual(rest, ['/usr/local/bin', '/usr/bin', '/bin']);
+});
+
+void test('terraform_version_is_matched_on_the_first_line_and_a_mismatch_is_not_accepted', async t => {
+  const cwd = dirname(await temporary(t));
+  const ok = await runChild('terraform', ['version'], { cwd, timeoutMs: 30_000, expectedOutput: 'Terraform v1.16.5' });
+  assert.equal(ok.status, 'succeeded'); assert.equal(ok.expectedOutputMatched, true);
+  const wrong = await runChild('terraform', ['version'], { cwd, timeoutMs: 30_000, expectedOutput: 'Terraform v1.16.4' });
+  assert.equal(wrong.expectedOutputMatched, false);
+  assert.equal(JSON.stringify(wrong).includes('linux'), false);
 });
 
 void test('child_timeout_records_safe_diagnostic_and_never_raw_output', async t => {

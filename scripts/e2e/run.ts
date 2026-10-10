@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { mkdtemp, writeFile, rm, readFile, readdir, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { createEvidence, recordProcess, terraformActions, finalizeResults, runCase, evidenceContext, flushPendingLogs } from '../../tests/e2e/floci/support/evidence.ts';
@@ -31,11 +31,12 @@ export class RunBudget {
     return Math.max(0, Math.min(deadlines.cleanup - (this.clock() - this.cleanupStarted), deadlines.total - (this.clock() - this.started)));
   }
 }
+const toolBin = join(resolve(__dirname, '../..'), '.superpowers/tools/aws-sdd');
 export function childEnvironment(): NodeJS.ProcessEnv {
   // Do not copy PATH, NODE_OPTIONS, npm config, credentials, profiles, proxy or
   // endpoint variables from the invoking process. Values below are synthetic.
   return {
-    PATH: '/workspace/.worktrees/aws-sdd/.superpowers/tools/aws-sdd/node_modules/.bin:/workspace/.worktrees/aws-sdd/.superpowers/tools/aws-sdd/bin:/usr/local/bin:/usr/bin:/bin',
+    PATH: `${join(toolBin, 'node_modules/.bin')}:${join(toolBin, 'bin')}:/usr/local/bin:/usr/bin:/bin`,
     CHECKPOINT_DISABLE: '1', TF_IN_AUTOMATION: '1', TF_CLI_CONFIG_FILE: '/dev/null',
     LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', TZ: 'UTC',
     AWS_REGION: 'ap-northeast-1', AWS_DEFAULT_REGION: 'ap-northeast-1',
@@ -95,7 +96,7 @@ export async function runChild(tool: ProcessEvidence['tool'], args: string[], op
       if (settled) return; settled = true; clearTimeout(timer); options.signal?.removeEventListener('abort', kill);
       resolve({ tool, status: timedOut ? 'timeout' : exitCode === 0 ? 'succeeded' : 'failed', exitCode,
         durationMs: Math.round(performance.now() - started), timeoutMs: options.timeoutMs,
-        ...(failedAction ? { failedAction } : {}), expectedOutputMatched: options.expectedOutput !== undefined && !overflow && stdout.trim() === options.expectedOutput });
+        ...(failedAction ? { failedAction } : {}), expectedOutputMatched: options.expectedOutput !== undefined && !overflow && (tool === 'terraform' ? stdout.split('\n')[0]!.trim() : stdout.trim()) === options.expectedOutput });
     };
     child.on('error', () => finish(null)); child.on('close', code => { options.captureStderr?.(stderr); if (code === 0 && !timedOut && !overflow) options.captureStdout?.(stdout); finish(code); });
     if (options.stdin !== undefined) { child.stdin?.on('error', () => undefined); child.stdin?.end(options.stdin); }

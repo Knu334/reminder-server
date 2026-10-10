@@ -9,8 +9,8 @@ import type { ProcessEvidence } from '../../tests/e2e/floci/support/evidence.ts'
 export async function preflight(record?: (result: ProcessEvidence) => Promise<void>): Promise<LocalTarget> {
   try {
     if (process.version !== 'v24.21.0') throw new Error('version');
-    for (const [tool, expectedOutput] of [['npm', '11.11.1'], ['python3', 'Python 3.13.16']] as const) {
-      const result = await runChild(tool, ['--version'], { cwd: process.cwd(), timeoutMs: 30_000, expectedOutput, ...(record ? { record } : {}) });
+    for (const [tool, expectedOutput, args] of [['npm', '11.11.1', ['--version']], ['python3', 'Python 3.13.16', ['--version']], ['terraform', 'Terraform v1.16.5', ['version']]] as const) {
+      const result = await runChild(tool, [...args], { cwd: process.cwd(), timeoutMs: 30_000, expectedOutput, ...(record ? { record } : {}) });
       if (result.status !== 'succeeded' || !result.expectedOutputMatched) throw new Error('version');
     }
     const manifest = JSON.parse(await readFile(join(process.cwd(), 'package.json'), 'utf8')) as { dependencies: Record<string, string>; devDependencies: Record<string, string> };
