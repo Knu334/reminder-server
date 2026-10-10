@@ -1,4 +1,7 @@
 ARG IMAGEARCH
+# Floci patchのJava回帰試験を開発コンテナで実行するためのJDK。
+FROM ${IMAGEARCH:-arm64v8/}eclipse-temurin:25.0.1_8-jdk AS jdk
+
 FROM ${IMAGEARCH:-arm64v8/}node:25.8.2-trixie-slim
 
 ARG TZ
@@ -40,6 +43,11 @@ RUN sed -i 's/^# *ja_JP.UTF-8 UTF-8/ja_JP.UTF-8 UTF-8/' /etc/locale.gen && \
 ENV LANG=ja_JP.UTF-8
 ENV LANGUAGE=ja_JP:ja
 ENV LC_ALL=ja_JP.UTF-8
+
+# Temurin JDK 25（Floci patchのJava試験用。Mavenは Floci 付属の ./mvnw を使う）
+COPY --from=jdk /opt/java/openjdk /opt/java/openjdk
+ENV JAVA_HOME=/opt/java/openjdk
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 # Ensure default node user has access to /usr/local/share
 RUN chown -R node:node /usr/local/share
