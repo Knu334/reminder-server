@@ -215,3 +215,47 @@ void test('a_real_child_that_crashes_times_out_or_cannot_load_is_run_failed', as
   assert.deepEqual(await runOfflineFile(hang, { timeoutMs: 60_000, signal: controller.signal }), { kind: 'run-failed' }, 'cancellation kills the child');
   assert.deepEqual(await runOfflineFile(join(directory, 'absent.test.ts'), { timeoutMs: 60_000 }), { kind: 'run-failed' });
 });
+
+void test('a_crash_after_passing_tests_is_run_failed_even_for_a_repo_relative_path', async t => {
+  const directory = await temporary(t);
+  const { relative } = await import('node:path');
+  const relativeTo = (file: string) => relative(process.cwd(), file); // Node names a file-level failure after the path as given on the command line
+  const write = async (name: string, body: string) => { const file = join(directory, name); await writeFile(file, body); return relativeTo(file); };
+  const exitAfter = await write('exit.test.ts', "import { test } from 'node:test'; test('a', () => {}); test('b', () => { setTimeout(() => process.exit(3), 5); });");
+  const asyncError = await write('async.test.ts', "import { test } from 'node:test'; test('a', () => {}); test('b', () => { setTimeout(() => { throw new Error('late'); }, 5); });");
+  const plain = await write('plain.test.ts', "import { test } from 'node:test'; test('a', () => {});");
+  assert.ok(!exitAfter.startsWith('/'), 'the probe path is relative');
+  assert.deepEqual(await runOfflineFile(exitAfter, { timeoutMs: 60_000 }), { kind: 'run-failed' });
+  assert.deepEqual(await runOfflineFile(asyncError, { timeoutMs: 60_000 }), { kind: 'run-failed' });
+  assert.deepEqual(await runOfflineFile(plain, { timeoutMs: 60_000 }), { kind: 'tests', tests: [{ name: 'a', status: 'pass' }] });
+  // A file that cannot load (syntax error) is a crashed run (offline-run-failed), not a missing title.
+  assert.deepEqual(await runOfflineFile(await write('syntax.test.ts', 'test('), { timeoutMs: 60_000 }), { kind: 'run-failed' });
+});
+
+void test('a_link_without_titles_never_passes', () => {
+  assert.deepEqual(judgeCase([{ file: 'f', titles: [] }], new Map<string, FileOutcome>([['f', { kind: 'tests', tests: [{ name: 'x', status: 'pass' }] }]])), { status: 'fail', reason: 'offline-test-missing' });
+  assert.deepEqual(judgeCase([], new Map()), { status: 'fail', reason: 'offline-test-missing' });
+});
+
+void test('junit_attribute_edge_cases_are_parsed_exactly_or_fail_closed', () => {
+  const wrap = (body: string) => `<?xml version="1.0" encoding="utf-8"?>\n<testsuites>\n${body}\n</testsuites>\n`;
+  // An unescaped '>' inside an attribute value does not end the tag early.
+  assert.deepEqual(parseJunit(wrap('<testcase name="a > b" classname="test" file="/x.test.ts"/>')), [{ name: 'a > b', status: 'pass' }]);
+  assert.deepEqual(parseJunit(wrap('<testcase name="a > b" classname="test" file="/x.test.ts" failure="x > y"><failure message="m"/></testcase>')), [{ name: 'a > b', status: 'fail' }]);
+  // A double-escaped quote decodes once: the name keeps the literal entity text and never becomes a different title.
+  assert.deepEqual(parseJunit(wrap('<testcase name="say &amp;quot;hi&amp;quot;" classname="test" file="/x.test.ts"/>')), [{ name: 'say &quot;hi&quot;', status: 'pass' }]);
+  // A raw quote or any attribute that is not name="value" makes the report unparsable instead of guessing.
+  assert.equal(parseJunit(wrap('<testcase name="a"b" classname="test" file="/x.test.ts"/>')), undefined);
+  assert.equal(parseJunit(wrap('<testcase name="ok" classname="test" file="/x.test.ts"/>\n<testcase name=unquoted classname="test"/>')), undefined);
+  assert.equal(parseJunit(wrap('<testcase classname="test" file="/x.test.ts"/>')), undefined, 'no name');
+  // A failed test is not hidden by a later passing test of the same name being the only one parsed.
+  assert.deepEqual(parseJunit(wrap('<testcase name="d" file="/x.test.ts" failure="x"><failure/></testcase><testcase name="d" file="/x.test.ts"/>'))!.map(item => item.status), ['fail', 'pass']);
+});
+
+void test('budget_exhausted_cases_use_the_offline_phase', async t => {
+  const directory = join(await temporary(t), 'run');
+  const evidence = await createEvidence([caseById(SINGLE)], directory);
+  await runOfflineEvidence(evidence, [caseById(SINGLE)], { runner: runnerFor([SINGLE]).runner, allow: () => 0 });
+  const result = (await resultsOf(directory)).get(SINGLE)!;
+  assert.deepEqual([result.status, result.phase, result.reason], ['not-run', 'offline', 'budget-exhausted']);
+});

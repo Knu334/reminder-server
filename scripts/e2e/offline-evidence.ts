@@ -37,21 +37,31 @@ function decode(text: string): string {
     return Number.isSafeInteger(code) && code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : '';
   });
 }
-/** Parse Node's JUnit report. A skipped, todo, failed or cancelled test is `not-pass` or `fail`; a missing closing tag or no test at all is unparsable (undefined). */
-export function parseJunit(xml: string): TestOutcome[] | undefined {
+/**
+ * Parse Node's JUnit report. A skipped, todo, failed or cancelled test is `not-pass` or `fail`. Anything the parser cannot read exactly
+ * (a missing closing tag, no test, a malformed or nameless testcase, a testcase count that differs from what was parsed) is unparsable (undefined).
+ * `spawnedPath` is the file argument given to the child: Node names a file-level failure (load error, abnormal exit, uncaught error after the tests)
+ * as one failing case named after that path, which is a crashed run and not a test failure.
+ */
+export function parseJunit(xml: string, spawnedPath?: string): TestOutcome[] | undefined {
   if (!xml.includes('<testsuites>') || !xml.trimEnd().endsWith('</testsuites>')) return undefined;
   const tests: TestOutcome[] = [];
-  const pattern = /<testcase\s([^>]*?)(\/>|>([\s\S]*?)<\/testcase>)/g;
+  // Attribute values are quoted and never contain a raw quote, so a '>' inside a value cannot end the tag early.
+  const pattern = /<testcase((?:\s+[A-Za-z_:][\w:.-]*="[^"]*")*)\s*(\/>|>([\s\S]*?)<\/testcase>)/g;
   for (let match = pattern.exec(xml); match; match = pattern.exec(xml)) {
-    const name = /(?:^|\s)name="([^"]*)"/.exec(match[1]!)?.[1];
+    const attributes = new Map<string, string>();
+    for (const attribute of match[1]!.matchAll(/\s+([A-Za-z_:][\w:.-]*)="([^"]*)"/g)) attributes.set(attribute[1]!, attribute[2]!);
+    const name = attributes.get('name');
     if (name === undefined) return undefined;
-    // Node reports a file that failed to load or exited abnormally as one failing case named after the file itself: that is a crashed run, not a test failure.
-    if (name === /(?:^|\s)file="([^"]*)"/.exec(match[1]!)?.[1]) return undefined;
+    const decoded = decode(name);
+    const file = attributes.get('file');
+    if (decoded === (file === undefined ? undefined : decode(file)) || (spawnedPath !== undefined && decoded === spawnedPath)) return undefined;
     const body = match[3] ?? '';
-    const failed = /(?:^|\s)failure="/.test(match[1]!) || /<(failure|error)[\s>/]/.test(body);
+    const failed = attributes.has('failure') || /<(failure|error)[\s>/]/.test(body);
     const status = failed ? 'fail' : /<skipped[\s>/]/.test(body) ? 'not-pass' : 'pass';
-    tests.push({ name: decode(name), status });
+    tests.push({ name: decoded, status });
   }
+  if ((xml.match(/<testcase[\s>/]/g) ?? []).length !== tests.length) return undefined;
   return tests.length ? tests : undefined;
 }
 
@@ -60,8 +70,9 @@ export const runOfflineFile: FileRunner = (file, options) => new Promise<FileOut
   void import('./run.ts').then(({ childEnvironment }) => {
     let stdout = ''; let overflow = false; let timedOut = false; let settled = false;
     // The offline tests build their own fakes and SDK clients: the synthetic Floci endpoint of the live child environment must not reach them.
+    const spawned = resolve(repoRoot, file);
     const env: NodeJS.ProcessEnv = { ...childEnvironment(), E2E_OFFLINE_CHILD: '1' }; delete env.AWS_ENDPOINT_URL;
-    const child = spawn('node', ['--import', 'tsx', '--test', '--test-reporter=junit', file], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'], shell: false, detached: true });
+    const child = spawn('node', ['--import', 'tsx', '--test', '--test-reporter=junit', spawned], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'], shell: false, detached: true });
     const kill = () => { timedOut = true; if (child.pid) { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } } };
     const timer = setTimeout(kill, options.timeoutMs);
     options.signal?.addEventListener('abort', kill, { once: true });
@@ -71,7 +82,7 @@ export const runOfflineFile: FileRunner = (file, options) => new Promise<FileOut
     child.stderr!.resume(); // discarded: raw child output is never kept
     const finish = (code: number | null) => {
       if (settled) return; settled = true; clearTimeout(timer); options.signal?.removeEventListener('abort', kill);
-      const tests = timedOut || overflow ? undefined : parseJunit(stdout);
+      const tests = timedOut || overflow ? undefined : parseJunit(stdout, spawned);
       stdout = '';
       // A non-zero exit is acceptable only when the report itself shows the failing test; otherwise the run failed for another reason.
       resolveOutcome(!tests || (code !== 0 && !tests.some(test => test.status !== 'pass')) ? { kind: 'run-failed' } : { kind: 'tests', tests });
@@ -83,6 +94,8 @@ export const runOfflineFile: FileRunner = (file, options) => new Promise<FileOut
 export type CaseJudgement = { status: 'pass' } | { status: 'fail'; reason: typeof offlineReasons[number] } | { status: 'not-run' };
 /** Pure judgement of one case from its links and the per-file outcomes (a file absent from the map was never started). */
 export function judgeCase(links: OfflineLink[], outcomes: Map<string, FileOutcome>): CaseJudgement {
+  // A case with no mapped file or title has no evidence: it never passes vacuously.
+  if (!links.length || links.some(link => !link.titles.length)) return { status: 'fail', reason: 'offline-test-missing' };
   let reason: typeof offlineReasons[number] | undefined; let started = true;
   const rank = (value: typeof offlineReasons[number]) => offlineReasons.indexOf(value);
   const note = (value: typeof offlineReasons[number]) => { if (reason === undefined || rank(value) > rank(reason)) reason = value; };
@@ -134,7 +147,7 @@ export async function runOfflineEvidence(evidence: Evidence, selected: CaseDefin
     const links = offlineEvidence[def.id] ?? [];
     const judgement = links.length ? judgeCase(links, outcomes) : { status: 'fail' as const, reason: 'offline-test-missing' as const };
     const durationMs = links.reduce((sum, link) => sum + (durations.get(link.file) ?? 0), 0);
-    if (judgement.status === 'not-run') await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'budget-exhausted' });
+    if (judgement.status === 'not-run') await evidence.record({ id: def.id, status: 'not-run', phase: 'offline', durationMs: 0, reason: 'budget-exhausted' });
     else if (judgement.status === 'pass') await evidence.record({ id: def.id, status: 'pass', phase: 'offline', durationMs, outputs: outputsFor(def, 'pass') });
     else await evidence.record({ id: def.id, status: 'fail', phase: 'offline', durationMs, reason: judgement.reason, outputs: outputsFor(def, 'fail') });
   }
