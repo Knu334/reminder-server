@@ -2,7 +2,12 @@
 
 確認日: 2026-10-03。対象: [AWS設計書](superpowers/specs/2026-10-02-reminder-server-aws-design.md)の**productionのみ・本人1人**の構成。Cognito、HTTP APIの標準JWT Authorizer、API/清掃Lambda、DynamoDBの3表と清掃GSI、画像/配布ZIP用S3、CloudWatch、Terraform state、EventBridge Schedulerを含める。ZIPでLambdaへ配布するためECRを作らない。常設dev環境、認証Lambda、GHAでの定期清掃も設けない。
 
-これは入力条件を置いた参考モデルで、実請求・費用上限の保証ではない。リージョン未指定のため、公式資料の料金例を確認できた**US East (N. Virginia)、us-east-1**を参考にする。東京リージョンの試算ではない。地域別Price Listの直接取得は通信制限で実行できなかったため、構築先リージョン決定後にAWS Pricing CalculatorまたはPrice Listと実測で更新する。
+これは入力条件を置いた参考モデルで、実請求・費用上限の保証ではない。作成時はリージョン未指定だったため、公式資料の料金例を確認できた**US East (N. Virginia)、us-east-1**を参考にしている。東京リージョンの試算ではない。地域別Price Listの直接取得は通信制限で実行できなかったため、AWS Pricing CalculatorまたはPrice Listで構築先リージョンの単価を確認し、実測と合わせて更新する。
+
+2026-10-08に、利用見込みは東京リージョン・月100リクエスト未満と確認した。
+[画像保持・APIログの費用判断](operations/formal-e2e-cost-and-logging.md)で、この利用量における旧versionと追加ログの費用を比較した。
+本書の全サービスの単価・内訳は米国東部の参考モデルのままであり、東京の総額へ更新したとは扱わない。
+既存のログ予算に追加ログの概算をそのまま重ねて加算しない。
 
 円換算は説明用に1 USD = 150円、税別とする。Cognito MAUとSchedulerは利用可能な共有無料枠内という条件で0とし、他サービスの無料枠・割引・期間限定クレジットは基本表から差し引かない。転送100 GB/月の無料枠だけを追加反映した列も示す。他のシステムと共有する無料枠に余裕がなければ該当分を加算する。
 
@@ -118,3 +123,13 @@ GHAの有料実行時間・artifact、AWSサポート、独自ドメイン、SNS
 未認証の大量リクエスト、条件付き書き込みの拒否、transaction conflict、内部再試行、期限切れURLの連続取得も課金を増やし得る。スロットリング・所有者上限は費用の硬い上限ではない。平均画像100 KiBから1 MiBなら画像の転送・保存は約10.24倍で、BASE64入力のHTTP API単位も増える。
 
 production公開後にAPI/清掃のBilled Duration、Schedulerの試行回数、DynamoDB ConsumedCapacity（GSI込み）・3表/GSI保存量、画像version・滞留、転送、ログ圧縮率、メトリクス発行時間、配布ZIP保存量・S3登録/取得回数・GHA使用量を取得する。構築リージョンの単価で再計算し、以前の「月約20／60／380円」を流用しない。
+
+## ローカル実装後の証拠境界（2026-10-05）
+
+上のduration、request、保存・転送・metric係数は予算入力のままです。実AWS/GHA/
+Chrome/PITRを実行していないため実測duration・転送・請求値への更新はありません。
+[実装結果](implementation-results.md)のZIPサイズ/hashはローカル成果物の測定で、
+実S3保存量・monthly release回数・Lambda起動時間を証明しません。9 alarm/2 custom
+metricにSNS通知先はなく、alarmを作ることと通知deliveryを確認することは別です。
+
+2026-10-08追加追補: API結果ログの製品変更は[独立計画](superpowers/plans/2026-10-08-reminder-server-api-result-logging.md)で先行承認・検証する。E2Eのrun共通基盤・ログ一括観測への改訂は、本番の保持設定や上記費用前提を変更しない。

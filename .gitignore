@@ -141,3 +141,28 @@ reminders*.json
 
 # Isolated implementation workspaces
 .worktrees/
+
+# Private local inputs and generated delivery material (public templates retained)
+.env.*
+!.env.example
+credentials
+.aws/
+private/
+/images/
+backups/
+*.backup
+*.bak
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.plan
+*.tfvars
+*.tfvars.json
+.terraform/
+backend.hcl
+artifacts/
+__pycache__/
+*.py[cod]
+.superpowers/
+.claude/settings.local.json
+.codex/hooks.local.json

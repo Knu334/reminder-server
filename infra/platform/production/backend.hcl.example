@@ -1,0 +1,5 @@
+# Copy privately and replace placeholders with the bootstrap state bucket/region.
+# The fixed key, encryption and native lockfile are in backend.tf.
+bucket = "<BOOTSTRAP_STATE_BUCKET>"
+region = "<AWS_REGION>"
+allowed_account_ids = ["<AWS_ACCOUNT_ID>"]

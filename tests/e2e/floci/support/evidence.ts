@@ -1,0 +1,305 @@
+import { randomUUID } from 'node:crypto';
+import { mkdir, writeFile, open, rename } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
+import type { CaseDefinition, CaseRecorder, CaseResult, Evidence, LogCheckResult, OutputResult, PendingLogCheck, RunSummary, OwnedManifest, OwnedIdentity, LocalTarget, RequiredReadApi, RequiredApiNonSupport } from './types.ts';
+import { localRequest } from './transport.ts';
+
+const kinds = ['http', 'dynamodb', 's3', 'logs'] as const;
+const phases = new Set(['inventory', 'preflight', 'provision', 'input', 'outputs', 'logs', 'complete', 'cleanup', 'offline']);
+const reasons = new Set(['implementation-pending', 'preflight-failed', 'prerequisite-failed', 'budget-exhausted', 'action-failed', 'output-mismatch', 'logs-pending', 'logs-missing', 'observer-failed', 'out-of-scope', 'gateway-delivery-unsupported', 'scheduler-trigger-unsupported', 'signature-enforcement-unsupported', 'hosted-revoke-unsupported', 'required-api-unsupported', 'offline-test-missing', 'offline-test-failed', 'offline-run-failed']);
+const compatibilityReasons = new Set(['gateway-delivery-unsupported', 'scheduler-trigger-unsupported', 'signature-enforcement-unsupported', 'hosted-revoke-unsupported']);
+const codes = new Set(['INVALID_JSON', 'INVALID_INPUT', 'UNSUPPORTED_MEDIA_TYPE', 'PAYLOAD_TOO_LARGE', 'LEGACY_API_REMOVED', 'REMINDER_NOT_FOUND', 'THUMBNAIL_NOT_FOUND', 'INVALID_THUMBNAIL', 'THUMBNAIL_TOO_LARGE', 'OWNER_STORAGE_LIMIT_EXCEEDED', 'INVALID_LIMIT', 'INVALID_CURSOR', 'PRECONDITION_REQUIRED', 'PRECONDITION_FAILED', 'METHOD_NOT_ALLOWED', 'RATE_LIMIT_EXCEEDED', 'SERVICE_UNAVAILABLE', 'UNAUTHORIZED', 'FORBIDDEN', 'FOREIGN_KEY_COMPOSITE', 'FOREIGN_SIGNATURE_VERIFIABLE']);
+const label = /^[a-zA-Z0-9][a-zA-Z0-9/_.-]{0,159}$/;
+type PendingCase = { definition: CaseDefinition; result: CaseResult; checks: PendingLogCheck[] };
+export const blockedEndpointClasses = new Set(['proxy-authentication', 'invalid-url', 'aws-s3', 'aws-s3-regional', 'aws-s3-control', 'aws-sts', 'aws-iam', 'aws-tagging', 'terraform-registry', 'owned-host-https', 'synthetic-account-floci-alias', 'unverified-floci-alias', 'unverified-localstack-alias', 'public-xml-schema', 'aws-other', 'unowned-host', 'redirect']);
+export const terraformActions = new Set(['ListTagsForResource', 'CreateOpenIDConnectProvider', 'GetOpenIDConnectProvider', 'ListOpenIDConnectProviders', 'CreateRole', 'GetRole', 'CreatePolicy', 'GetPolicy', 'PutRolePolicy', 'GetRolePolicy', 'ListRolePolicies', 'ListAttachedRolePolicies', 'CreateBucket', 'GetBucketVersioning', 'GetBucketPolicy', 'GetBucketTagging', 'GetBucketAcl', 'GetBucketCors', 'GetBucketLogging', 'GetBucketRequestPayment', 'GetBucketWebsite', 'GetBucketLifecycleConfiguration', 'GetBucketEncryption', 'GetBucketPolicyStatus', 'GetBucketOwnershipControls', 'PutBucketVersioning', 'PutBucketPolicy', 'PutBucketEncryption', 'PutPublicAccessBlock', 'CreateUserPool', 'DescribeUserPool', 'CreateUserPoolClient', 'CreateUserPoolDomain', 'DescribeUserPoolDomain', 'SetUserPoolMfaConfig', 'CreateTable', 'DescribeTable', 'UpdateContinuousBackups', 'DescribeContinuousBackups', 'CreateLogGroup', 'PutRetentionPolicy', 'CreateApi', 'CreateFunction', 'GetFunction', 'PutMetricAlarm', 'CreateScheduleGroup', 'DeleteOpenIDConnectProvider', 'DeleteBucket', 'DeleteRole']);
+export type ProcessEvidence = { tool: 'node' | 'npm' | 'python3' | 'terraform'; status: 'succeeded' | 'failed' | 'timeout'; durationMs: number; timeoutMs: number; exitCode: number | null; expectedOutputMatched: boolean; failedAction?: string; blockedEndpoints?: string[]; blockedEndpointCounts?: Record<string, number>; forwarded?: number };
+type State = { directory: string; definitions: CaseDefinition[]; results: Map<string, CaseResult>; pending: Map<string, PendingCase>; active: Set<string>; processes: ProcessEvidence[]; resources: OwnedManifest['resources']; finalized: boolean; closed: boolean; finalizedSuites: Set<string> };
+const states = new WeakMap<Evidence, State>();
+const measuredNonSupport = new WeakSet<RequiredApiNonSupport>();
+export class MeasuredRequiredApiUnsupported extends Error {
+  constructor(readonly basis: RequiredApiNonSupport) {
+    super('REQUIRED_API_UNSUPPORTED');
+    if (!measuredNonSupport.has(basis)) throw new Error('UNMEASURED_API_NON_SUPPORT');
+  }
+}
+/** Independently query a required read-only API; arbitrary diagnostic text is insufficient. */
+export async function measureRequiredApiUnsupported(target: LocalTarget, probe: { action: RequiredReadApi; identity: string; prefix: string; account: string }): Promise<MeasuredRequiredApiUnsupported | undefined> {
+  const { action, identity, prefix, account } = probe;
+  if (!/^e2e-[a-f0-9]{8}$/.test(prefix) || !/^\d{12}$/.test(account)) throw new Error('API_PROBE_OWNERSHIP_REJECTED');
+  let service: string; let path: string | undefined; let headers: Record<string, string>; let body: string | undefined;
+  const query = (operation: string, params: Record<string, string>) => new URLSearchParams({ Action: operation, Version: '2010-05-08', ...params }).toString();
+  if (action === 'DescribeTable') {
+    if (!['reminders', 'owner-state', 'image-jobs'].some(name => identity === `${prefix}-production-${name}`)) throw new Error('API_PROBE_OWNERSHIP_REJECTED');
+    service = 'dynamodb'; headers = { 'content-type': 'application/x-amz-json-1.0', 'x-amz-target': 'DynamoDB_20120810.DescribeTable' }; body = JSON.stringify({ TableName: identity });
+  } else if (action === 'GetFunction') {
+    if (!['api', 'cleanup'].some(name => identity === `${prefix}-production-${name}`)) throw new Error('API_PROBE_OWNERSHIP_REJECTED');
+    service = 'lambda'; headers = {}; path = `/2015-03-31/functions/${encodeURIComponent(identity)}`;
+  } else if (['GetRole', 'GetPolicy', 'GetOpenIDConnectProvider'].includes(action)) {
+    service = 'iam'; headers = { 'content-type': 'application/x-www-form-urlencoded' };
+    if (action === 'GetRole') {
+      if (!['github-artifact', 'github-plan', 'github-apply', 'production-api', 'production-cleanup', 'production-scheduler'].some(name => identity === `${prefix}-${name}`)) throw new Error('API_PROBE_OWNERSHIP_REJECTED');
+      body = query(action, { RoleName: identity });
+    } else if (action === 'GetPolicy') {
+      if (!['github-production-read', 'production-api-ceiling', 'production-cleanup-ceiling', 'production-scheduler-ceiling'].some(name => identity === `arn:aws:iam::${account}:policy/${prefix}-${name}`)) throw new Error('API_PROBE_OWNERSHIP_REJECTED');
+      body = query(action, { PolicyArn: identity });
+    } else {
+      if (identity !== `arn:aws:iam::${account}:oidc-provider/token.actions.githubusercontent.com`) throw new Error('API_PROBE_OWNERSHIP_REJECTED');
+      body = query(action, { OpenIDConnectProviderArn: identity });
+    }
+  } else {
+    if (!['state', 'artifacts', 'images'].some(name => identity === `${prefix}-${account}-ap-northeast-1-${name}`) || !['ListTagsForResource', 'GetBucketVersioning', 'GetBucketPolicy'].includes(action)) throw new Error('API_PROBE_OWNERSHIP_REJECTED');
+    service = action === 'ListTagsForResource' ? 's3-control' : 's3'; headers = action === 'ListTagsForResource' ? { 'x-amz-account-id': account } : {};
+    path = action === 'ListTagsForResource' ? `/v20180820/tags/${encodeURIComponent(`arn:aws:s3:::${identity}`)}?x-id=ListTagsForResource` : `/${identity}?${action === 'GetBucketVersioning' ? 'versioning' : 'policy'}`;
+  }
+  headers.authorization = `AWS4-HMAC-SHA256 Credential=local/20261008/ap-northeast-1/${service}/aws4_request, SignedHeaders=host, Signature=${'0'.repeat(64)}`;
+  try {
+    const response = await localRequest(target, new URL(path ?? target.endpoint, target.endpoint), { method: path ? 'GET' : 'POST', headers, ...(body ? { body } : {}) });
+    if (response.status !== 501) return undefined;
+    const text = response.bytes.toString('utf8'); let code: unknown;
+    if (text.trimStart().startsWith('{')) { const doc = JSON.parse(text) as { __type?: unknown; code?: unknown }; code = doc.__type ?? doc.code; }
+    else code = /<Code>([A-Za-z]+)<\/Code>/.exec(text)?.[1];
+    if (typeof code === 'string') code = code.split('#').at(-1);
+    if (!['NotImplemented', 'NotImplementedException', 'UnknownOperationException'].includes(String(code))) return undefined;
+    const basis: RequiredApiNonSupport = Object.freeze({ action, httpStatus: 501, errorCode: code as RequiredApiNonSupport['errorCode'], basis: 'independent-owned-read-only-probe' });
+    measuredNonSupport.add(basis); return new MeasuredRequiredApiUnsupported(basis);
+  } catch { return undefined; }
+}
+function stateOf(evidence: Evidence): State {
+  const state = states.get(evidence);
+  if (!state || state.closed) throw new Error('EVIDENCE_CLOSED');
+  return state;
+}
+function validateDefinition(def: CaseDefinition): void {
+  if (![def.id, def.requirementId, def.suite, def.source].every(value => label.test(value)) ||
+      !['U', 'I', 'E', 'L', 'A'].includes(def.layer) || !['behavior', 'compatibility'].includes(def.acceptance) ||
+      typeof def.required !== 'boolean' || def.outputs.length !== 4 || new Set(def.outputs.map(output => output.kind)).size !== 4 ||
+      def.outputs.some(output => !kinds.includes(output.kind) || new Set(output.assertions).size !== output.assertions.length ||
+        output.assertions.some(name => !label.test(name)) || (output.assertions.length === 0
+          ? !output.notApplicableReason || !label.test(output.notApplicableReason) : output.notApplicableReason !== undefined))) {
+    throw new Error('INVALID_DEFINITION');
+  }
+}
+function safeOutputs(def: CaseDefinition, results: OutputResult[]): { outputs: OutputResult[]; complete: boolean } {
+  let complete = results.length === 4;
+  const projected: OutputResult[] = [];
+  for (const expected of def.outputs) {
+    const matches = results.filter(result => result.kind === expected.kind);
+    if (matches.length !== 1) { complete = false; continue; }
+    const actual = matches[0]!;
+    if (expected.assertions.length === 0) {
+      const valid = actual.status === 'not-applicable' && actual.assertions.length === 0 && actual.reason === expected.notApplicableReason;
+      complete &&= valid;
+      projected.push({ kind: expected.kind, status: valid ? 'not-applicable' : 'fail', assertions: [], reason: expected.notApplicableReason! });
+      continue;
+    }
+    const valid = actual.status === 'pass' && actual.reason === undefined && actual.assertions.length === expected.assertions.length &&
+      expected.assertions.every(name => actual.assertions.filter(assertion => assertion.name === name && assertion.status === 'pass').length === 1) &&
+      new Set(actual.assertions.map(assertion => assertion.name)).size === actual.assertions.length;
+    complete &&= valid;
+    projected.push({ kind: expected.kind, status: valid ? 'pass' : 'fail', assertions: expected.assertions.flatMap(name => {
+      const found = actual.assertions.filter(assertion => assertion.name === name);
+      return found.length ? [{ name, status: found.length === 1 && found[0]!.status === 'pass' ? 'pass' as const : 'fail' as const }] : [];
+    }) });
+  }
+  return { outputs: projected, complete };
+}
+function safeResult(def: CaseDefinition, result: CaseResult): CaseResult {
+  const projection = safeOutputs(def, result.outputs ?? []);
+  const status = ['pass', 'fail', 'not-run', 'unsupported', 'out-of-scope'].includes(result.status) ? result.status : 'fail';
+  const safe: CaseResult = { id: def.id, status, phase: phases.has(result.phase) ? result.phase : 'outputs', durationMs: Number.isFinite(result.durationMs) && result.durationMs >= 0 ? Math.round(result.durationMs) : 0 };
+  if (Number.isInteger(result.httpStatus) && result.httpStatus! >= 100 && result.httpStatus! <= 599) safe.httpStatus = result.httpStatus!;
+  if (result.code && codes.has(result.code)) safe.code = result.code;
+  if (result.reason && reasons.has(result.reason)) safe.reason = result.reason;
+  if (result.outputs) safe.outputs = projection.outputs;
+  const requiredApiUnsupported = def.id === 'TF-01/apply' && def.suite === 'terraform' && def.layer === 'L' && result.reason === 'required-api-unsupported' && result.requiredApiNonSupport !== undefined && measuredNonSupport.has(result.requiredApiNonSupport);
+  if (requiredApiUnsupported) safe.requiredApiNonSupport = result.requiredApiNonSupport!;
+  if (status === 'not-run' && (result.httpStatus !== undefined || (result.outputs?.length ?? 0) > 0 || ['input', 'outputs', 'logs', 'complete'].includes(result.phase))) { safe.status = 'fail'; safe.reason = 'output-mismatch'; }
+  if (status === 'pass' && !projection.complete) { safe.status = 'fail'; safe.reason = 'output-mismatch'; }
+  if (status === 'unsupported' && !requiredApiUnsupported && (def.acceptance !== 'compatibility' || !projection.complete || !compatibilityReasons.has(safe.reason ?? ''))) {
+    safe.status = 'fail'; safe.reason = 'output-mismatch';
+  }
+  if (status === 'out-of-scope' && def.layer !== 'A' && def.layer !== 'U') { safe.status = 'fail'; safe.reason = 'output-mismatch'; }
+  return safe;
+}
+async function save(evidence: Evidence, state: State, summary?: RunSummary): Promise<void> {
+  const cases = state.definitions.map(def => ({ ...def, result: state.results.get(def.id)! }));
+  await writeFile(join(state.directory, 'results.json'), JSON.stringify({ runId: evidence.runId, cases, ...(summary ? { summary } : {}) }, null, 2) + '\n', { mode: 0o600 });
+  // In-flight log checks contain sensitive correlation values, so only their safe partial results are persisted.
+  await writeFile(join(state.directory, 'pending.json'), JSON.stringify({ cases: [...state.pending.values()].map(pending => safeResult(pending.definition, { ...pending.result, status: 'fail', reason: 'logs-pending' })) }, null, 2) + '\n', { mode: 0o600 });
+  const pending = join(state.directory, 'manifest.pending');
+  const file = await open(pending, 'w', 0o600);
+  try { await file.writeFile(JSON.stringify({ runId: evidence.runId, resources: state.resources, processes: state.processes, resultsFinalized: state.finalized }, null, 2) + '\n'); await file.sync(); } finally { await file.close(); }
+  await rename(pending, join(state.directory, 'manifest.json'));
+  const directory = await open(state.directory, 'r');
+  try { await directory.sync(); } finally { await directory.close(); }
+}
+export async function createEvidence(definitions: CaseDefinition[], runDirectory: string): Promise<Evidence> {
+  definitions.forEach(validateDefinition);
+  if (!definitions.length || new Set(definitions.map(def => def.id)).size !== definitions.length) throw new Error('INVALID_DEFINITION');
+  await mkdir(dirname(runDirectory), { recursive: true, mode: 0o700 });
+  // Exclusive directory creation avoids adopting another run's files or symlinks.
+  await mkdir(runDirectory, { mode: 0o700 });
+  const safeDefinitions = definitions.map(def => ({
+    id: def.id, requirementId: def.requirementId, layer: def.layer, required: def.required, acceptance: def.acceptance, suite: def.suite, source: def.source,
+    outputs: def.outputs.map(output => ({ kind: output.kind, assertions: [...output.assertions], ...(output.notApplicableReason ? { notApplicableReason: output.notApplicableReason } : {}) })),
+  }));
+  const directoryId = basename(runDirectory);
+  const state: State = { directory: runDirectory, definitions: safeDefinitions, results: new Map(), pending: new Map(), active: new Set(), processes: [], resources: [], finalized: false, closed: false, finalizedSuites: new Set<string>() };
+  const evidence: Evidence = {
+    runId: /^e2e-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(directoryId) ? directoryId : `e2e-${randomUUID()}`,
+    async record(result) {
+      stateOf(evidence);
+      if (state.finalized) throw new Error('RESULTS_FINALIZED');
+      const def = state.definitions.find(item => item.id === result.id);
+      if (!def || state.active.has(result.id) || state.pending.has(result.id)) throw new Error('INVALID_CASE_TRANSITION');
+      const prior = state.results.get(result.id)!;
+      if (prior.status !== 'not-run' || prior.phase !== 'inventory') throw new Error('INVALID_CASE_TRANSITION');
+      state.results.set(result.id, safeResult(def, result));
+      await save(evidence, state);
+    },
+    async finish(cleanup) {
+      stateOf(evidence);
+      if (state.active.size) throw new Error('CASE_STILL_ACTIVE');
+      await flushPendingLogs(evidence, async () => []);
+      if (Object.values(cleanup).some(value => !Number.isSafeInteger(value) || value < 0) || cleanup.succeeded > cleanup.attempted) throw new Error('INVALID_CLEANUP');
+      const all = [...state.results.values()];
+      const summary: RunSummary = { selected: all.length, passed: 0, failed: 0, notRun: 0, unsupported: 0, outOfScope: 0,
+        cleanup: { attempted: cleanup.attempted, succeeded: cleanup.succeeded, errors: cleanup.errors, leaks: cleanup.leaks }, exitCode: 0 };
+      for (const result of all) {
+        const key = { pass: 'passed', fail: 'failed', 'not-run': 'notRun', unsupported: 'unsupported', 'out-of-scope': 'outOfScope' } as const;
+        summary[key[result.status]]++;
+      }
+      if (cleanup.errors || cleanup.leaks || cleanup.attempted !== cleanup.succeeded || all.some(result => {
+        const def = state.definitions.find(item => item.id === result.id)!;
+        return result.status === 'fail' || (def.required && result.status !== 'pass' && !(result.status === 'unsupported' && def.acceptance === 'compatibility') && !(result.status === 'out-of-scope' && (def.layer === 'A' || def.layer === 'U')));
+      })) summary.exitCode = 1;
+      if (!cleanup.errors && !cleanup.leaks && cleanup.attempted === cleanup.succeeded && !summary.failed && all.some(result => result.phase === 'preflight' && result.reason === 'preflight-failed')) summary.exitCode = 2;
+      await save(evidence, state, summary); state.closed = true;
+      return summary;
+    },
+  };
+  for (const def of state.definitions) state.results.set(def.id, { id: def.id, status: 'not-run', phase: 'inventory', durationMs: 0, reason: 'implementation-pending' });
+  states.set(evidence, state); await save(evidence, state); return evidence;
+}
+export async function recordProcess(evidence: Evidence, result: ProcessEvidence): Promise<void> {
+  const state = stateOf(evidence);
+  if (!['node', 'npm', 'python3', 'terraform'].includes(result.tool) || !['succeeded', 'failed', 'timeout'].includes(result.status)) throw new Error('INVALID_PROCESS_RESULT');
+  state.processes.push({ tool: result.tool, status: result.status, durationMs: Math.max(0, Math.round(result.durationMs)), timeoutMs: result.timeoutMs, exitCode: result.exitCode, expectedOutputMatched: result.expectedOutputMatched === true, ...(result.blockedEndpoints ? { blockedEndpoints: result.blockedEndpoints.filter(item => blockedEndpointClasses.has(item)).slice(0, 128) } : {}), ...(result.blockedEndpointCounts ? { blockedEndpointCounts: Object.fromEntries(Object.entries(result.blockedEndpointCounts).filter(([kind, count]) => blockedEndpointClasses.has(kind) && Number.isSafeInteger(count) && count >= 0)) } : {}), ...(Number.isSafeInteger(result.forwarded) && result.forwarded! >= 0 ? { forwarded: result.forwarded } : {}), ...(result.failedAction && terraformActions.has(result.failedAction) ? { failedAction: result.failedAction } : {}) });
+  await save(evidence, state);
+}
+export async function runCase(definition: CaseDefinition, evidence: Evidence, action: (recorder: CaseRecorder) => Promise<void>): Promise<void> {
+  const state = stateOf(evidence); const def = state.definitions.find(item => item.id === definition.id);
+  if (!def || state.active.has(def.id) || state.pending.has(def.id) || state.results.get(def.id)?.phase !== 'inventory') throw new Error('INVALID_CASE_TRANSITION');
+  if (state.finalized) throw new Error('RESULTS_FINALIZED');
+  state.active.add(def.id);
+  const started = performance.now(); const outputs: OutputResult[] = []; const checks: PendingLogCheck[] = [];
+  const result: CaseResult = { id: def.id, status: 'fail', phase: 'input', durationMs: 0, outputs };
+  let open = true;
+  const assertOpen = () => { if (!open) throw new Error('RECORDER_CLOSED'); };
+  try {
+    await action({
+      recordInput(input) { assertOpen(); if (input.httpStatus !== undefined) result.httpStatus = input.httpStatus; if (input.code !== undefined) result.code = input.code; },
+      recordOutput(output) { assertOpen(); outputs.push(structuredClone(output)); },
+      deferLogs(check) {
+        assertOpen();
+        if (check.caseId !== def.id || !def.outputs.find(output => output.kind === 'logs')!.assertions.includes(check.assertion) || checks.some(item => item.assertion === check.assertion)) throw new Error('INVALID_LOG_CHECK');
+        const expectations = [check.expectation, ...(check.controls ? [check.controls.before, check.controls.after] : [])];
+        for (const expectation of expectations) {
+          if (expectation.service === 'api' && expectation.mode === 'present' &&
+              (typeof expectation.requestId !== 'string' || !expectation.requestId.trim() ||
+               expectation.status === undefined || !Number.isInteger(expectation.status) || expectation.status < 100 || expectation.status > 599)) {
+            throw new Error('INVALID_LOG_CHECK');
+          }
+        }
+        checks.push(structuredClone(check));
+      },
+    });
+    result.status = 'pass'; result.phase = checks.length ? 'logs' : 'complete';
+  } catch (error) {
+    if (error instanceof MeasuredRequiredApiUnsupported) { result.status = 'unsupported'; result.phase = 'provision'; result.reason = 'required-api-unsupported'; result.requiredApiNonSupport = error.basis; }
+    else { result.status = 'fail'; result.reason = 'action-failed'; }
+  }
+  finally { open = false; result.durationMs = Math.round(performance.now() - started); state.active.delete(def.id); }
+  if (checks.length) { state.pending.set(def.id, { definition: def, result, checks }); await save(evidence, state); }
+  else await evidence.record(result);
+}
+const OBSERVER_SERVICES = ['api', 'cleanup', 'gateway']; const OBSERVER_CAUSES = ['deadline-abort', 'request-timeout', 'pagination-repeat', 'sdk-error', 'other'];
+const OBSERVER_ERROR_NAMES = ['TimeoutError', 'AbortError', 'ResourceNotFoundException', 'ThrottlingException', 'InvalidParameterException', 'ServiceUnavailableException', 'InternalFailure', 'UnknownOperationException', 'AccessDeniedException', 'UnrecognizedClientException'];
+/** Fixed vocabulary only: a service, a cause and an allowlisted SDK error name; any other value (and every message) is dropped. */
+export function safeObserverFailure(error: unknown): { service: string; cause: string; errorName: string } {
+  const value = error as { service?: unknown; cause?: unknown; errorName?: unknown } | null; const pick = (candidate: unknown, allowed: string[], fallback: string): string => typeof candidate === 'string' && allowed.includes(candidate) ? candidate : fallback;
+  return { service: pick(value?.service, OBSERVER_SERVICES, 'unknown'), cause: pick(value?.cause, OBSERVER_CAUSES, 'other'), errorName: pick(value?.errorName, OBSERVER_ERROR_NAMES, 'other') };
+}
+export async function flushPendingLogs(evidence: Evidence, observe: (checks: PendingLogCheck[]) => Promise<LogCheckResult[]>): Promise<void> {
+  const state = stateOf(evidence); const pending = [...state.pending.values()];
+  if (!pending.length) return;
+  let matches: LogCheckResult[] = []; let observerFailed = false;
+  try { matches = await observe(structuredClone(pending.flatMap(item => item.checks))); } catch (error) { observerFailed = true; await writeFile(join(state.directory, 'observer-failure.json'), JSON.stringify(safeObserverFailure(error), null, 2) + '\n', { mode: 0o600 }).catch(() => undefined); }
+  for (const item of pending) {
+    const assertions = item.checks.map(check => {
+      const found = matches.filter(match => match.caseId === check.caseId && match.assertion === check.assertion);
+      const match = found[0];
+      const controls = check.expectation.mode !== 'absent' || (check.controls?.before.mode === 'present' && check.controls.after.mode === 'present' &&
+        check.expectation.until !== undefined && check.expectation.until >= check.expectation.since &&
+        check.controls.before.since < check.expectation.since && check.controls.after.since > check.expectation.until &&
+        match?.controlsMatched?.before === true && match.controlsMatched.after === true);
+      return { name: check.assertion, status: found.length === 1 && match?.matched === true && controls && !observerFailed ? 'pass' as const : 'fail' as const };
+    });
+    const passed = assertions.every(assertion => assertion.status === 'pass');
+    const outputs = [...(item.result.outputs ?? []), { kind: 'logs' as const, status: passed ? 'pass' as const : 'fail' as const, assertions }];
+    state.pending.delete(item.definition.id);
+    await evidence.record({ ...item.result, outputs, phase: 'logs', ...(passed ? {} : { status: 'fail' as const, reason: observerFailed ? 'observer-failed' : 'logs-missing' }) });
+  }
+}
+
+/** Persist intent before a create request; only safe synthetic identities belong here. */
+export async function reserveResource(evidence: Evidence, resource: { kind: string; name: string; id: string; suite?: string }): Promise<void> {
+  const state = stateOf(evidence);
+  if (state.finalized || ![resource.kind, resource.name, resource.id].every(value => label.test(value)) ||
+      (resource.suite !== undefined && (!label.test(resource.suite) || !['sdk-control', 'sdk-user'].includes(resource.kind))) ||
+      !resource.id.startsWith(`${evidence.runId}/`) || state.resources.some(item => item.id === resource.id)) throw new Error('RESOURCE_REJECTED');
+  state.resources.push({ kind: resource.kind, name: resource.name, id: resource.id, ...(resource.suite ? { suite: resource.suite } : {}), created: false, removed: false });
+  await save(evidence, state);
+}
+export async function markResource(evidence: Evidence, id: string, status: 'created' | 'removed'): Promise<void> {
+  const state = stateOf(evidence); const resource = state.resources.find(item => item.id === id);
+  if (!resource || resource.removed || (status === 'created' && state.finalized) || (status === 'removed' && !state.finalized && !['sdk-table', 'sdk-schedule'].includes(resource.kind) && !(resource.suite && ['sdk-user', 'sdk-control'].includes(resource.kind) && state.finalizedSuites.has(resource.suite) && state.pending.size === 0 && state.active.size === 0 && resource.identities?.length))) throw new Error('RESOURCE_REJECTED');
+  resource[status] = true; await save(evidence, state);
+}
+export function evidenceContext(evidence: Evidence): { directory: string; finalized: boolean; manifest: OwnedManifest } {
+  const state = stateOf(evidence);
+  return { directory: state.directory, finalized: state.finalized, manifest: { runId: evidence.runId, resources: structuredClone(state.resources) } };
+}
+export async function bindResourceIdentities(evidence: Evidence, id: string, identities: OwnedIdentity[]): Promise<void> {
+  const state = stateOf(evidence); const resource = state.resources.find(item => item.id === id);
+  const identifier = /^[a-zA-Z0-9/$][a-zA-Z0-9:/_.@$+-]{0,2047}$/;
+  if (state.finalized || !resource || !['terraform-address', 'sdk-control', 'sdk-user'].includes(resource.kind) || resource.removed || identities.some(item => !/^aws_[a-z0-9_]+$/.test(item.type) || !identifier.test(item.identity) || (item.parent !== undefined && !identifier.test(item.parent)))) throw new Error('RESOURCE_REJECTED');
+  const retained = new Map((resource.identities ?? []).map(item => [JSON.stringify(item), item]));
+  for (const item of identities) { const safe = { type: item.type, identity: item.identity, ...(item.parent ? { parent: item.parent } : {}) }; retained.set(JSON.stringify(safe), safe); }
+  if (resource.kind !== 'terraform-address') {
+    const prefix = `e2e-${evidence.runId.slice(4, 12)}-`;
+    if (!resource.suite || !resource.name.startsWith(prefix) || identities.length !== 1) throw new Error('RESOURCE_REJECTED');
+    const identity = identities[0]!;
+    const ownsPool = (pool: string | undefined) => !!pool && state.resources.some(r => r.identities?.some(i => i.type === 'aws_cognito_user_pool' && i.identity === pool));
+    const valid = resource.kind === 'sdk-user' ? identity.type === 'aws_cognito_user' && identity.identity === resource.name && ownsPool(identity.parent)
+      : identity.type === 'aws_cognito_user_pool' ? /^ap-northeast-1_[A-Za-z0-9]+$/.test(identity.identity) && identity.parent === undefined
+      : identity.type === 'aws_cognito_user_pool_client' && /^[A-Za-z0-9]{1,128}$/.test(identity.identity) && ownsPool(identity.parent);
+    if (!valid) throw new Error('RESOURCE_REJECTED');
+  }
+  resource.identities = [...retained.values()];
+  if (identities.length) resource.created = true;
+  await save(evidence, state);
+}
+export async function finalizeResults(evidence: Evidence): Promise<void> {
+  const state = stateOf(evidence);
+  if (state.active.size) throw new Error('CASE_STILL_ACTIVE');
+  if (!state.finalized) { await flushPendingLogs(evidence, async () => []); state.finalized = true; await save(evidence, state); }
+}
+
+/** End only suite SDK ownership after every executed case has resolved logs. */
+export async function finalizeSuiteResources(evidence: Evidence, suite: string): Promise<void> {
+  const state = stateOf(evidence);
+  if (!label.test(suite) || state.finalized || state.active.size || state.pending.size || [...state.results.values()].some(result => { const def = state.definitions.find(item => item.id === result.id); return def?.suite === suite && (result.reason === 'logs-pending' || (result.reason === 'implementation-pending' && def.layer !== 'I')); })) throw new Error('RESOURCE_REJECTED');
+  state.finalizedSuites.add(suite);
+}
