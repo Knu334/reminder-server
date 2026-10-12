@@ -18,6 +18,10 @@ RUN git apply --check /tmp/floci-refresh.patch \
 # 上流docker/Dockerfileと同じJVM build。Mavenは上流付属の./mvnwを使う。
 FROM eclipse-temurin:25.0.1_8-jdk AS build
 WORKDIR /src/floci
+# mvnwはdistributionSha256Sumの検証付きでMavenを展開するためにunzipを要する。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends unzip \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=source /src/floci/ /src/floci/
 RUN --mount=type=cache,target=/root/.m2 ./mvnw -B -q -DskipTests package
 
