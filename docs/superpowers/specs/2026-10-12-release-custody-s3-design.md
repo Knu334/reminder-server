@@ -90,7 +90,7 @@ prefix は `<種類>/<run_id>/<run_attempt>/` とする。`run_attempt` は、�
 ### GitHub の側
 
 - `registered-release`、`release-review`、`release-result`、`failure-diagnostics-*` の GitHub の artifact は、すべて廃止する。
-- GitHub に出すのは、job summary の要約だけとする（root、commit、action の件数、`review_sha256`（manifest の SHA-256）、custody の置き場所の run ID と `run_attempt`）。
+- GitHub に出すのは、job summary の要約だけとする（root、commit、action の件数、`review_sha256`（manifest の SHA-256。16進数と、S3 コンソールの checksum と比べるための Base64 の両方）、custody の置き場所の run ID と `run_attempt`）。
 - `scripts/release/workflow.ts` は、apply の結果の ledger を標準出力に出さない。ledger は S3 に置き、標準出力と job summary には上の要約だけを出す。
 - authorize job の「private のリポジトリだけ」という検査を外す。`main` だけ、手動の dispatch だけ、`main` から到達できる commit だけ、という検査は残す。
 - `ci.yml` の失敗時の診断は、今のまま private のリポジトリのときだけ artifact にする。PR の CI は AWS の認証を持たないため、S3 には置けない。
@@ -182,6 +182,8 @@ AWS を使う各 job は、次の順に進む。S3 への読み書きは、role 
 - 正確な入力（`inputs.json`）と baseline（`baseline.json`）
 - root、scheduler と公開の期待値を含む `request.json`
 - application の場合は、登録した ZIP（`registered.json`）と、audit、SBOM、試験の証拠
+
+人は、レビューのときに、S3 の `manifest.json` の SHA-256 が job summary の `review_sha256` と一致することを自分で確かめる。たとえば `aws s3 cp s3://<custody bucket>/release-review/<run_id>/<run_attempt>/manifest.json - | sha256sum` で16進数を、S3 コンソールの object の checksum（SHA-256）で Base64 を確かめられる。一致した値を、apply の run の入力 `expected_review_sha256`（16進数）に入れる。
 
 hash の照合は「内容が変わっていない」ことを確かめるだけで、内容を人が承認することの代わりにはならない。apply の run は、レビューした manifest の SHA-256（`expected_review_sha256`）で、レビューした内容と同じであることを自動で確かめる。
 
