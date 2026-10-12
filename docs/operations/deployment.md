@@ -42,7 +42,17 @@ bootstrap rootを作成した後（[初回の構築](#初回の構築)の手順1
 
 ### repository variable
 
-`AWS_REGION`、`AWS_ACCOUNT_ID`、`STATE_BUCKET`、`ARTIFACT_BUCKET`、`ARTIFACT_ROLE_ARN`、`PLAN_ROLE_ARN`、`APPLY_ROLE_ARN` を、レビュー済みのbootstrap outputから設定する。
+次のvariableを、レビュー済みのbootstrap outputから設定する。
+
+| variable | 値 |
+| --- | --- |
+| `AWS_REGION` | bootstrapの入力の `region` |
+| `AWS_ACCOUNT_ID` | bootstrapの入力の `account_id` |
+| `STATE_BUCKET` | output `state_bucket` |
+| `ARTIFACT_BUCKET` | output `artifact_bucket` |
+| `ARTIFACT_ROLE_ARN` | output `artifact_role_arn` |
+| `PLAN_ROLE_ARN` | output `plan_role_arn` |
+| `APPLY_ROLE_ARN` | output `apply_role_arn` |
 
 - state bucketの識別名は `<name_prefix>-<account_id>-<region>-state` に固定である。backendのkey、暗号化、S3ネイティブの `use_lockfile` は各rootで固定されている。
 - 各AWS jobはOIDCで指定されたroleだけをassumeし、想定するaccountであることを確認する。長期間有効なkeyはない。
@@ -66,9 +76,50 @@ baselineのschemaは `{root, apiBaseUrl, apiId, cognitoIssuer, cognitoClientId, 
 ## 初回の構築
 
 1. **bootstrap rootの作成（operator）**
-   - 別途承認を得たoperatorが、`production_api_id=null` でbootstrap rootを作成し、bootstrapとしてレビューする。
-   - このrootは、暗号化とversioningを有効にした3つの別々のbucket、boundary、runtime role、範囲を限定した3つのOIDC roleを所有する。API IDがnullの間、GitHubにはHTTP APIの作成・管理の権限が一切与えられない。
-   - そのprivate outputから、「[GitHubの設定](#githubの設定)」のenvironmentとvariableを設定する。
+   別途承認を得たoperatorが、手元の短期の認証情報で `infra/bootstrap` のTerraformを実行し、`production_api_id=null` で作成する。GitHub Actionsは使わない。IAM、S3、OIDC providerを作成できる認証情報と、Terraform 1.16.5を用意する。以下のコマンドは `infra/bootstrap` で実行する。
+
+   1. 入力ファイルを作る。`terraform.tfvars` と `backend.hcl` は `.gitignore` 済みであり、commitしない。
+
+      ```sh
+      cp terraform.tfvars.example terraform.tfvars
+      ```
+
+      `terraform.tfvars` に、レビュー済みの値を明示する。
+
+      | 変数 | 値 |
+      | --- | --- |
+      | `account_id` | AWSのaccount ID（12桁） |
+      | `region` | 使用するregion |
+      | `repository` | GitHubの `owner/repository` |
+      | `github_environment` | `production`（これ以外は受け付けない） |
+      | `name_prefix` | リソース名の接頭辞（3〜26文字の英小文字・数字・hyphen） |
+      | `oidc_subjects` | `artifact`、`plan`、`apply` の3つ。「[environment](#environment)」の正確なsubject |
+      | `production_api_id` | `null` |
+      | `restored_tables` | `{}` |
+
+   2. ローカルのstateで作成する。stateを置くS3 bucketもこのrootが作るため、最初はS3 backendを使えない。`backend.tf` を一時的にrootの外へ移してから実行する。
+
+      ```sh
+      mv backend.tf /tmp/bootstrap-backend.tf
+      terraform init
+      terraform plan -out=bootstrap.tfplan
+      terraform apply bootstrap.tfplan
+      ```
+
+      applyの前に、planをbootstrapとしてレビューする。planに含まれるのは次のものである。
+      - 2つのS3 bucket（`<name_prefix>-<account_id>-<region>-state` と `<name_prefix>-<account_id>-<region>-artifacts`）。versioning、暗号化、公開アクセスのブロック、HTTPS必須のpolicyを付ける。画像のbucketはplatformが作る。
+      - GitHubのOIDC providerと、範囲を限定した3つのOIDC role（artifact、plan、apply）。
+      - 3つのruntime role（api、cleanup、scheduler）と、各roleの権限の上限（boundary）。
+      - API IDがnullの間、GitHubにはHTTP APIの作成・管理の権限が一切与えられない。
+
+   3. stateをS3へ移す。
+      1. ローカルのstateを私的にbackupする。
+      2. `backend.tf` を元の場所に戻す。
+      3. `backend.hcl.example` を `backend.hcl` にコピーし、`bucket` にoutputの `state_bucket`、`region` に使用するregionを書く。
+      4. `terraform init -migrate-state -backend-config=backend.hcl` を実行する。決して盲目的に強制コピーしない。
+      5. 移行を確認してから、ローカルのbackupを安全に保管するか、削除する。
+
+   4. `terraform output` の値から、「[GitHubの設定](#githubの設定)」のenvironmentとvariableを設定する。
 2. **platformのpreviewとapply（`deploy.yml`）**
    - `target=platform`、`apply=false`、main上の完全なimmutable commit、明示的なnullのplatform baselineでpreviewする。この段階ではZIPのbuildも登録も**行わない**。
    - 「[workflowの実行](#workflowの実行previewとapply)」の2回のrunによるgateでレビューしてapplyする。
