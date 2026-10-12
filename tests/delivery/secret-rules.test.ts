@@ -31,7 +31,7 @@ void test("secret_samples_are_distinct_from_private_files", () => {
 });
 
 // Commands are passed as strings: the hooks must never execute them or read canary contents.
-for (const provider of ["claude"]) {
+for (const provider of ["claude", "codex"]) {
   void test(`guards_reject_fake_sensitive_reads_${provider}`, () => {
     for (const command of ["cat .env", "cat .env.actions", "cat './.env.actions'", 'cat "/tmp/fake secrets/.env.production"', "head reminders.json", "cat ~/.aws/credentials", "cat private/owner-map.json", "cat infra/bootstrap/backend.hcl", "terraform show private.tfplan", "printenv", "env", "env | sort", "set", "export -p", "node -e 'console.log(process.env)'", "python3 -c 'print(os.environ)'", "cat /proc/self/environ"]) {
       const result = spawnSync("bash", [join(root, `.${provider}/hooks/check-bash-command.sh`)], { input: JSON.stringify({ tool_input: { command } }), encoding: "utf8" });
@@ -90,7 +90,7 @@ void test("claude_read_rules_cover_private_paths_and_leave_examples_public", () 
 });
 
 // These regressions supply strings only; neither wrapper may execute them.
-for (const provider of ["claude"]) {
+for (const provider of ["claude", "codex"]) {
   void test(`guards_keep_multiline_denials_${provider}`, () => {
     for (const command of ["cat .env\ntrue", "true\ncat .env", "cat .env.actions\nprintf harmless", "printf harmless\ncat .env.actions"]) {
       const result = spawnSync("bash", [join(root, `.${provider}/hooks/check-bash-command.sh`)], { input: JSON.stringify({ tool_input: { command } }), encoding: "utf8" });
@@ -124,7 +124,7 @@ for (const provider of ["claude"]) {
   });
 }
 
-for (const provider of ["claude"]) {
+for (const provider of ["claude", "codex"]) {
   void test(`guards_deny_quoted_angle_assignment_displays_${provider}`, () => {
     for (const assignment of ["FOO='synthetic>value'", "FOO='synthetic<value'", 'FOO="synthetic>value"', 'FOO="synthetic<value"']) {
       for (const command of [`env ${assignment}`, `env ${assignment}>/tmp/synthetic-output`, `env ${assignment} 2>/tmp/synthetic-output`, `env ${assignment}</tmp/synthetic-input`]) {
