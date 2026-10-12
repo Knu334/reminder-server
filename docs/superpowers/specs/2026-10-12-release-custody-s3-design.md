@@ -10,7 +10,7 @@ Terraform の plan と state は、秘密の情報を含みうるものとして
 
 - public・private のどちらのリポジトリでも動く。リポジトリの公開設定には頼らず、秘密の情報は常に S3 に置く。
 - bootstrap は operator が手動で実行する。GitHub Actions から bootstrap を実行しない。
-- 今の安全確認はすべて残す。レビューした saved plan をそのまま apply すること、`verifySavedPlan`、`review_sha256` の照合、custody の hash の照合、`reviewed_run` の来歴の確認である。
+- 今の安全確認はすべて残す。レビューした saved plan をそのまま apply すること、`verifySavedPlan`、レビューの digest の照合、custody の hash の照合、`reviewed_run` の来歴の確認である。
 - GitHub の plan に依存する機能（environment の secret、deployment branch の制限、required reviewers）は、使える場合に使う。使えない場合の扱いは今の文書のとおりとする。
 - 長期間有効な AWS のアクセスキーは使わない。GitHub の job は OIDC で role を assume する。
 
@@ -37,9 +37,9 @@ versioning を有効にした bucket では、現行の version の失効は del
 | `registered-release/`、`release-review/`、`failure-diagnostics/` | 作成から1日 | 古い version になってから1日 |
 | `release-result/` | 作成から30日 | 古い version になってから1日 |
 
-- 規則は prefix ごとに定義し、対象が重ならないようにする。
-- 失効した後に残る delete marker も、lifecycle で削除する（`ExpiredObjectDeleteMarker`）。
-- bytes が実際に消えるまでの最長の期間は、lifecycle の処理の遅れを含めて、上の期間より長くなりうる。利用の期限は、lifecycle ではなく、下の「利用期限」で守る。
+- 保持期間の違う失効の規則（上の表の2行）は、prefix で分けて対象が重ならないようにする。
+- 失効した後に残る delete marker は、別の規則で削除する（`ExpiredObjectDeleteMarker`）。`ExpiredObjectDeleteMarker` は `Expiration.Days` と同じ規則には書けないため、delete marker 用の規則は失効の規則とは別に置き、対象の prefix が重なってよい。
+- lifecycle の日数は、object の作成時刻から数えた日数を UTC の翌0時に切り上げて評価される。そのうえ処理の遅れもあるため、bytes が実際に消えるのは上の期間より遅くなりうる。利用の期限は、lifecycle ではなく、下の「利用期限」で守る。
 
 ### object の置き方
 
@@ -56,7 +56,7 @@ prefix は `<種類>/<run_id>/<run_attempt>/` とする。`run_attempt` は、�
 
 ### 種類ごとのファイルの集合
 
-各 prefix に置いてよいファイルは、次のとおりに固定する。必須のファイルが欠けていても、ここに無いファイルがあっても、読む側は止まる。
+各 prefix に置くファイルは、次のとおりに固定する。読む側は、manifest のエントリが下の集合と完全に一致しなければ止まる（必須のファイルの欠落も、余分なエントリも拒否する）。取り出し先のディレクトリに余分なファイルがあっても止まる。読む側は一覧の権限を持たないので、manifest に載っていない S3 の object は、取得も使用もしない。
 
 | 種類 | 必須のファイル |
 | --- | --- |
@@ -75,14 +75,22 @@ prefix は `<種類>/<run_id>/<run_attempt>/` とする。`run_attempt` は、�
 - 種類、root、run ID、`run_attempt`
 - 作成時刻（`createdAt`）と利用期限（`expiresAt`）
 - ファイル名と SHA-256 の一覧
-- `release-review` では、`review_sha256` と、`custody.json` の SHA-256
+- `release-review` では、plan の digest（`plan-guard` の `reviewSha256`）と、`custody.json` の SHA-256。ZIP を再利用した preview では、元の preview の manifest の SHA-256 も入れる
 
 今の `custody.json`（root ごとの必須のファイルの集合と hash）は、そのまま残す。manifest は S3 での受け渡しの完全性を、`custody.json` は今と同じ custody の照合を受け持つ。
+
+### レビューの digest
+
+人がレビューして apply の run に入力する digest は、**`release-review` の `manifest.json` の SHA-256** とする。manifest には plan の digest（今の `plan-guard` が計算する `reviewSha256`）、`custody.json` の hash、`createdAt`、`expiresAt`、`run_attempt` が入っているので、この1つの値でレビューした内容と期限をまとめて固定できる。
+
+- workflow の入力の名前は `expected_review_sha256` のままとし、意味を「レビューした `release-review` の manifest の SHA-256」に変える。job summary にもこの値を `review_sha256` として出す。
+- plan の digest は manifest の中に残し、今の `verifySavedPlan` と plan の照合に使う。
+- S3 の `If-None-Match` は現行の version だけを検査するので、lifecycle で失効した後なら、同じ key に object を作り直せる。作り直した manifest の中身や時刻が違えば SHA-256 が変わって止まり、同じ内容で作り直しても `expiresAt` を過ぎているので止まる。
 
 ### GitHub の側
 
 - `registered-release`、`release-review`、`release-result`、`failure-diagnostics-*` の GitHub の artifact は、すべて廃止する。
-- GitHub に出すのは、job summary の要約だけとする（root、commit、action の件数、`review_sha256`、custody の置き場所の run ID と `run_attempt`）。
+- GitHub に出すのは、job summary の要約だけとする（root、commit、action の件数、`review_sha256`（manifest の SHA-256）、custody の置き場所の run ID と `run_attempt`）。
 - `scripts/release/workflow.ts` は、apply の結果の ledger を標準出力に出さない。ledger は S3 に置き、標準出力と job summary には上の要約だけを出す。
 - authorize job の「private のリポジトリだけ」という検査を外す。`main` だけ、手動の dispatch だけ、`main` から到達できる commit だけ、という検査は残す。
 - `ci.yml` の失敗時の診断は、今のまま private のリポジトリのときだけ artifact にする。PR の CI は AWS の認証を持たないため、S3 には置けない。
@@ -136,16 +144,28 @@ AWS を使う各 job は、次の順に進む。S3 への読み書きは、role 
 
 ### 読む場所の決め方
 
-- **同じ run の中**: 読む job は、書いた job の output（`needs.<job>.outputs`）の run ID、`run_attempt`、`manifest.json` の SHA-256 を使う。一部の job だけを再実行した場合も、再実行していない job の output はそのまま引き継がれるので、書いた job の `run_attempt` を正しく指せる。
-- **別の run から**（apply の run が `reviewed_run` を読む）:
+- **同じ run の中**: 読む job は、書いた job の output（`needs.<job>.outputs`）の run ID、`run_attempt`、`manifest.json` の SHA-256 を使う。一部の job だけを再実行した場合も、再実行していない job の output は引き継がれる前提とする。output が欠けている、または形式が不正な場合は止まる。読む job 自身の `run_attempt` で推測して読みに行くことはしない。
+- **別の run から**（`reviewed_run` を指定した run）:
   1. GitHub の API で、`reviewed_run` が「この repository の `main` で `deploy.yml` を手動で実行し、成功した preview」であることを確かめる（今の `verifyReviewedRunMetadata`）。リポジトリが private であることは条件にしない。
   2. その run の plan の job の、最後の成功した試行の `run_attempt` を、GitHub の API で取得する。
-  3. `release-review/<reviewed_run>/<run_attempt>/manifest.json` を読み、manifest の `review_sha256` が入力の `expected_review_sha256` と一致することを確かめる。一致しなければ止まる。
+  3. `release-review/<reviewed_run>/<run_attempt>/manifest.json` を読み、その SHA-256 が入力の `expected_review_sha256` と一致することを確かめる。一致しなければ止まる。以後の照合は、この manifest を起点にする。
+
+### reviewed_run を使う2つの経路
+
+`reviewed_run` を指定する run は、次の2つである。どちらも `expected_review_sha256`（元の preview の manifest の SHA-256）を必須とし、元の `release-review` が利用期限内であることを確かめる。
+
+| 経路 | 入力 | 動作 | 作る `release-review` の期限 |
+| --- | --- | --- | --- |
+| レビュー済みの変更の apply | `apply=true`、`reviewed_run`、`expected_review_sha256` | 元の入力の bytes と baseline で saved plan を作り直し、plan の digest が元と一致することを確かめてから apply する | 元の `expiresAt` を引き継ぐ |
+| ZIP を再利用した新しい preview（application だけ） | `apply=false`、`reviewed_run`、`expected_review_sha256`、変更した設定（`scheduler_enabled` など） | 元の bundle から登録済みの ZIP と証拠を再利用し、build と登録をせずに新しい plan を作る | 新しいレビューなので、新しい作成時刻から24時間 |
+
+- ZIP を再利用した新しい preview の manifest には、元の preview の manifest の SHA-256 を入れる。apply の run は、その新しい preview の manifest の SHA-256 を `expected_review_sha256` として受け取る。
+- 今の `deploy.yml` では、ZIP を再利用する preview に digest は不要である。この経路でも digest を必須にするため、`deploy.yml` の入力の説明、authorize の検査、運用の手順、既存の再利用の試験を変更する。
 
 ### 利用期限
 
 - 期限の起点は、**元のレビュー（preview の run の `release-review`）の作成時刻**とし、期限はその24時間後とする。
-- apply の run が作る `release-review` の manifest には、元のレビューの `expiresAt` を引き継ぐ。新しい作成時刻で期限を延ばさない。
+- apply の run が作る `release-review` の manifest には、元のレビューの `expiresAt` を引き継ぐ。新しい作成時刻で期限を延ばさない。ZIP を再利用した新しい preview は新しいレビューなので、新しい作成時刻から24時間とする（上の「reviewed_run を使う2つの経路」）。
 - 期限は、次の時点で確かめる。
   - 別の run の `release-review` を読むとき
   - 同じ run の apply の job が `release-review` を読むとき
@@ -156,7 +176,14 @@ AWS を使う各 job は、次の順に進む。S3 への読み書きは、role 
 
 ### レビューの手順
 
-人は、AWS コンソールの S3 画面で `release-review/<run_id>/<run_attempt>/` の `plan.txt` と `request.json` を開いて読む。置き場所は job summary に出る。digest の照合は、apply の run が自動で行う。
+人は、AWS コンソールの S3 画面で、job summary に出た `release-review/<run_id>/<run_attempt>/` を開き、今の手順と同じ対象をレビューする。すべてのファイルを、同じ run ID と `run_attempt` の場所から読む。
+
+- plan（`plan.txt` は読むための補助である。必要なら `saved.tfplan` を対応する Terraform の version で確かめる）
+- 正確な入力（`inputs.json`）と baseline（`baseline.json`）
+- root、scheduler と公開の期待値を含む `request.json`
+- application の場合は、登録した ZIP（`registered.json`）と、audit、SBOM、試験の証拠
+
+hash の照合は「内容が変わっていない」ことを確かめるだけで、内容を人が承認することの代わりにはならない。apply の run は、レビューした manifest の SHA-256（`expected_review_sha256`）で、レビューした内容と同じであることを自動で確かめる。
 
 初回の platform の構築の後は、`release-result/<run_id>/<run_attempt>/post-baseline.json` を取り出し、`PLATFORM_BASELINE_JSON` の secret を更新する。
 
@@ -169,7 +196,7 @@ AWS を使う各 job は、次の順に進む。S3 への読み書きは、role 
 | ファイルの集合が種類ごとの集合と違う | 止まる |
 | ファイルの SHA-256 が合わない | 止まる |
 | 利用期限を過ぎた、または日時が不正 | 止まる。新しい preview が必要になる |
-| `review_sha256` が `expected_review_sha256` と違う | 止まる |
+| レビューした manifest の SHA-256 が `expected_review_sha256` と違う、または plan の digest が元と違う | 止まる |
 | 既存の key への書き込み | S3 が拒否し、止まる |
 | S3 に接続できない、権限が無い | 止まる |
 
@@ -193,7 +220,8 @@ private のリポジトリを public に切り替える場合は、切り替え�
 
 1. 機密を含む GitHub の artifact（移行前の `release-review`、`registered-release`、`release-result`、`failure-diagnostics-*`、`ci.yml` の `failure-diagnostics-infra-*`）が残っていないこと。残っていれば削除するか、保持期間が過ぎて取得できなくなったことを確かめる。
 2. 移行前の workflow を再実行して、artifact を作り直していないこと。
-3. 実行中、または承認待ちの deploy の run が無いこと。
+3. 移行前の workflow の run のログに、非公開にする情報（apply の結果の ledger など）が残っていないこと。残っていれば、その run のログを削除するか、保持期間が過ぎて取得できなくなったことを確かめる。
+4. 実行中、または承認待ちの deploy の run が無いこと。
 
 ## 実装の構成
 
@@ -201,7 +229,7 @@ private のリポジトリを public に切り替える場合は、切り替え�
 - `scripts/release/workflow.ts`:
   - artifact の download の後に権限を戻す処理を、custody のモジュールの読み取りに置き換える。今の custody の照合と `verifySavedPlan` は残す。
   - `authorizeDispatch` と `verifyReviewedRunMetadata` から、private のリポジトリの条件を外す。
-  - 別の run を読むときに、plan の job の `run_attempt` の取得と、manifest の `review_sha256` の照合を加える。
+  - 別の run を読むときに、plan の job の `run_attempt` の取得と、manifest の SHA-256 と `expected_review_sha256` の照合を加える。ZIP を再利用する preview でも `expected_review_sha256` を必須にする。job summary の `review_sha256` を manifest の SHA-256 にする。
   - `plan.txt` を作る。
   - apply の結果の ledger を標準出力に出さず、`ledger.json` と `post-baseline.json` を S3 に置く。
   - job の output に、custody の置き場所と `manifest.json` の SHA-256 を加える。
@@ -220,16 +248,16 @@ private のリポジトリを public に切り替える場合は、切り替え�
   - 書き込みに `If-None-Match` と SHA-256 の checksum を付け、manifest を最後に書くこと。
   - manifest が無い、または SHA-256 が期待と違うと止まること。
   - 種類、root、run ID、`run_attempt` が合わないと止まること。
-  - 必須のファイルの欠落と、余分なファイルを拒否すること。
+  - 必須のファイルの欠落と、manifest の余分なエントリと、取り出し先の余分なファイルを拒否すること。manifest に無い object を読まないこと。
   - ファイルの SHA-256 が合わないと止まること。
   - パスの区切り、`..`、symlink を拒否し、0700/0600 で書くこと。
   - 利用期限の境界（ちょうど24時間、未来の `createdAt`、不正な日時、引き継いだ `expiresAt` の改変）。
   - 既存の key への書き込みが拒否されると止まること。
 - `scripts/release/workflow.ts`（`tests/delivery/workflow-driver.test.ts` などを更新する）:
   - authorize と `verifyReviewedRunMetadata` が、public の成功した preview を通すこと。別の repository、別の workflow、失敗した run、`main` 以外の run は引き続き拒否すること。
-  - 別の run を読むときに、plan の job の `run_attempt` を使い、`review_sha256` の不一致で止まること。
+  - 別の run を読むときに、plan の job の `run_attempt` を使い、manifest の SHA-256 が `expected_review_sha256` と違えば止まること。lifecycle の失効の後に同じ key に作り直した manifest（時刻を書き換えたもの、同じ内容のもの）を拒否すること。
   - 一部の job の再実行で、書いた job の `run_attempt` を読むこと。
-  - apply の run の `release-review` が、元の `expiresAt` を引き継ぐこと。
+  - apply の run の `release-review` が元の `expiresAt` を引き継ぎ、ZIP を再利用した preview は新しい期限になり、元の manifest の SHA-256 を記録すること。ZIP を再利用する preview で `expected_review_sha256` が無いと止まること。一部の job の再実行で output が欠けたら止まること。
   - ledger を標準出力に出さないこと。成功と失敗のどちらでも、標準出力と標準エラーに機密の fixture の値が出ないこと。
   - 初回の platform の構築で、`post-baseline.json` を `release-result` に置くこと。
 - `tests/delivery/workflows.test.ts`:
