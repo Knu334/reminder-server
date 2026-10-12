@@ -1,25 +1,21 @@
-# Synthetic image fixtures (formal E2E)
+# 合成画像fixture（正式E2E）
 
-All image data is invented. The files are not decodable images: the product only checks the format signature and preserves the
-bytes, so these fixtures make no decoder claim. Original data exists in memory only and is never written to evidence.
+画像データはすべて架空である。ファイルはdecodeできる画像ではない。製品が検査するのは形式のsignatureだけで、byteはそのまま保存する。そのため、これらのfixtureはdecoderについて何も主張しない。元のデータはメモリ上にだけ存在し、evidenceには決して書き込まない。
 
-## Generation rule (`imageBytes(format, bytes = 64, seed = 0)`)
+## 生成規則（`imageBytes(format, bytes = 64, seed = 0)`）
 
-* Length is exactly `bytes` and at least the signature length.
-* Signatures: PNG `89 50 4E 47 0D 0A 1A 0A`; JPEG `FF D8 FF`; GIF `GIF89a`; WebP `RIFF`, uint32 little-endian `bytes - 8`, `WEBP`.
-* Every following byte `i` is `(31 * i + 7 * seed + formatIndex) mod 256`, with formatIndex png 0, jpeg 1, gif 2, webp 3.
-* The same arguments always give the same bytes; a different `seed` gives different bytes of the same format and length.
-* Expected MIME, length and SHA-256 are computed from these bytes by the harness, never taken from the product response.
+* 長さは正確に `bytes` であり、signatureの長さ以上である。
+* signature: PNGは `89 50 4E 47 0D 0A 1A 0A`、JPEGは `FF D8 FF`、GIFは `GIF89a`、WebPは `RIFF`、uint32 little-endianの `bytes - 8`、`WEBP` である。
+* signatureに続く位置 `i` の各byteは、`(31 * i + 7 * seed + formatIndex) mod 256` である。formatIndexは、png 0、jpeg 1、gif 2、webp 3である。
+* 同じ引数からは、常に同じbyteが得られる。`seed` が異なると、同じ形式と長さで、異なるbyteになる。
+* 期待するMIME、長さ、SHA-256は、harnessがこのbyteから計算する。製品の応答からは決して取らない。
 
-## Inputs derived from them
+## これらから導く入力
 
-* BASE64: canonical standard alphabet with padding. data URL: `data:<mime>;base64,<BASE64>` with the matching MIME.
-* Boundary sizes: PNG fixtures of 1048575, 1048576 (accepted, bytes preserved) and 1048577 (413 THUMBNAIL_TOO_LARGE) decoded bytes.
-  The JSON body stays below 2097152 bytes, so a body-size refusal is never confused with the image limit.
-* Invalid inputs (each its own case): non-alphabet character, non-zero pad bits, missing padding, length not a multiple of four,
-  data URL MIME that differs from the signature, unsupported MIME, a non-image signature, data URL without `;base64`.
+* BASE64: paddingありの、正準の標準alphabetである。data URL: `data:<mime>;base64,<BASE64>` で、MIMEは一致するものを使う。
+* 境界のサイズ: decode後のbyte数が1048575、1048576（受理され、byteが保存される）、1048577（413 THUMBNAIL_TOO_LARGE）のPNG fixtureである。JSONのbodyは2097152 byte未満に保つ。そのため、bodyサイズによる拒否が、画像の上限と混同されることはない。
+* 不正な入力（それぞれ別のcase）: alphabet外の文字、0でないpad bit、paddingの欠落、4の倍数でない長さ、signatureと異なるdata URLのMIME、未対応のMIME、画像でないsignature、`;base64` のないdata URL。
 
-## Isolation
+## 隔離
 
-Each case uses its own synthetic owner. S3 observations are limited to `images/<ownerId>/`; counters and jobs are read for that
-owner only. Signed URLs are fetched with no headers through the guarded local transport and are never recorded.
+各caseは、それぞれ専用の合成ownerを使う。S3の観測は `images/<ownerId>/` に限る。counterとjobは、そのownerの分だけを読む。署名付きURLは、guard付きのローカルtransportを通してheaderなしで取得し、決して記録しない。

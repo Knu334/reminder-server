@@ -1,25 +1,27 @@
-# Contributor instructions
+# 開発の指示
 
-AGENTS.md is a symlink to this file; preserve the link and edit this shared source.
-Read README.md and the relevant operation document before changing the runtime or
-release tooling. Production is AWS HTTP API + Node 24 Lambda ZIP + DynamoDB/S3.
+AGENTS.md はこのファイルへの symlink である。link を保ち、このファイルを編集する。runtime や release tooling を変える前に、README.md と関係する運用文書を読む。本番は AWS HTTP API、Node 24 の Lambda ZIP、DynamoDB と S3 で構成する。人間が保守する可能性のある文書は日本語で書く。コマンド、パス、識別子は原文のままにする。
 
-## Authorized work and private files
+## 秘密情報
 
-Use synthetic fixtures only. Never open, hash, print or copy real reminders.json,
-.env, .env.actions, other private .env files, AWS credentials, private mappings,
-Terraform state/plan/private inputs, image backups, or whole environment dumps.
-Public .env.example and checked-in *.example files are placeholders, not secrets.
-Inspect individually named nonsecret settings only. Do not change .devcontainer.
-Do not run AWS operations, real ZIP registration, GHA, seed, deploy, migration,
-Cognito user operations, PITR, push/PR/merge without explicit authorization.
-Local implementation, documentation, tests and feature commits already approved
-for the AWS SDD work do not need renewed approval.
+- 試験には合成の fixture だけを使う。
+- 次のものは、開く、hash を取る、表示する、複製する、のいずれもしない。実際の reminders.json、.env、.env.actions、その他の私有 .env、AWS の認証情報、私有の mapping、Terraform の state・plan・私有入力、画像の backup、環境変数の一括出力。
+- 公開の .env.example と、commit 済みの *.example は placeholder であり、秘密ではない。
+- 設定は、秘密でないものを名前で1つずつ確認する。
 
-When untracking private files use only `git rm --cached -- .env.actions reminders.json`;
-preserve local files and verify filesystem existence only. Byte-preservation
-checks belong solely to empty canaries in a temporary Git repository. Review
-nonprivate differences with exclusions **before generation**:
+## 承認が必要な操作
+
+- `.devcontainer` は変更しない。
+- 次の操作は、明示の承認なしに行わない。AWS の操作、実 ZIP の登録、GHA の手動実行と deploy、seed、移行、Cognito の user 操作、PITR、push、PR の作成、merge。
+- CI は PR と `main` への push で自動的に走る（`ci.yml`、`floci-e2e.yml`）。`deploy.yml` は手動実行だけで、実 AWS を使う。
+- AWS SDD の作業として承認済みの、ローカルの実装、文書、試験、機能の commit は、改めて承認を得なくてよい。
+
+## Git
+
+- stage は path を明示する。生成した cache、artifact、私有ファイルは stage しない。
+- 履歴は書き換えない。index から外しても、過去の履歴に残った内容は消えない。
+- 私有ファイルを index から外すときは `git rm --cached -- .env.actions reminders.json` だけを使う。ローカルのファイルは残し、存在だけを確認する。
+- 差分は、私有の path を除外して生成する。全体の diff・stat・show を生成してから絞り込むことはしない。
 
 ```sh
 git diff -- . ':!reminders.json' ':!.env.actions'
@@ -28,63 +30,28 @@ git diff --cached --stat -- . ':!reminders.json' ':!.env.actions'
 git diff --cached --name-status --no-renames -- .env.actions reminders.json
 ```
 
-Never generate a full diff/stat/show and then filter private paths. Do not rewrite
-history or claim untracking removes historical exposure. Stage explicit paths;
-never stage generated caches, artifacts or private files. Retain the three ignored
-.superpowers SDD ledgers until controller review and Rulings collection finish.
+## 検証
 
-## Verification
+- ツールは Node 24.21.0、npm 11.11.1、Python 3.13.16（uv で導入できる）、Terraform 1.16.5、AWS provider 6.67.0 に固定する。
+- 固定版のツールは、git 管理外の `.superpowers/tools/aws-sdd` に置く。npm、npx、Python と準備のコマンドには、`PATH=<リポジトリ直下>/.superpowers/tools/aws-sdd/node_modules/.bin:<リポジトリ直下>/.superpowers/tools/aws-sdd/bin:$PATH` を付ける。E2E の子プロセスは PATH を継承せず、このディレクトリから直接ツールを探す。
+- 試験を読み、意味のある失敗する合成ケースを書き、最小限の実装をして GREEN を確かめる。
+- ZIP の検査は artifact を使うので、`npm test` の前に `npm run build` と `npm run package` を実行する。
+- `npm test` は offline 試験の後に Floci の正式 E2E を実行する。Floci が無い環境では `npm run test:offline` を使う。
+- README のコマンド一覧を実行し、正確な件数と警告を報告する。mock やローカルの証拠と、実環境での受け入れを区別する。
 
-Use Node 24.21.0/npm 11.11.1, Python 3.13.16 (uv can install it), Terraform 1.16.5
-and pinned AWS provider 6.67.0. In the approved implementation workspace, prefix
-**all** npm/npx/Python/preparation commands with
-`PATH=/tmp/aws-sdd-tools/node_modules/.bin:/tmp/aws-sdd-tools/bin:$PATH`.
-Read tests, write a meaningful failing synthetic case, implement minimally and
-verify GREEN. Build and package before the full npm test command because ZIP
-checks consume the artifact. Run README's final command list, report exact
-counts and warnings, distinguish mock/local evidence from live acceptance.
+## 補助の command guard
 
-## Auxiliary command guards
+- `.claude/settings.json` には Read の deny と、Bash の PreToolUse hook がある。Codex も同じ hook（`.codex/hooks/check-bash-command.sh` は Claude の hook への symlink）を、`hookSpecificOutput.permissionDecision=deny` と exit 0 で使う。Codex では hooks の feature を有効にし、user が hook の定義を trust する必要がある。trust や設定の変更、bypass flag は、この repository の設定に含めない。
+- hook はコマンドの文字列を検査するだけで、入力を実行しない。明らかな私有 path と環境変数の一括出力を拒否するが、shell の全構文、alias、symlink は解釈しない。access control の境界ではなく、実際の権限、sandbox、セッションの指示が優先する。
+- hook の読み込み方は harness ごとに違う。合成の script 試験は、Claude、ChatGPT Work、Codex で実際に hook が効いていることの証明にはならない。
+- hook には Bash と jq が要る。
 
-.claude/settings.json includes supported Read denies and a Bash PreToolUse hook;
-its public .env.example carve-out uses current gitignore negation semantics.
-Codex 0.160.0 and current official docs support the inline hooks table and Bash
-matcher, using hookSpecificOutput.permissionDecision=deny with exit 0. The hooks
-feature must be enabled and the user must trust non-managed hook definitions.
-No trust/config mutation or bypass flag is part of this repository setup.
-These scripts inspect command strings only, never execute the input. They reject
-obvious private paths/environment dumps but do not parse every shell expression,
-resolve aliases/symlinks, cover all tools, or establish an access-control boundary.
-Project hook loading varies by harness; synthetic script tests do not prove active
-integration in Claude, ChatGPT Work or Codex. Actual environment permissions,
-sandbox and session instructions remain authoritative. Hooks require Bash and jq.
-Sources checked 2026-10-05: [Claude permissions](https://code.claude.com/docs/en/permissions),
-[Claude hooks](https://code.claude.com/docs/en/hooks),
-[OpenAI Hooks](https://learn.chatgpt.com/docs/hooks).
+## ライブラリの文書
 
-<!-- context7 -->
-## Current library documentation
+ライブラリ、framework、SDK、API、CLI、cloud service について調べるときは、`ctx7` CLI で現行の文書を取得する。refactoring、一から書く script、業務ロジックの debug、code review、一般的なプログラミングの概念には使わない。web 検索より Context7 を優先する。
 
-Use the `ctx7` CLI to fetch current documentation whenever the user asks about a
-library, framework, SDK, API, CLI tool, or cloud service, including API syntax,
-configuration, migration, library-specific debugging, setup and CLI usage.
-Do not use for refactoring, scripts from scratch, business logic debugging,
-code review or general programming concepts. Prefer Context7 over web search.
+1. `npx ctx7@latest library <name> "<1つの概念についての具体的な質問>"` で解決する。名前は公式の表記にする（Next.js、Customer.io、Three.js）。`/org/project` は、名前の一致、関連性、snippet 数、reputation（High・Medium）、score で選ぶ。
+2. `npx ctx7@latest docs <libraryId> "<具体的な概念>"` で取得する。概念ごとに分け、版の指定があれば `/org/project/version` を使う。
+3. 取得した文書に基づいて答える。1つの質問につきコマンドは3回までにする。
 
-1. Resolve with `npx ctx7@latest library <name> "<specific single-concept query>"`.
-   Use official punctuation (Next.js, Customer.io, Three.js). Select `/org/project`
-   by exact match, relevance, snippet count, High/Medium reputation and score.
-   Try alternate names/queries if results are unsuitable.
-2. Fetch `npx ctx7@latest docs <libraryId> "<specific concept>"`; separate concepts
-   unless the question concerns their interaction. Use returned version-specific
-   `/org/project/version` for a requested version.
-3. Answer from fetched docs. Call library first unless the user supplied a valid
-   `/org/project` ID. Run no more than three commands per question.
-
-Run Context7 outside the default sandbox. On DNS/network/fetch failure rerun
-outside it instead of retrying inside. Never include keys, credentials, personal
-or private data in queries. On quota errors disclose the failure and suggest
-`npx ctx7@latest login` or `CONTEXT7_API_KEY` for higher limits; do not silently
-fall back to training data. For OpenAI/Codex configuration consult safe installed
-code/help/schema first and official OpenAI documentation as fallback.
-<!-- context7 -->
+Context7 は既定の sandbox の外で実行する。DNS やネットワークで失敗したら、sandbox の外で再実行する。質問に鍵、認証情報、個人情報、私有データを含めない。quota の error では失敗を伝え、`npx ctx7@latest login` か `CONTEXT7_API_KEY` を案内する。黙って学習データで答えない。OpenAI と Codex の設定は、まず手元の安全な code・help・schema を確認し、次に公式文書を見る。

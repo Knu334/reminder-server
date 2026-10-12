@@ -1,22 +1,12 @@
-# Production image cleanup
+# 本番の画像清掃
 
-These are future operator procedures. Local tests used synthetic transports;
-no Scheduler, Lambda invocation, S3 deletion or production data change occurred.
-The application root owns the schedule, its scoped invocation policy and alarms.
+以下は、将来の運用者向けの手順である。ローカルの試験は合成のtransportを使った。Scheduler、Lambdaの呼び出し、S3の削除、本番データの変更は、いずれも発生していない。scheduleと、その範囲を限定した呼び出しpolicy、alarmは、application rootが管理する。
 
-## Daily schedule and manual execution
+## 日次のscheduleと手動実行
 
-Scheduler targets only the cleanup **production alias**, at `cron(0 3 * * ? *)`,
-03:00 UTC daily, flexible window OFF. It starts DISABLED. Publish only after
-migration verification and then enable through a reviewed application deployment.
-A disabled schedule does not cancel accepted events or running invocations.
-Before real manual work, confirm the exact account, region, function alias, data
-publication gate, approved release versions and operator's invocation permission.
-Use short-lived operator credentials in their normal private provider chain;
-no secrets, payload, output or environment dump goes to Git/public artifacts.
+Schedulerの対象は、清掃の**production alias**だけである。`cron(0 3 * * ? *)` で、毎日03:00 UTCに実行し、flexible windowはOFFである。初期状態はDISABLEDである。公開は移行の検証の後にだけ行い、その後、レビュー済みのapplicationのデプロイで有効にする。scheduleを無効にしても、受け付け済みのeventや実行中の呼び出しは取り消されない。実際に手動で作業する前に、正確なaccount、region、functionのalias、データのpublication gate、承認済みのrelease version、運用者の呼び出し権限を確認する。運用者の短期credentialを、通常の私有のprovider chainで使う。secret、payload、出力、環境変数の一覧は、Gitにも公開artifactにも入れない。
 
-For an explicitly authorized manual invocation, AWS CLI v2 can use a private
-output file and synchronous RequestResponse against the production alias:
+明示的に承認された手動の呼び出しでは、AWS CLI v2で、私有の出力ファイルを使い、production aliasに対して同期のRequestResponseで呼び出せる。
 
 ```sh
 AWS_MAX_ATTEMPTS=1 aws lambda invoke \
@@ -27,67 +17,27 @@ AWS_MAX_ATTEMPTS=1 aws lambda invoke \
   --payload '{}' /private/cleanup-result.json
 ```
 
-This example is documentation only and has not been executed. `AWS_MAX_ATTEMPTS=1`
-disables automatic CLI transport retries. RequestResponse has no Lambda async
-retry behavior. Inspect invocation metadata and FunctionError plus the private
-result; HTTP/CLI success alone does not establish completed cleanup. A timeout
-or disconnect may have an unknown outcome: inspect safe logs/metrics and durable
-job state before an explicit operator retry. Do not repeatedly invoke blindly.
-No maintenance workflow or generic management CLI is provided.
+この例は文書としてのものであり、実行していない。`AWS_MAX_ATTEMPTS=1` は、CLIのtransportの自動retryを無効にする。RequestResponseには、Lambdaの非同期retryの動作がない。呼び出しのmetadataとFunctionError、私有の結果を確認する。HTTPやCLIが成功しただけでは、清掃が完了したことにはならない。timeoutや切断では、結果が不明な場合がある。運用者が明示的にretryする前に、安全なログ・metricと、永続化されたjobの状態を確認する。やみくもに呼び出しを繰り返してはならない。保守用のworkflowや汎用の管理CLIは用意していない。
 
-[Official Lambda invoke reference](https://docs.aws.amazon.com/cli/latest/reference/lambda/invoke.html)
-and [CLI retry configuration](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-retries.html)
-were checked through Context7 on 2026-10-05. For production, set client timeout
-long enough for the possible 660-second Lambda invocation rather than treating
-an early local timeout as definitive server failure.
+[公式のLambda invokeリファレンス](https://docs.aws.amazon.com/cli/latest/reference/lambda/invoke.html)と[CLIのretry設定](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-retries.html)は、2026-10-05にContext7で確認した。本番では、clientのtimeoutを、最大660秒になりうるLambdaの呼び出しに足りる長さにする。ローカルで早く起きたtimeoutを、serverの失敗と断定しない。
 
-## Delivery, invocation and processing retries
+## 配信、呼び出し、処理のretry
 
-Scheduler delivery retries **2 times**, maximum event age **3600 seconds**.
-The cleanup alias's Lambda asynchronous invocation retries are separately
-**2 times**, maximum event age **3600 seconds**. These limits control different
-stages, not an exactly-once guarantee; an accepted event can execute more than
-once. Manual RequestResponse does not use either async retry queue, and the
-example disables transport retries explicitly.
+Schedulerの配信のretryは**2回**、eventの最大経過時間は**3600秒**である。清掃のaliasのLambda非同期呼び出しのretryは、これとは別に**2回**、eventの最大経過時間は**3600秒**である。これらの上限は異なる段階を制御するものであり、exactly-onceの保証ではない。受け付けたeventが2回以上実行されることがある。手動のRequestResponseは、どちらの非同期retryのqueueも使わない。上の例では、transportのretryも明示的に無効にしている。
 
-Inside one execution, AWS SDK clients use one transport attempt. The domain
-service permits up to three attempts for bounded reads/claim/complete/delete
-reconciliation while budget remains. Query evaluation is not retried when its
-ScannedCount outcome is unknown. Delivery retry and these processing attempts
-must not be conflated in run notes or cost calculations.
+1回の実行の中では、AWS SDKのclientはtransportを1回だけ試みる。domain serviceは、予算が残っている間、有界な読み取り・claim・complete・deleteの照合を最大3回まで試みる。Queryの評価は、そのScannedCountの結果が不明な場合にはretryしない。配信のretryとこれらの処理の試行を、runのメモや費用の計算で混同してはならない。
 
-## Budget, remaining work and durable state
+## 予算、残りの作業、永続化された状態
 
-Cleanup is 512 MiB, timeout 660 seconds, reserved concurrency 1. Processing stops
-at 600 seconds or 60 seconds remaining, 10,000 GSI-evaluated records, or 5,000
-delete attempts; it waits for in-flight transports and saves the checkpoint.
-Up to four candidate workers share these caps. A returned `incomplete:true`
-means work remains and is not by itself a transport failure. Failed dependencies,
-checkpoint/metric errors fail the invocation. Retry selection follows actual
-outcome and persisted state; missing heartbeat needs investigation.
+清掃は512 MiB、timeout 660秒、reserved concurrency 1である。処理は、600秒の経過または残り60秒、GSIで評価したrecord 10,000件、削除の試行5,000回のいずれかで止まる。止まるときは、実行中のtransportを待ってからcheckpointを保存する。最大4つの候補workerが、これらの上限を共有する。`incomplete:true` が返ったときは、作業が残っていることを意味し、それだけではtransportの失敗ではない。依存先の失敗、checkpointやmetricのerrorでは、呼び出しが失敗する。retryするかどうかは、実際の結果と永続化された状態で決める。heartbeatが欠けた場合は調査が必要である。
 
-The sparse `cleanup_by_due` GSI includes pending/retired/deleting jobs only, with
-four shards each. Pending and retired become eligible after 24 hours; a deleting
-lease is 20 minutes. Committed/done remove both index fields. Strong base-item
-reads and conditional leases reconcile stale eventual GSI entries. Round-robin
-page cursors are durable; they advance only after a complete candidate page.
-On resume, abandoned deleting leases become due, completed work is skipped and
-an unfinished page is revisited safely. Do not delete a lease/checkpoint to force
-progress. Current HEAD/version/checksum mismatch preserves the object and does
-not complete it as deleted; investigate the outstanding job privately.
+疎な `cleanup_by_due` GSIは、pending、retired、deletingのjobだけを含み、それぞれ4 shardである。pendingとretiredは24時間後に対象になる。deletingのleaseは20分である。committedとdoneは、indexの両方のfieldを削除する。base itemの強い読み取りと条件付きのleaseで、古くなった結果整合のGSIの項目を照合する。round-robinのページcursorは永続化される。cursorが進むのは、候補のページを最後まで処理した後だけである。再開時には、放棄されたdeletingのleaseが対象になり、完了済みの作業は飛ばされ、途中のページは安全に再訪される。進捗を強制するために、leaseやcheckpointを削除してはならない。現在のHEAD・version・checksumが一致しない場合は、objectを保持し、削除済みとして完了させない。未処理のjobは非公開で調査する。
 
-Cleanup creates S3 delete markers on eligible current keys. It does **not** delete
-pinned object versions, committed references, or whole tables. The 60-day
-noncurrent lifecycle retains versions for the 35-day PITR recovery window.
-After PITR, preserve still-referenced versions as new current objects through
-[recovery verification](recovery.md) before eventual expiration. Code rollback,
-Scheduler disable and API publication changes do not restore/deallocate data.
+清掃は、対象となる現行のkeyにS3のdelete markerを作る。固定されたobject version、commit済みの参照、table全体は削除**しない**。非現行versionの60日のlifecycleは、35日のPITRの復旧期間の間、versionを保持する。PITRの後は、最終的に期限切れになる前に、[復旧の検証](recovery.md)で、まだ参照されているversionを新しい現行objectとして保全する。codeのrollback、Schedulerの無効化、APIのpublicationの変更では、データは復元も解放もされない。
 
-## Monitoring
+## 監視
 
-Nine CloudWatch alarms are deployed by configuration, with no SNS/DLQ or alarm
-notification recipient. Inspect the console/metrics under the operator's account;
-no notification delivery has been live-tested.
+CloudWatchのalarm 9個を設定でデプロイする。SNSやDLQ、alarmの通知先はない。運用者のaccountで、consoleとmetricを確認する。通知の配信は、liveでは試験していない。
 
 | Alarm key | Signal |
 | --- | --- |
@@ -101,18 +51,11 @@ no notification delivery has been live-tested.
 | scheduler_dropped | Scheduler InvocationDroppedCount by schedule group |
 | cleanup_heartbeat | custom CleanupHeartbeat, daily Sum < 1 |
 
-The two custom metrics use namespace ReminderServer and Environment=production.
-Heartbeat is emitted after a saved checkpoint with no processing failure. Before
-publication, Scheduler is disabled, heartbeat actions disabled and missing data
-notBreaching. Reviewed scheduler enablement changes heartbeat missing data to
-breaching/actions enabled together; other alarm evaluation continues. Unpublished
-cleanup skips work rather than implying a successful heartbeat. Logs contain
-request/operation/count/status/duration only, no private IDs/titles/images/tokens.
+2つのcustom metricは、namespace ReminderServerとEnvironment=productionを使う。heartbeatは、処理の失敗がなく、checkpointを保存した後に送る。公開前は、Schedulerが無効で、heartbeatのactionも無効であり、missing dataはnotBreachingである。レビュー済みのschedulerの有効化で、heartbeatのmissing dataをbreachingにする変更と、actionを有効にする変更を同時に行う。他のalarmの評価は続く。未公開の清掃は作業を飛ばす。これを、heartbeatが成功したことと見なさない。ログに含むのはrequest、operation、件数、status、所要時間だけであり、私有のID、title、画像、tokenは含まない。
 
 ## 2026-10-10 ローカル実測に基づくログの読み方（追記）
 
-以下はローカルのFloci（refresh.6）で実測した内容であり、実AWSでの清掃の実績ではない。本番操作の手順は上の各節に従い、ここでは混同しない。
-実行手順と結果は[正式E2E手順](formal-e2e-README.md)、[結果](formal-e2e-results.md)にある。
+以下はローカルのFloci（refresh.6）で実測した内容であり、実AWSでの清掃の実績ではない。本番操作の手順は上の各節に従い、ここでは混同しない。実行手順と結果は[正式E2E手順](formal-e2e-README.md)、[結果](formal-e2e-results.md)にある。
 
 - 1回の同期invokeは、同じlog streamに2種類のログを出す。開始ログは `operation: cleanup_start` と、Lambdaの `lambdaRequestId` を持つ。終了ログは `operation: cleanup` と、サービスが付けた `requestId`（run ID）、`evaluated`、`deletes`、`incomplete`、`durationMs` を持つ。2つのIDは別の値で、同じとは扱わない。同一stream・同一観測区間の開始と終了を1組とする。
 - 未公開（gateがfalse）の場合は、開始ログと `skippedUnpublished: true`、`evaluated 0`、`deletes 0` の応答になり、保存は変わらない。終了ログとheartbeatは期待しない。

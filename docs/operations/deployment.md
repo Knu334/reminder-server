@@ -1,209 +1,110 @@
-# Production delivery
+# 本番配布
 
-These procedures describe future, separately authorized AWS operations. Local
-implementation has not run Actions, created resources, registered a real ZIP,
-seeded an API, migrated data or deployed. Bootstrap/operator credentials belong
-to the operator's private custody, never repository secrets or workflow inputs.
-Production is the only permanent environment.
+これらの手順は、将来、別途承認を得て行うAWS操作を記述する。ローカルの実装では、Actionsの実行、リソースの作成、実ZIPの登録、APIのseed、データの移行、デプロイのいずれも行っていない。bootstrap/operatorの認証情報はoperatorが私的に保管する。repository secretやworkflow入力には決して置かない。本番は唯一の恒久的な環境である。
 
-## Before the first dispatch
+## 初回のdispatchの前に
 
-Delivery supports **private repositories only**. The authorize job refuses a
-public repository, non-main dispatch or a commit outside main before any build,
-OIDC or private artifact transfer. This restriction does not change repository
-visibility and makes no claim about the current repository's visibility.
-Private Actions artifacts are accessible to authorized repository readers;
-they are not restricted exclusively to environment reviewers. Restrict repository
-read/collaborator access accordingly, retain artifacts for one day, and remove
-local review downloads after use. Never make the repository public while private
-plans or artifacts remain accessible. Expired review artifacts require a new
-preview; the workflow cannot apply from an arbitrary local JSON/upload.
+配布は**private repositoryのみ**に対応する。authorize jobは、public
+repository、main以外からのdispatch、main外のcommitを、build、OIDC、private artifactの転送より前に拒否する。この制限はrepositoryの公開設定を変更しない。現在のrepositoryの公開設定について何かを主張するものでもない。private Actions artifactには、承認されたrepositoryの閲覧者がアクセスできる。environmentのreviewerだけに限定されるわけではない。repositoryの閲覧・collaborator権限をそれに応じて制限し、artifactの保持は1日とし、ローカルにダウンロードしたレビュー用のファイルは使用後に削除する。private planやartifactにアクセスできる間は、決してrepositoryをpublicにしない。期限切れのレビューartifactには新しいpreviewが必要である。workflowは任意のローカルJSONやアップロードからapplyできない。
 
-Configure the three environments `production-artifact`, `production-plan` and
-`production`, each restricted to the main deployment branch. Use required
-reviewers/prevent self-review on `production` when the account plan supports
-those protections. The exact AWS OIDC subjects must match these environment
-names; set bootstrap's explicit `oidc_subjects.artifact`, `.plan`, `.apply` to
-exactly `repo:<repository>:environment:production-artifact`, `repo:<repository>:environment:production-plan`, and `repo:<repository>:environment:production`, respectively. Bootstrap rejects branch/tag subjects, extra roles and collapsed environments. Its example placeholders are not deployment
-values. GitHub environment/protection availability varies by repository plan;
-verify the available controls before enabling delivery. No workflow can
-configure or certify those controls for the operator.
+3つのenvironment `production-artifact`、`production-plan`、`production` を設定し、いずれもdeployment branchをmainに限定する。account planがこれらの保護に対応している場合は、`production` でrequired reviewersとprevent self-reviewを使用する。AWS OIDCのsubjectは、これらのenvironment名と正確に一致しなければならない。bootstrapの明示的な `oidc_subjects.artifact`、`.plan`、`.apply` には、それぞれ正確に `repo:<repository>:environment:production-artifact`、`repo:<repository>:environment:production-plan`、`repo:<repository>:environment:production` を設定する。bootstrapは、branch/tagのsubject、余分なrole、environmentを1つにまとめた構成を拒否する。bootstrapのexampleのplaceholderはデプロイ用の値ではない。GitHubのenvironmentと保護機能の利用可否はrepositoryのplanによって異なる。配布を有効にする前に、利用できる制御を確認する。operatorに代わってこれらの制御を設定・保証できるworkflowはない。
 
-Set repository variables `AWS_REGION`, `AWS_ACCOUNT_ID`, `STATE_BUCKET`,
-`ARTIFACT_BUCKET`, `ARTIFACT_ROLE_ARN`, `PLAN_ROLE_ARN`, `APPLY_ROLE_ARN` from
-reviewed bootstrap outputs. State bucket identity is fixed to
-`<name_prefix>-<account_id>-<region>-state`. Backend keys/encryption/native S3
-`use_lockfile` are fixed by each root. Each AWS job assumes only its designated
-role using OIDC and checks the expected account; there are no long-lived keys.
-The workflow never handles bootstrap apply credentials or expands its API grant.
+repository variableの `AWS_REGION`、`AWS_ACCOUNT_ID`、`STATE_BUCKET`、`ARTIFACT_BUCKET`、`ARTIFACT_ROLE_ARN`、`PLAN_ROLE_ARN`、`APPLY_ROLE_ARN` を、レビュー済みのbootstrap outputから設定する。state bucketの識別名は`<name_prefix>-<account_id>-<region>-state` に固定である。backendのkey、暗号化、S3ネイティブの`use_lockfile` は各rootで固定されている。各AWS jobはOIDCで指定されたroleだけをassumeし、想定するaccountであることを確認する。長期間有効なkeyはない。workflowはbootstrapのapply用認証情報を扱わず、自身のAPI権限を拡大することもない。
 
-In `production-plan`, configure private secrets containing JSON objects:
+`production-plan` には、JSON objectを格納したprivate secretを設定する。
 
-- `PLATFORM_INPUTS_JSON`: all required platform variables from
-  `infra/platform/production/terraform.tfvars.example`, with actual reviewed
-  origin, full callback/logout URLs, region/account/prefix and bootstrap roles.
-- `APPLICATION_INPUTS_JSON`: account, region, prefix, exact origin, bootstrap
-  `scheduler_role_arn`, and nonnull bootstrap `production_api_id`. Optional
-  `allowed_source_ips` and `runtime_limits` may be included. Platform fields
-  are read live and allowlisted into a private input file; supplied duplicates
-  must agree. Artifact and seed/scheduler flags are fixed by the release driver.
-- `PLATFORM_BASELINE_JSON`: literal JSON `null` only for genuinely first
-  protected Cognito creation; thereafter the known platform baseline below.
-- `APPLICATION_BASELINE_JSON`: known application baseline after API-only seed;
-  it must never be null for normal delivery.
+- `PLATFORM_INPUTS_JSON`: `infra/platform/production/terraform.tfvars.example` にある必須のplatform変数すべて。実際のレビュー済みのorigin、完全なcallback/logout URL、region/account/prefix、bootstrapのroleを含む。
+- `APPLICATION_INPUTS_JSON`: account、region、prefix、正確なorigin、bootstrapの`scheduler_role_arn`、nullでないbootstrapの `production_api_id`。任意で`allowed_source_ips` と `runtime_limits` を含めてよい。platformの項目は実行時に実際の値を読み取り、allowlistで選別してprivate input fileに入れる。重複して与えた値は一致しなければならない。artifactとseed/schedulerのflagはrelease driverが固定する。
+- `PLATFORM_BASELINE_JSON`: 保護されたCognitoを本当に初めて作成するときに限り、リテラルのJSON `null`。それ以降は、下記の既知のplatform baselineを入れる。
+- `APPLICATION_BASELINE_JSON`: API-onlyのseed後の既知のapplication baseline。通常の配布では決してnullにしてはならない。
 
-Baseline schema is `{root, apiBaseUrl, apiId, cognitoIssuer, cognitoClientId,
-cognitoAuthBaseUrl}`. `root` is `platform` or `application`. Platform can have
-null API fields; its Cognito identity/domain must be known after creation.
-Application requires every identity/URL known and its API ID equal to bootstrap's
-handoff and existing application state. Account, region, origin and redirect
-values are explicit; no secret or output is inferred from another account.
+baselineのschemaは `{root, apiBaseUrl, apiId, cognitoIssuer, cognitoClientId,
+cognitoAuthBaseUrl}` である。`root` は `platform` または `application` である。platformではAPIの項目がnullでもよいが、作成後はCognitoのidentity/domainが既知でなければならない。applicationでは、すべてのidentity/URLが既知であり、API IDがbootstrapのhandoffおよび既存のapplication stateと一致しなければならない。account、region、origin、redirectの値は明示する。secretやoutputを別のaccountから推測することはない。
 
-## Initial sequence
+## 初回の手順
 
-1. The separately authorized operator creates/bootstrap-reviews the bootstrap
-   root with `production_api_id=null`. It owns the three distinct encrypted,
-   versioned buckets, boundaries, runtime roles and three scoped OIDC roles.
-   Null API ID grants GitHub no HTTP API creation/management access. Configure
-   the environments and variables above from its private outputs.
-2. Preview `target=platform`, `apply=false`, full immutable commit on main,
-   and an explicit null platform baseline. This phase does **not** build or
-   register a ZIP. Review and apply through the two-run gate below. Null baseline
-   is refused for existing pool/client/domain; it is not a reset or adoption
-   bypass. After first apply the driver checks actual state resource identities
-   against saved region/domain inputs and validates known outputs, writing
-   `post-baseline.json`. Install that known platform baseline before later plans.
-   Platform provides API/cleanup policies and log groups before any Lambda deploy.
-3. The separately authorized operator seeds **only** the application-owned
-   `aws_apigatewayv2_api.production` using the exact
-   [API-only seed procedure](../../infra/application/production/README.md).
-   All root variables remain required. Before a real ZIP exists, its explicitly
-   UNUSED seed-only descriptor has the known bootstrap artifact bucket, a
-   64-zero hex release key, `operator-api-seed-unused` version and zero32 Base64.
-   It is not a RegisteredArtifact or verified ZIP. Review the targeted saved
-   plan: only API creation, no stage/Lambda/S3 artifact operations. Full-root
-   seed is rejected, scheduler is disabled, and no GHA seed path exists.
-4. Capture the real API ID/URL privately, return the known ID to bootstrap via
-   the separately reviewed operator change, and configure the known application
-   baseline with platform Cognito identity/domain. Preserve the API in its
-   original application state/address. Discard the seed flag/dummy descriptor;
-   normal delivery requires `operator_api_seed=false` and an actual immutable ZIP.
-5. Preview `target=application`, `apply=false`, `reviewed_run` empty, and
-   `scheduler_enabled=false`. This builds/packages once, verifies the generated
-   ZIP, runs local tests/static Terraform checks, audits and produces a CycloneDX
-   SBOM. Only after validation does the registration role register the ZIP and
-   persist its complete manifest/evidence hashes. Planning uses that selected
-   S3 key/version/checksum, requires the already-seeded API and can create the
-   first `$default` stage. No normal plan can create/replace/delete the API.
-6. Review and apply as below. Default `published=false` expects `/readyz=503`;
-   the workflow changes no publication data. Migration/publication and Cognito
-   console user operations follow their separately approved operator procedures.
-   Classic Hosted UI with admin-only IAM-gated password auth still needs real
-   AWS login/PKCE/direct-public-auth rejection acceptance; mock checks do not
-   establish live compatibility.
+1. 別途承認を得たoperatorが、`production_api_id=null` でbootstrap rootを作成し、bootstrapとしてレビューする。このrootは、暗号化とversioningを有効にした3つの別々のbucket、boundary、runtime role、範囲を限定した3つのOIDC roleを所有する。API IDがnullの間、GitHubにはHTTP APIの作成・管理の権限が一切与えられない。そのprivate outputから、上記のenvironmentとvariableを設定する。
+2. `target=platform`、`apply=false`、main上の完全なimmutable commit、明示的なnullのplatform baselineでpreviewする。この段階ではZIPのbuildも登録も**行わない**。下記の2回のrunによるgateでレビューしてapplyする。既存のpool/client/domainがある場合、null baselineは拒否される。null baselineはリセットやadoptionの抜け道ではない。初回のapply後、driverは実際のstate上のリソースidentityを、保存したregion/domainの入力と照合し、既知のoutputを検証して `post-baseline.json` を書き出す。以後のplanの前に、その既知のplatform baselineを設定する。platformは、Lambdaのデプロイより前にAPI/cleanupのpolicyとlog groupを用意する。
+3. 別途承認を得たoperatorが、application所有の`aws_apigatewayv2_api.production` **だけ**を、正確な[API-only seed手順](../../infra/application/production/README.md)でseedする。rootの変数はすべて引き続き必須である。実ZIPが存在する前の段階では、明示的にUNUSEDとしたseed専用のdescriptorに、既知のbootstrap artifact bucket、64個のゼロからなるhexのrelease key、`operator-api-seed-unused` というversion、zero32のBase64を入れる。これはRegisteredArtifactでも検証済みZIPでもない。対象を限定したsaved planをレビューする。API作成だけを含み、stage・Lambda・S3 artifactの操作を含まないこと。root全体のseedは拒否され、schedulerは無効であり、GHAによるseedの経路は存在しない。
+4. 実際のAPI ID/URLを私的に控え、別途レビューされたoperatorの変更で既知のIDをbootstrapへ戻し、platformのCognito identity/domainとともに既知のapplication
+   baselineを設定する。APIは元のapplication state/addressのまま保持する。seed flagとダミーのdescriptorは破棄する。通常の配布には`operator_api_seed=false` と実際のimmutable ZIPが必要である。
+5. `target=application`、`apply=false`、`reviewed_run` を空、`scheduler_enabled=false` でpreviewする。これはbuild/packageを一度だけ行い、生成したZIPを検証し、ローカル試験と静的なTerraform検査を実行し、監査を行い、CycloneDXのSBOMを生成する。検証が済んだ後でのみ、登録roleがZIPを登録し、その完全なmanifest/evidenceのhashを永続化する。planはその選択したS3のkey/version/checksumを使い、seed済みのAPIを必須とし、最初の`$default` stageを作成できる。通常のplanはAPIを作成・置換・削除できない。
+6. 下記の手順でレビューしてapplyする。既定の `published=false` では `/readyz=503` を期待する。workflowは公開データを一切変更しない。移行・公開とCognito
+   consoleでのuser操作は、それぞれ別途承認されたoperator手順に従う。管理者専用でIAMにより制御されたpassword認証を使うClassic Hosted UIは、実AWSでのlogin、PKCE、公開経路からの直接認証の拒否について、受け入れ確認がまだ必要である。mockの検査では実環境での互換性は確立されない。
 
-## Review and apply
+## レビューとapply
 
-Use GitHub's manual Run workflow UI on `main`, supply a full 40-hex immutable
-commit reachable from main, and keep `apply=false` for preview. Checkout uses
-that exact commit. There is no PR OIDC, `pull_request_target`, automatic push
-deployment, maintenance workflow or user administration workflow.
+GitHubの手動Run workflow UIを `main` で使い、mainから到達可能な40桁hexの完全なimmutable
+commitを指定し、previewでは `apply=false` のままにする。checkoutはその正確なcommitを使う。PRでのOIDC、`pull_request_target`、pushによる自動デプロイ、maintenance workflow、user管理workflowはいずれも存在しない。
 
-Review the successful preview's **private** `release-review` artifact before
-expiry. Inspect its saved binary via the matching Terraform version and the
-`plan.json` derived from that binary, exact `inputs.json`, baseline, root,
-registered artifact/evidence (application only), and `request.json` including
-scheduler/publication expectations. The public summary exposes only root,
-commit, action counts and `review_sha256`, not raw plan/state/input contents.
+成功したpreviewの**private**な `release-review` artifactを、期限切れになる前にレビューする。保存されたbinaryを対応するTerraform versionで確認し、そのbinaryから導出した `plan.json`、正確な `inputs.json`、baseline、root、登録済みartifact/evidence（applicationのみ）、schedulerと公開の期待値を含む `request.json` を確認する。公開summaryに出るのはroot、commit、actionの件数、`review_sha256` だけであり、plan・state・inputの生の内容は出ない。
 
-Every apply uses a second dispatch, even when environment reviewers are
-available. Set the same target/commit/inputs and flags, `apply=true`,
-`reviewed_run=<successful original preview run ID>`, and
-`expected_review_sha256=<reviewed digest>`. The source must be this private
-repository's completed successful main manual deployment workflow and must be
-marked a preview, not an apply run. Application apply skips build/registration
-and reuses the original RegisteredArtifact plus hash-checked audit/SBOM/test
-files; HEAD rechecks its pinned S3 version/size/checksum.
+applyは毎回2回目のdispatchを使う。environment reviewerを利用できる場合も同じである。同じtarget/commit/inputとflag、`apply=true`、`reviewed_run=<successful original preview run ID>`、`expected_review_sha256=<reviewed digest>` を設定する。参照元は、このprivate
+repositoryの、完了して成功したmainでの手動deployment workflowでなければならず、apply runではなくpreviewとして記録されていなければならない。application applyはbuild/登録をskipし、元のRegisteredArtifactと、hashを検査した監査・SBOM・試験のfileを再利用する。HEADで、固定したS3のversion/size/checksumを再確認する。
 
-That run creates and guards one new saved plan using exactly the reviewed input
-bytes and baseline. Only Terraform's root timestamp is excluded from the review
-digest. Drift or any other review difference stops delivery, including initial
-creation. Unknown IDs can differ between real first-create previews; if the
-review digest changes, review a new preview instead of weakening the comparison.
-Approve the `production` environment only after reviewing the **current run's**
-plan. If required-reviewer controls are unavailable, the mandatory digest plus
-successful original preview remains the operator's manual gate; restrict
-workflow dispatch and repository/environment configuration rights accordingly.
+そのrunは、レビュー済みの入力bytesとbaselineを正確に使って新しいsaved planを1つ作成し、保護する。review digestから除外するのは、Terraformのroot timestampだけである。driftその他のレビューとの差異があれば配布を停止する。初回作成の場合も同じである。実際の初回作成のpreviewどうしでは、unknownのIDが異なることがある。review
+digestが変わった場合は、比較を緩めるのではなく新しいpreviewをレビューする。`production` environmentは、**現在のrun**のplanをレビューした後でのみ承認する。required reviewerの制御を利用できない場合は、必須のdigestと成功した元のpreviewが、operatorの手動gateとして残る。workflowのdispatchと、repository/environmentの設定権限をそれに応じて制限する。
 
-The apply job consumes **this run's** saved binary with its `needs` dependency.
-It restores artifact download permissions to private directory 0700/files 0600,
-checks the plan-job custody SHA plus exact private file hashes, current checkout,
-root, input bytes, baseline and artifact. It regenerates JSON from the very same
-binary for D06 `verifySavedPlan`, then applies that binary with a native state
-lock/5-minute lock timeout. It never replans, rebuilds or registers. Private
-backend data is derived from bound account/region/prefix, and both roots' fixed
-keys are distinct. Production concurrency has `cancel-in-progress=false` across
-roots and jobs: a new run cannot cancel an active or awaiting-approval apply.
-Pending runs may be superseded by GitHub's concurrency queue; inspect run status
-and dispatch a fresh review when necessary. Do not manually cancel an apply.
+apply jobは、`needs` 依存関係により**このrun**のsaved binaryを使う。artifactのダウンロード権限をprivate directory 0700/file 0600に戻し、plan jobのcustody SHAと、private fileの正確なhash、現在のcheckout、root、入力bytes、baseline、artifactを検査する。まったく同じbinaryからJSONを再生成してD06の `verifySavedPlan` にかけ、その後、そのbinaryをネイティブのstate
+lockと5分のlock timeoutでapplyする。再plan、再build、登録は決して行わない。privateなbackendのデータは束縛されたaccount/region/prefixから導出され、両rootの固定keyは別々である。productionのconcurrencyは、rootとjobをまたいで `cancel-in-progress=false` である。新しいrunが、実行中または承認待ちのapplyをcancelすることはできない。保留中のrunはGitHubのconcurrency queueによって置き換えられることがある。run statusを確認し、必要なら新しいレビューをdispatchする。applyを手動でcancelしてはならない。
 
-After apply, verify root-owned identity outputs, including first platform
-creation's now-known baseline. Application additionally verifies both production
-aliases resolve to the selected published versions and AWS CodeSha256 equals the
-registered ZIP digest, then checks status-only GETs: `/healthz=200`, `/readyz=200`
-when published or 503 otherwise, and unauthenticated `/v2/reminders=401/403`.
-No smoke writes or token/body logging occurs. A success ledger is written only
-after all checks and contains commit/root/review/artifact digest, two versions,
-API URL and result; no user data. `release-result` stays private for one day.
-Partial apply or proof/smoke failure is not success; inspect private outputs/state
-under an operator's approved recovery procedure before another release.
+apply後、rootが所有するidentityのoutputを検証する。初回のplatform作成で既知になったbaselineも含む。applicationではさらに、2つのproduction
+aliasが選択したpublished versionを指し、AWS CodeSha256が登録済みZIPのdigestと等しいことを検証し、その後statusだけを見るGETを確認する。`/healthz=200`、`/readyz=200`
+（公開時。未公開時は503）、認証なしの `/v2/reminders=401/403` である。smokeでの書き込みや、tokenやbodyのログ出力は行わない。成功ledgerはすべての検査が済んだ後でのみ書き込まれ、commit/root/review/artifact digest、2つのversion、API URL、結果を含む。userデータは含まない。`release-result` は1日間privateのまま保持する。部分的なapply、または証明・smokeの失敗は成功ではない。次のreleaseの前に、operatorの承認済み復旧手順に従ってprivateなoutput/stateを確認する。
 
-## Schedule changes and rollback
+## scheduleの変更とrollback
 
-To enable cleanup after publication, preview application with the existing
-RegisteredArtifact's original preview run selected via `reviewed_run`,
-`scheduler_enabled=true` and the correct `published` expectation. An existing
-artifact preview skips build/registration but produces a newly reviewed plan for
-changed settings. Apply that new preview using its exact digest/flags. The cron
-is 03:00 UTC daily with window OFF; enabling it also enables missing-heartbeat
-alarm actions. No maintenance workflow toggles publication or edits user data.
+公開後にcleanupを有効にするには、既存のRegisteredArtifactの元のpreview runを `reviewed_run` で選び、`scheduler_enabled=true` と正しい `published` の期待値を指定してapplicationをpreviewする。既存のartifactを使うpreviewはbuild/登録をskipするが、変更した設定について新たにレビューするplanを生成する。その新しいpreviewを、正確なdigest/flagでapplyする。cronは毎日03:00 UTC、window OFFである。有効にすると、heartbeat欠落のalarm actionも有効になる。公開状態の切り替えやuserデータの編集を行うmaintenance workflowはない。
 
-Before rolling back code, first preview/review/apply `scheduler_enabled=false`
-using the current verified artifact. Wait for in-flight cleanup/invocations to
-settle according to the operator recovery procedure. Select the older immutable
-ZIP and its original validation evidence/commit (which must remain reachable on
-main) from a nonexpired original preview; if custody expired, prepare a fresh
-preview rather than uploading an arbitrary manifest. Keep API/Cognito identities,
-origin/config and unpublished/published expectation stable, and review the plan.
-Apply the reviewed selected version and verify both aliases, hashes and smoke.
-Terraform updates API and cleanup production aliases **nonatomically**; a failure
-can leave mixed versions. Do not announce rollback complete until both alias
-proofs and smoke pass. Disabling Scheduler does not cancel existing invocations.
-Code rollback does not restore tables, images or publication state; data/PITR
-recovery is a separate authorized operation and never a delivery workflow.
+codeをrollbackする前に、まず現在の検証済みartifactを使って `scheduler_enabled=false` をpreview・レビュー・applyする。operatorの復旧手順に従い、実行中のcleanupや呼び出しが落ち着くまで待つ。古いimmutable ZIPと、その元の検証evidence/commit
+（mainから到達可能なままでなければならない）を、期限切れでない元のpreviewから選ぶ。custodyが期限切れなら、任意のmanifestをアップロードするのではなく、新しいpreviewを用意する。API/Cognitoのidentity、origin/設定、未公開/公開の期待値は変えず、planをレビューする。レビュー済みの選択したversionをapplyし、両方のalias、hash、smokeを検証する。TerraformはAPIとcleanupのproduction aliasを**非原子的に**更新する。失敗するとversionが混在したままになることがある。両方のaliasの証明とsmokeが合格するまで、rollback完了を告げてはならない。Schedulerを無効にしても、既存の呼び出しはcancelされない。codeのrollbackは、table、画像、公開状態を復元しない。データ/PITRの復旧は別途承認が必要な操作であり、決して配布workflowではない。
 
-## Dependency evidence
+## 依存関係のevidence
 
-CI uses Node 24.21.0/npm 11.11.1, Python 3.13.16, Terraform 1.16.5 and checked-in
-provider 6.67.0 locks. Runtime and complete-development audits report every
-severity and fail on unresolved High/Critical; no `continue-on-error` masks them.
-The current D07 audit fixed six development transitive dependency findings; the
-verified local runtime and all-dependency reports contain zero vulnerabilities.
-Dependabot checks npm, Actions and the three Terraform roots weekly; it excludes
-Docker and `.devcontainer`. SHA updates require official release/tag provenance
-review. Audit results are point-in-time evidence, not a permanent guarantee.
+CIはNode 24.21.0/npm 11.11.1、Python 3.13.16、Terraform 1.16.5と、checked-inのprovider 6.67.0のlockを使う。runtimeと開発依存全体の監査はすべてのseverityを報告し、未解決のHigh/Criticalで失敗する。`continue-on-error` でそれを隠すことはない。現在のD07監査では、開発用の推移的依存関係の指摘6件を修正した。検証したローカルのruntimeと全依存関係のreportは、いずれも脆弱性0件である。Dependabotは毎週、npm、Actions、3つのTerraform rootを検査する。Dockerと`.devcontainer` は対象外である。SHAの更新には、公式のrelease/tagの来歴のレビューが必要である。監査結果はその時点のevidenceであり、恒久的な保証ではない。
 
-Current docs used for implementation: [GitHub deployment controls](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/control-deployments),
-[artifact access/download](https://docs.github.com/en/actions/how-tos/monitor-workflows/download-workflow-artifacts),
-[download action](https://github.com/actions/download-artifact),
-[saved Terraform plans](https://developer.hashicorp.com/terraform/tutorials/cli/plan),
-[npm audit](https://docs.npmjs.com/cli/v11/commands/npm-audit) and
-[npm SBOM](https://docs.npmjs.com/cli/v11/commands/npm-sbom).
+実装時に参照した現行ドキュメントは、[GitHubのdeployment制御](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/control-deployments)、[artifactのアクセスとダウンロード](https://docs.github.com/en/actions/how-tos/monitor-workflows/download-workflow-artifacts)、[download action](https://github.com/actions/download-artifact)、[Terraformのsaved plan](https://developer.hashicorp.com/terraform/tutorials/cli/plan)、[npm audit](https://docs.npmjs.com/cli/v11/commands/npm-audit)、[npm SBOM](https://docs.npmjs.com/cli/v11/commands/npm-sbom)である。
 
-## Restored selection and private failure diagnostics
+## 復元tableの選択とprivateな失敗診断
 
-`restored_tables` defaults to `{}` in all roots. Exceptional same-account/region recovery uses one complete reviewed three-name map and the original image bucket, following [recovery cutover](recovery.md). Bootstrap alone changes runtime ceilings; platform verifies read-only restored identities/protections and retains original tables. Application handoff, saved plan, both Lambda environments and post-apply verification bind the selected set. Existing API/Cognito baseline and exact ZIP custody remain required.
+`restored_tables` はすべてのrootで既定値が `{}` である。例外的な同一account/regionでの復旧では、レビュー済みの完全な3つの名前のmapを1つと、元の画像bucketを使い、[復旧の切り替え](recovery.md)に従う。runtimeの上限を変更するのはbootstrapだけである。platformは、復元したidentityと保護を読み取り専用で検証し、元のtableを保持する。applicationのhandoff、saved plan、両方のLambdaの環境設定、apply後の検証は、選択したsetに束縛される。既存のAPI/Cognito baselineと、正確なZIPのcustodyは引き続き必須である。
 
-On command failure, ordinary logs contain only the phase, exit status and private diagnostic directory. Download the failed private run's `failure-diagnostics-<job>-<run_id>` artifact from its Actions artifacts panel within one day. CI private-repository infrastructure failures use `failure-diagnostics-infra-<run_id>`. Access is limited by private repository read permissions; it is not exclusive to environment reviewers. Keep those readers restricted. Files are restored/created with0700 directory and0600 file permissions locally; remove review downloads after use. No artifact is uploaded for public repositories.
+コマンドが失敗した場合、通常のログに出るのはphase、exit status、privateな診断directoryだけである。失敗したprivate runの `failure-diagnostics-<job>-<run_id>` artifactを、そのrunのActions artifacts panelから1日以内にダウンロードする。CIでのprivate repositoryのinfrastructure失敗では `failure-diagnostics-infra-<run_id>` を使う。アクセスはprivate repositoryの閲覧権限によって制限される。environment reviewerだけに限定されるわけではない。それらの閲覧者は制限したままにする。fileはローカルで0700のdirectory権限と0600のfile権限で復元・作成される。レビュー用にダウンロードしたものは使用後に削除する。public repositoryではartifactをアップロードしない。
 
-Local `infra:check` failures use `<RUNNER_TEMP or OS temp>/infra-diagnostics`; release commands use `release-diagnostics`. JSON files record phase, exitStatus, signal/errorCode and bounded diagnostics. Each stream retains at most128KiB, at most8 failure files survive, and files older than one day are pruned on subsequent failure. Remove local diagnostics within one day even if no further command runs. Successful output, command arguments and environment are never persisted; plan/show/output stdout is omitted. Common credential assignments are redacted, but diagnostics remain private and must not be pasted into ordinary logs. Failed workflow runs cannot pass the successful-preview provenance check, and diagnostics use a separate path/name from release custody.
+ローカルの `infra:check` の失敗は `<RUNNER_TEMP or OS temp>/infra-diagnostics` を、releaseコマンドは `release-diagnostics` を使う。JSON fileには、phase、exitStatus、signal/errorCode、上限付きの診断を記録する。各streamが保持するのは最大128KiBで、残る失敗fileは最大8個である。1日より古いfileは、次の失敗時に削除される。その後コマンドを実行しない場合でも、ローカルの診断は1日以内に削除する。成功時の出力、コマンド引数、環境変数は決して永続化しない。plan/show/outputのstdoutは省略する。一般的な認証情報の代入はredactされるが、診断は引き続きprivateであり、通常のログに貼り付けてはならない。失敗したworkflow runは成功previewの来歴検査を通過できない。診断はrelease custodyとは別のpath/名前を使う。
+
+## release CLIの入力
+
+本番の操作に使うコマンドの入力である。いずれも、別途承認された運用でだけ使う。`/private/...` は私有ファイルの例である。
+
+| コマンド | 用途と入力 |
+| --- | --- |
+| `npm run release:register -- <下記の全flag>` | 実S3への登録 |
+| `npm run release:inspect-plan -- <明示のflag>` | root、保存したplan、正確な入力、baseline、commitの私有照合 |
+| `npm run release:verify -- --artifact /private/artifact.json --outputs /private/outputs.json --region <region>` | 実Lambdaの2つのaliasとCodeSha256の照合 |
+| `npm run release:smoke -- --baseline /private/baseline.json --base-url <known-api-url> --published false` | statusだけを見るHTTPの読み取り。baselineとの一致が必須 |
+| `npm run release:workflow -- plan` | GHA専用の有限のhelper。authorize、secure、plan、applyのうち1つのphaseだけを実行する。必須の環境変数とcustodyはこの文書の上の節にある |
+| `npm run migrate:json -- --mode dry-run --source /private/source-copy.json --mapping /private/owner-map.json --config /private/target.json` | AWS clientを作らないdry-run（[移行手順](migration.md)） |
+| `npm run recovery:verify -- --source-config /private/live.json --restored-config /private/restored.json --owner-identities /private/current-owners.json --run-id <uuid>` | 実AWSの読み取り。明示したprepare、preserve、mapだけが復旧先を変更する（[復旧手順](recovery.md)） |
+
+登録のflagは `--zip --manifest --bucket --region --commit --npm-version --esbuild-version --audit-id --sbom-id --tests-id` の10個で、全て値が必要である。toolsの値は 24.21.0、11.11.1、0.28.2 で、evidenceの値は保管した実ファイルの `sha256:<digest>` である。登録は、immutableなkey、version、checksumを証明し、bytesの異なる既存のobjectを再利用しない。`--manifest` の出力はReleaseManifestである。他のrelease CLIの `--artifact` には、その `.artifact` だけを私有ファイルへ抽出したRegisteredArtifactを渡す。
+
+```sh
+npm run release:inspect-plan -- --mode review --root application \
+  --plan-json /private/plan.json --plan /private/saved.tfplan \
+  --inputs /private/inputs.json --baseline /private/baseline.json \
+  --commit <full-commit-sha> --manifest /private/review.json --artifact /private/artifact.json
+# apply直前は同じsaved binary由来JSONで --mode check。platformはartifact省略/null
+```
+
+## Lambdaの設定
+
+LambdaはZIP、`nodejs24.x`、`x86_64` である。
+
+| 対象 | 設定 |
+| --- | --- |
+| API | 512 MiB、10秒、concurrency 10 |
+| cleanup | 512 MiB、660秒、concurrency 1 |
+| API Gatewayのintegration | 15秒、stageは20 rps、burst 40 |
+
+同じZIPの `dist/api.handler` と `dist/cleanup.handler` を使う。source mapとTHIRD_PARTY_NOTICESを同梱し、minifyしない。ZIPは50 MB未満、展開後250 MB未満である。S3のbytesのSHA、key、versionと、LambdaのCodeSha256を照合する。通常のreleaseは、API URLやCognito identityの変更、unknown、replacement、aliasの不一致を拒否する。
