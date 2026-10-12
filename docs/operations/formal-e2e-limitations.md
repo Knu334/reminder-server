@@ -63,3 +63,8 @@ Floci本体へのパッチ（refresh.2のSourceAccount、refresh.3のListVersion
 - このrunのZIPは、ユーザーの未commitの `src/api/event.ts`（null-body修正）を含む。`tests/runtime/api.test.ts` と `tests/runtime/boundaries.test.ts` の未commitの変更も同様に、commitされていない。
 - layer Iの24件は、Floci上の観測ではなく、合成のfakeとfault注入によるoffline試験の実測である。
 - `npm run infra:check` は、このsandboxで3 rootの検証が成功していない（2026-10-10の記録のまま）。同じ3 rootの構築はlive runで成功している。
+
+
+## 2026-10-12 追記（その2）: 未commitの変更を含まないrun
+
+run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc`（HEAD 6daf48b、`npm test`、exit 0、869秒）は、268件中265件が合格、失敗0、未実行0、未対応3、`complete` は真で、ZIPの `dirtyPaths` は空だった。このrunには、未commitの変更が含まれない。上の「ユーザーの未commitの `src/api/event.ts` を含む」という限界は、e2e-ba02c537以前のrun（e2e-d5c47097、e2e-4e5b822a）についての記録であり、現在の主たるrunには当てはまらない（null-body修正は、ユーザーが6daf48bでcommitした）。その他の限界（未対応3件、実AWS・IAM・TLSの強制・PITR・Chromeの未実行、上流FlociのDocker依存試験の未実行、Flociがエミュレーターであること、layer Iが合成のfakeによるoffline試験の実測であること）は変わらない。判断の経緯は[判断の記録](formal-e2e-decisions.md)にある。

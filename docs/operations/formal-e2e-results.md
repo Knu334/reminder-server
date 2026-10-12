@@ -1,5 +1,87 @@
 # 正式E2E 実施結果（2026-10-12）
 
+**判定: 正式E2Eは、2026-10-12のユーザー判断の基準で完了した。** 未commitの変更を含まない作業ツリー（HEAD 6daf48b）での全suite実行（run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc`）は、268件が選ばれ、265件が合格、失敗0件、未実行0件、未対応3件（測定済みの互換性調査）だった。`partial` は偽、`complete` は真、終了コードは0、ZIPの `dirtyPaths` は空である。
+
+基準（ユーザー判断 2026-10-12）: layer E・Lの244件はパッチ済みFloci上で実行し、layer Iの24件は、同じrunの中で対応するoffline試験を実行して、その実際の結果から判定する。layer Iの24件は、別の監査で全件が有効（VALID）と判定された。layer Iは、liveのFloci上の観測ではない。判断の経緯は[判断の記録](formal-e2e-decisions.md)にある。
+
+完了にもかかわらず、次の限界は残っている（詳細は[限界](formal-e2e-limitations.md)）。
+
+1. 次の3件は、Flociの未対応を測定した結果で、互換性調査としては完了だが、各機能の動作確認はできていない。OBS-04（Gatewayのaccess log配信）、AUTH-11のhosted `/oauth2/revoke`、IMG-09（S3の署名・期限の強制）。
+2. 実AWS、IAMの強制、TLSの強制、PITRの実復旧、Chromeの実ブラウザは実行していない。Flociはエミュレーターであり、AWSではない。
+3. 上流FlociのDocker依存の試験は、開発コンテナで動かせないため実行していない。
+
+この文書の数値は、今回の実行結果だけである。以前の実行（e2e-d5c47097、e2e-ba02c537、e2e-4e5b822a、e2e-90d3b042など）は、下の「以前の記録」に残した。以前のe2e-d5c47097とe2e-ba02c537のZIPは、ユーザーの未commitの `src/api/event.ts`（null-body修正）を含んでいた。この修正は、その後ユーザーが6daf48bでcommitした。
+
+## 実行環境と入力
+
+| 項目 | 値 |
+| --- | --- |
+| 実施日（UTC） | 2026-10-12。保存したartifactの更新時刻（JST 14:42:58〜14:56:44）から、05:42:58〜05:56:44（Flociの全suite、約826秒）。`npm test` 全体（offline試験を含む）は869秒（controllerが測った経過時間） |
+| HEAD | 6daf48b（`fix: accept a null Gateway body as an absent body`）。追跡対象の未commitの変更は無い |
+| 作業ツリー | `dirtyPaths` は空（`artifact-snapshot.json`）。ZIPは、commit済みのsourceから作られた |
+| Floci | `floci-local:2.2.0-refresh.7-native`（health `2.2.0-local-refresh.7-native`） |
+| ツール | Node 24.21.0、npm 11.11.1、Python 3.13.16、Terraform 1.16.5、provider 6.67.0 |
+| ZIP | sha256（hex）`8e6dcef8710dc82aa266ba065daa5e9749a1c8f22705e9fda35e310a5ab61bb1`、1,388,430 bytes。保存したZIPのsha256を再計算して、snapshotの値と一致を確認した。以前のrunのZIPと同一である（null-body修正は、以前から同じ内容でZIPに入っていた） |
+| 入力digest（ZIPのbuild入力） | `85d642a340ae8115fd479349e21c5440c5c7972c35887abab0709f446fae6b8d`（e2e-d5c47097と同じ） |
+| 本番公開sourceのdigest | `4c903d682127bfeb11635a8057ae8afcf2165d60e81969f94c55a206922df165`（以前のrunと同じ） |
+| 変換後digest | `5e9ad5a53685a4d96cfa72226350b9eee1cea0001c008916d742bcab4e0aeb41`。runごとの所有名を含むため、runにより変わる |
+| 変換の差分区分 | validation 2件（owned issuerとauth base URLのowned-url-validation）、接続の生成設定（providerのendpointと認証情報、platform output 2件）、隔離（local backend）。本番の `.tf`・lock・resource addressの変更は0 |
+
+APIとcleanup Lambdaの実CodeSha256は、TF-03/settings（pass）がZIPのdigestと突き合わせた。値そのものはこの文書に写していない。
+
+## 全suiteの結果
+
+run ID: `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc`、コマンド `npm test`（offline試験の後に `npm run test:e2e:floci`）、exit 0、869秒（約14.5分。offline部分を含む）。Flociの全suiteは、artifactの更新時刻から約826秒（約13.8分）である。期限は実行75分と回収15分である。
+
+| layer | 件数 | pass | not-run | unsupported |
+| --- | --- | --- | --- | --- |
+| E（実Floci、実HTTP） | 228 | 228 | 0 | 0 |
+| L（実Lambdaなど） | 16 | 13 | 0 | 3 |
+| I（offline試験の実測。phase offline） | 24 | 24 | 0 | 0 |
+
+268件は全て必須である。件数は `results.json` から数えた。layer Iの24件は、すべてphase `offline` のpassである。
+
+| suite | pass | fail | not-run | unsupported | case時間の合計 |
+| --- | --- | --- | --- | --- | --- |
+| harness | 3 | 0 | 0 | 0 | 3秒 |
+| terraform | 2 | 0 | 0 | 0 | 130秒（構築とTF-02を含む） |
+| fixture | 4 | 0 | 0 | 1 | 61秒 |
+| auth | 13 | 0 | 0 | 1 | 303秒（実トークン期限の待ちを含む） |
+| api | 140 | 0 | 0 | 0 | 15秒 |
+| storage | 31 | 0 | 0 | 0 | 4秒 |
+| images | 34 | 0 | 0 | 1 | 3秒 |
+| cleanup | 21 | 0 | 0 | 0 | 9秒 |
+| operations | 11 | 0 | 0 | 0 | 74秒 |
+| logging | 4 | 0 | 0 | 0 | 1秒 |
+| scheduler | 2 | 0 | 0 | 0 | 0秒 |
+| 合計 | 265 | 0 | 0 | 3 | |
+
+回収は18件を試行して18件成功、errors 0、leaks 0。独立した読み取りで、所有リソース83件が全て不在だった（存在0、未確認0）。同じ `npm test` の中のoffline試験は、runtime 188、operations 74、delivery 97、integration 182、harness 107がすべて合格し、skipは0だった。
+
+### 以前の実行との比較
+
+| run | Floci | HEAD | 秒 | pass / fail / not-run / unsupported |
+| --- | --- | --- | --- | --- |
+| e2e-da96a6b1（主。未commitの変更なし） | refresh.7 | 6daf48b | 869（offline含む）。Flociのみ約826 | 265 / 0 / 0 / 3 |
+| e2e-ba02c537（確認run。当時は未commitの `src/api/event.ts` を含む） | refresh.7 | bfe7294 | 939（offline含む） | 265 / 0 / 0 / 3 |
+| e2e-d5c47097（当時は未commitの `src/api/event.ts` を含む） | refresh.7 | 07744fc | 974（offline含む）。Flociのみ約899 | 265 / 0 / 0 / 3 |
+| e2e-4e5b822a（layer Iはnot-run） | refresh.7 | 6871291 | 821 | 241 / 0 / 24 / 3 |
+| e2e-90d3b042 | refresh.6 | 6af5288 | 833 | 240 / 1 / 24 / 3（失敗はAPI-09/id-percent） |
+| e2e-f4d81679 | refresh.5 | 51e2c5e | 816 | 239 / 2 / 24 / 3（失敗はAPI-09のid-percentとid-slash） |
+
+## offlineの検証（2026-10-12、HEAD 6daf48b）
+
+| 検証 | コマンド | 結果 |
+| --- | --- | --- |
+| Node全suiteとFloci全suite | `npm test` | exit 0（869秒）。offline部分はruntime 188/188、operations 74/74、delivery 97/97、integration 182/182、harness 107/107（skip 0） |
+| Floci無しのoffline | `npm run test:offline` | 上のoffline部分と同じ（`test:e2e:harness` を含む） |
+
+layer Iの24件は、上の `npm test` の中で、対応づけた試験fileの実測から判定した（`scripts/e2e/offline-evidence.ts`）。
+
+## 以前の記録（e2e-d5c47097、2026-10-12、HEAD 07744fc）
+
+以下は、このrunを主としていた当時の記録で、書き換えていない。このrunのZIPは、ユーザーの未commitの `src/api/event.ts` を含んでいた。
+
 **判定: 正式E2Eは、2026-10-12のユーザー判断の基準で完了した。** 全suite実行（run `e2e-d5c47097-978c-4c02-8270-49d047e2783e`、HEAD 07744fc）は、268件が選ばれ、265件が合格、失敗0件、未実行0件、未対応3件（測定済みの互換性調査）だった。`partial` は偽、`complete` は真、終了コードは0である。
 
 基準（ユーザー判断 2026-10-12）: layer E・Lの244件はパッチ済みFloci上で実行し、layer Iの24件は、同じrunの中で対応するoffline試験を実行して、その実際の結果から判定する。layer Iの24件は、別の監査で全件が有効（VALID）と判定された（`i-validity-audit.md`、07744fcでの再監査）。layer Iは、liveのFloci上の観測ではない。
@@ -13,7 +95,7 @@
 
 この文書の数値は、今回の実行結果だけである。以前の実行（e2e-4e5b822a、e2e-90d3b042など）は、下の「以前の記録」に残した。
 
-## 実行環境と入力
+### 実行環境と入力
 
 | 項目 | 値 |
 | --- | --- |
@@ -30,7 +112,7 @@
 
 APIとcleanup Lambdaの実CodeSha256は、TF-03/settings（pass）がZIPのdigestと突き合わせた。値そのものはこの文書に写していない。
 
-## 全suiteの結果
+### 全suiteの結果
 
 run ID: `e2e-d5c47097-978c-4c02-8270-49d047e2783e`、コマンド `npm test`（offline試験の後に `npm run test:e2e:floci`）、exit 0、974秒（約16.2分。offline部分を含む）。Flociの全suiteは、artifactの更新時刻から約899秒（約15.0分）である。期限は実行75分と回収15分である。
 
@@ -59,7 +141,7 @@ run ID: `e2e-d5c47097-978c-4c02-8270-49d047e2783e`、コマンド `npm test`（o
 
 回収は18件を試行して18件成功、errors 0、leaks 0。独立した読み取りで、所有リソース83件が全て不在だった（存在0、未確認0）。同じ `npm test` の中のoffline試験は、runtime 188、operations 74、delivery 97、integration 180、harness 107がすべて合格し、skipは0だった。
 
-### 以前の実行との比較
+#### 以前の実行との比較
 
 | run | Floci | HEAD | 秒 | pass / fail / not-run / unsupported |
 | --- | --- | --- | --- | --- |
@@ -67,6 +149,7 @@ run ID: `e2e-d5c47097-978c-4c02-8270-49d047e2783e`、コマンド `npm test`（o
 | e2e-4e5b822a | refresh.7 | 6871291 | 821 | 241 / 0 / 24 / 3（layer Iはnot-run） |
 | e2e-90d3b042 | refresh.6 | 6af5288 | 833 | 240 / 1 / 24 / 3（失敗はAPI-09/id-percent） |
 | e2e-f4d81679 | refresh.5 | 51e2c5e | 816 | 239 / 2 / 24 / 3（失敗はAPI-09のid-percentとid-slash） |
+
 
 ## 以前の記録（e2e-4e5b822a、2026-10-10）
 
@@ -169,7 +252,7 @@ Floci側のJava回帰試験は、Temurin JDK 25.0.1+8と `./mvnw` で実行し�
 
 ## review・rulingsの要約
 
-Task 1〜11の各taskはreview済みで、live中に見つかったharnessの欠陥は修正し、再reviewした。主なrulingは、Floci patch（refresh.2〜7）と、devcontainerへのJDK導入のユーザー承認、`-refresh=false` を回収時だけに限る判断、S3 Controlの限定relay、観測失敗と走査の途中打ち切りをfailとする判断である。全文は台帳（`.superpowers/sdd/2026-10-08-reminder-server-formal-e2e/progress.md`）にある。台帳はgit管理外の作業記録である。
+Task 1〜11の各taskはreview済みで、live中に見つかったharnessの欠陥は修正し、再reviewした。主なrulingは、Floci patch（refresh.2〜7）と、devcontainerへのJDK導入のユーザー承認、`-refresh=false` を回収時だけに限る判断、S3 Controlの限定relay、観測失敗と走査の途中打ち切りをfailとする判断である。全文は[判断の記録](formal-e2e-decisions.md)にある。
 このtaskの後に、controllerが全task範囲の最終reviewを行う。
 
 ## offlineの検証（2026-10-12、HEAD 07744fc）
@@ -183,7 +266,7 @@ layer Iの24件は、上の `npm test` の中で、対応づけた試験fileの�
 
 ## 全case一覧と結果
 
-判定の基準は run `e2e-d5c47097-978c-4c02-8270-49d047e2783e` である。layer Iは、同runのoffline試験の実測（phase offline）で判定し、根拠に試験fileを示す。以前のrun（e2e-4e5b822a）では、layer Iはnot-runだった。
+判定の基準は run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc` である。layer Iは、同runのoffline試験の実測（phase offline）で判定し、根拠に試験fileを示す。以前のrun（e2e-4e5b822a）では、layer Iはnot-runだった。
 
 全268件: pass 265 / fail 0 / not-run 0 / unsupported 3
 
@@ -193,189 +276,189 @@ layer Iの24件は、上の `npm test` の中で、対応づけた試験fileの�
 | `SAFE-02/inventory` | I | harness | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/harness.test.ts`、`tests/integration/formal-e2e/coverage.test.ts`、`tests/e2e/floci/fixture.test.ts`、`tests/e2e/floci/scheduler.test.ts` |
 | `SAFE-03/redaction` | I | harness | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/harness.test.ts` |
 | `TF-02/driver-isolation` | I | terraform | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/terraform-driver.test.ts` |
-| `TF-01/apply` | L | terraform | behavior | pass | e2e-d5c47097 |
-| `TF-03/settings` | L | fixture | behavior | pass | e2e-d5c47097 |
-| `OBS-02/smoke` | E | fixture | behavior | pass | e2e-d5c47097 |
-| `OBS-03/gateway-refusal` | E | fixture | behavior | pass | e2e-d5c47097 |
+| `TF-01/apply` | L | terraform | behavior | pass | e2e-da96a6b1 |
+| `TF-03/settings` | L | fixture | behavior | pass | e2e-da96a6b1 |
+| `OBS-02/smoke` | E | fixture | behavior | pass | e2e-da96a6b1 |
+| `OBS-03/gateway-refusal` | E | fixture | behavior | pass | e2e-da96a6b1 |
 | `OBS-04/gateway-delivery` | L | fixture | compatibility | unsupported | gateway-delivery-unsupported（gateway log groupのeventが0件） |
-| `TF-03/settings-final` | L | fixture | behavior | pass | e2e-d5c47097 |
-| `AUTH-01/pkce-login` | E | auth | behavior | pass | e2e-d5c47097 |
-| `AUTH-02/pkce-negatives` | E | auth | behavior | pass | e2e-d5c47097 |
-| `AUTH-03/jwt-signature` | E | auth | behavior | pass | e2e-d5c47097 |
-| `AUTH-04/sibling-client` | E | auth | behavior | pass | e2e-d5c47097 |
-| `AUTH-05/foreign-issuer` | E | auth | behavior | pass | e2e-d5c47097 |
-| `AUTH-07/scope-and-id-token` | E | auth | behavior | pass | e2e-d5c47097 |
-| `AUTH-09/refresh-rotation` | E | auth | behavior | pass | e2e-d5c47097 |
-| `AUTH-10/rotation-grace` | E | auth | behavior | pass | e2e-d5c47097 |
-| `AUTH-11/revoke-disable` | E | auth | behavior | pass | e2e-d5c47097 |
-| `AUTH-12/refresh-negatives` | E | auth | behavior | pass | e2e-d5c47097 |
+| `TF-03/settings-final` | L | fixture | behavior | pass | e2e-da96a6b1 |
+| `AUTH-01/pkce-login` | E | auth | behavior | pass | e2e-da96a6b1 |
+| `AUTH-02/pkce-negatives` | E | auth | behavior | pass | e2e-da96a6b1 |
+| `AUTH-03/jwt-signature` | E | auth | behavior | pass | e2e-da96a6b1 |
+| `AUTH-04/sibling-client` | E | auth | behavior | pass | e2e-da96a6b1 |
+| `AUTH-05/foreign-issuer` | E | auth | behavior | pass | e2e-da96a6b1 |
+| `AUTH-07/scope-and-id-token` | E | auth | behavior | pass | e2e-da96a6b1 |
+| `AUTH-09/refresh-rotation` | E | auth | behavior | pass | e2e-da96a6b1 |
+| `AUTH-10/rotation-grace` | E | auth | behavior | pass | e2e-da96a6b1 |
+| `AUTH-11/revoke-disable` | E | auth | behavior | pass | e2e-da96a6b1 |
+| `AUTH-12/refresh-negatives` | E | auth | behavior | pass | e2e-da96a6b1 |
 | `AUTH-11/hosted-revoke-endpoint` | L | auth | compatibility | unsupported | hosted-revoke-unsupported（Flociにroute無し、S3 catch-all 400） |
-| `AUTH-06/token-expiry` | E | auth | behavior | pass | e2e-d5c47097 |
+| `AUTH-06/token-expiry` | E | auth | behavior | pass | e2e-da96a6b1 |
 | `AUTH-05/issuer-only` | I | auth | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/auth-claims.test.ts` |
 | `AUTH-07/token-use-only` | I | auth | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/auth-claims.test.ts` |
-| `API-01/gate-transition` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-02/legacy-post` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-02/legacy-put` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-03/healthz-delete` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-03/readyz-post` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-03/legacy-get` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-03/list-delete` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-03/item-post` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-03/thumbnail-post` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-03/unknown-root-segment` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-03/unknown-extra-item-segment` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-03/unknown-v2-sibling` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-04/empty-list` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-04/create` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-04/get` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-04/patch` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-04/delete` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-12/seed-51` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-12/default` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-12/limit-1` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-12/limit-20` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-12/limit-50` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-12/limit-0` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-12/limit-51` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-12/limit-abc` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-12/limit-negative` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-12/limit-decimal` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-12/limit-hex` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-12/walk-limit-20` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-12/walk-limit-7` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-13/tombstone-seed` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-13/tombstone-head-limit-3` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-13/tombstone-head-limit-1` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-13/forged-owner` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-13/forged-version` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-13/forged-extra-field` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-13/forged-lastid-control` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-13/not-base64url` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-13/not-json` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-13/oversize` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-13/other-owner-cursor` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-05/seed` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-05/other-owner-get` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-05/other-owner-patch` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-05/other-owner-delete` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-05/other-owner-thumbnail` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-05/other-owner-list` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-05/same-id-independent` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-06/allowed-origin-preflight` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-06/disallowed-origin-preflight` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-06/allowed-origin-actual` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-06/disallowed-origin-actual` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-06/s3-allowed-origin-preflight` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-06/s3-disallowed-origin-preflight` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-07/invalid-json` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-07/empty-body` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-07/no-body` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-07/plain-text-body` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-07/media-text-plain` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-07/media-form` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-07/media-missing` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-07/media-charset-latin1` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-07/media-json-suffix` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-07/media-charset-utf8` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-07/media-charset-mixed-case` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/missing-id` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/missing-url` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/missing-title` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/missing-reminderTime` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/missing-autoOpen` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/missing-webPush` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/missing-hidden` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/unknown-field` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/readonly-revision` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/readonly-createdAt` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/readonly-updatedAt` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/owner-field` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/boolean-string-autoOpen` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/boolean-number-webPush` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/boolean-string-hidden` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/type-url-number` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/type-title-null` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/type-id-number` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/type-thumbnail-number` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/url-ftp` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/url-no-scheme` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/body-array` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/body-null` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/body-number` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/patch-empty` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/patch-id-field` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/patch-unknown-field` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/patch-readonly-revision` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/patch-boolean-string` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-08/patch-title-null` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/path-id-129` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/id-129` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/id-129-astral` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/id-empty` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/id-control` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/id-lone-surrogate` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/url-4097` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/title-1025` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/title-1025-astral` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/id-1` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/id-128` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/id-128-astral` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/id-unicode` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/id-percent2f` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/id-percent` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/id-slash` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/id-space` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/url-4096` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/title-0` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/title-1024` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-09/title-1024-astral` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/no-offset` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/leap-day-invalid` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/month-13` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/april-31` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/hour-24` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/offset-hour-24` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/date-only` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/space-separator` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/offset-one-digit` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/not-a-string` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/offset-plus9` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/z-form` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/offset-minus-0530` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/leap-day` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/past` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/fraction` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-10/year-boundary-offset` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-11/body-2097151` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-11/body-2097152` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-11/body-2097152-utf8` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-11/body-2097153` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-14/auth-refusal-rate-unchanged` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-14/input-422-rate-plus-one` | E | api | behavior | pass | e2e-d5c47097 |
-| `API-14/unpublished-503-rate-plus-one` | E | api | behavior | pass | e2e-d5c47097 |
-| `STORE-01/exact-etag-and-headers` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-02/patch-missing-if-match` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-02/patch-weak-if-match` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-02/patch-star-if-match` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-02/patch-list-if-match` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-02/patch-same-revision-other-hash` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-02/patch-sequential-stale` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-02/delete-missing-if-match` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-02/delete-weak-if-match` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-02/delete-star-if-match` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-02/delete-list-if-match` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-02/delete-same-revision-other-hash` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-02/delete-sequential-stale` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-03/patch-patch` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-03/delete-delete` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-03/patch-delete` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-04/same-id-create` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-04/different-item-patch` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-04/resend-create` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-04/resend-delete` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-05/lifecycle-tombstone` | E | storage | behavior | pass | e2e-d5c47097 |
-| `STORE-05/delete-with-image` | E | storage | behavior | pass | e2e-d5c47097 |
-| `API-14/rate-boundary-seeded` | E | storage | behavior | pass | e2e-d5c47097 |
+| `API-01/gate-transition` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-02/legacy-post` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-02/legacy-put` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-03/healthz-delete` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-03/readyz-post` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-03/legacy-get` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-03/list-delete` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-03/item-post` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-03/thumbnail-post` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-03/unknown-root-segment` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-03/unknown-extra-item-segment` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-03/unknown-v2-sibling` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-04/empty-list` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-04/create` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-04/get` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-04/patch` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-04/delete` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-12/seed-51` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-12/default` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-12/limit-1` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-12/limit-20` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-12/limit-50` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-12/limit-0` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-12/limit-51` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-12/limit-abc` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-12/limit-negative` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-12/limit-decimal` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-12/limit-hex` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-12/walk-limit-20` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-12/walk-limit-7` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-13/tombstone-seed` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-13/tombstone-head-limit-3` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-13/tombstone-head-limit-1` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-13/forged-owner` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-13/forged-version` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-13/forged-extra-field` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-13/forged-lastid-control` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-13/not-base64url` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-13/not-json` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-13/oversize` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-13/other-owner-cursor` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-05/seed` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-05/other-owner-get` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-05/other-owner-patch` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-05/other-owner-delete` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-05/other-owner-thumbnail` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-05/other-owner-list` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-05/same-id-independent` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-06/allowed-origin-preflight` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-06/disallowed-origin-preflight` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-06/allowed-origin-actual` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-06/disallowed-origin-actual` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-06/s3-allowed-origin-preflight` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-06/s3-disallowed-origin-preflight` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-07/invalid-json` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-07/empty-body` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-07/no-body` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-07/plain-text-body` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-07/media-text-plain` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-07/media-form` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-07/media-missing` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-07/media-charset-latin1` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-07/media-json-suffix` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-07/media-charset-utf8` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-07/media-charset-mixed-case` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/missing-id` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/missing-url` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/missing-title` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/missing-reminderTime` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/missing-autoOpen` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/missing-webPush` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/missing-hidden` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/unknown-field` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/readonly-revision` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/readonly-createdAt` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/readonly-updatedAt` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/owner-field` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/boolean-string-autoOpen` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/boolean-number-webPush` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/boolean-string-hidden` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/type-url-number` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/type-title-null` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/type-id-number` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/type-thumbnail-number` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/url-ftp` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/url-no-scheme` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/body-array` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/body-null` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/body-number` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/patch-empty` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/patch-id-field` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/patch-unknown-field` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/patch-readonly-revision` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/patch-boolean-string` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-08/patch-title-null` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/path-id-129` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/id-129` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/id-129-astral` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/id-empty` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/id-control` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/id-lone-surrogate` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/url-4097` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/title-1025` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/title-1025-astral` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/id-1` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/id-128` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/id-128-astral` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/id-unicode` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/id-percent2f` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/id-percent` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/id-slash` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/id-space` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/url-4096` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/title-0` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/title-1024` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-09/title-1024-astral` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/no-offset` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/leap-day-invalid` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/month-13` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/april-31` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/hour-24` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/offset-hour-24` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/date-only` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/space-separator` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/offset-one-digit` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/not-a-string` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/offset-plus9` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/z-form` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/offset-minus-0530` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/leap-day` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/past` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/fraction` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-10/year-boundary-offset` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-11/body-2097151` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-11/body-2097152` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-11/body-2097152-utf8` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-11/body-2097153` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-14/auth-refusal-rate-unchanged` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-14/input-422-rate-plus-one` | E | api | behavior | pass | e2e-da96a6b1 |
+| `API-14/unpublished-503-rate-plus-one` | E | api | behavior | pass | e2e-da96a6b1 |
+| `STORE-01/exact-etag-and-headers` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-02/patch-missing-if-match` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-02/patch-weak-if-match` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-02/patch-star-if-match` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-02/patch-list-if-match` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-02/patch-same-revision-other-hash` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-02/patch-sequential-stale` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-02/delete-missing-if-match` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-02/delete-weak-if-match` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-02/delete-star-if-match` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-02/delete-list-if-match` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-02/delete-same-revision-other-hash` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-02/delete-sequential-stale` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-03/patch-patch` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-03/delete-delete` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-03/patch-delete` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-04/same-id-create` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-04/different-item-patch` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-04/resend-create` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-04/resend-delete` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-05/lifecycle-tombstone` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `STORE-05/delete-with-image` | E | storage | behavior | pass | e2e-da96a6b1 |
+| `API-14/rate-boundary-seeded` | E | storage | behavior | pass | e2e-da96a6b1 |
 | `STORE-03/both-read-old-i` | I | storage | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/concurrency.test.ts` |
 | `STORE-04/create-race-i` | I | storage | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/concurrency.test.ts` |
 | `STORE-06/items-1000-boundary-i` | I | storage | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/quota.test.ts` |
@@ -384,79 +467,79 @@ layer Iの24件は、上の `npm test` の中で、対応づけた試験fileの�
 | `STORE-06/image-128mib-boundary-i` | I | storage | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/quota.test.ts` |
 | `STORE-06/image-128mib-concurrent-i` | I | storage | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/quota.test.ts` |
 | `STORE-06/image-128mib-delete-recovery-i` | I | storage | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/quota.test.ts` |
-| `IMG-01/png-base64` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-01/png-dataurl` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-01/jpeg-base64` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-01/jpeg-dataurl` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-01/gif-base64` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-01/gif-dataurl` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-01/webp-base64` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-01/webp-dataurl` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-01/null` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-01/empty` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-01/omitted` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-02/bad-alphabet` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-02/bad-pad-bits` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-02/bad-padding` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-02/bad-length` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-02/mime-mismatch` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-02/unsupported-mime` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-02/not-an-image` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-02/missing-base64-marker` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-03/bytes-1048575` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-03/bytes-1048576` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-03/bytes-1048577` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-04/issue-and-fetch` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-05/other-owner` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-05/no-image` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-05/deleted-item` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-06/replace` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-06/omit-keeps` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-06/clear-null` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-06/clear-empty` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-06/delete` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-07/duplicate-id-with-image` | E | images | behavior | pass | e2e-d5c47097 |
-| `IMG-07/duplicate-after-delete` | E | images | behavior | pass | e2e-d5c47097 |
+| `IMG-01/png-base64` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-01/png-dataurl` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-01/jpeg-base64` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-01/jpeg-dataurl` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-01/gif-base64` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-01/gif-dataurl` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-01/webp-base64` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-01/webp-dataurl` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-01/null` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-01/empty` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-01/omitted` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-02/bad-alphabet` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-02/bad-pad-bits` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-02/bad-padding` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-02/bad-length` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-02/mime-mismatch` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-02/unsupported-mime` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-02/not-an-image` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-02/missing-base64-marker` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-03/bytes-1048575` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-03/bytes-1048576` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-03/bytes-1048577` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-04/issue-and-fetch` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-05/other-owner` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-05/no-image` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-05/deleted-item` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-06/replace` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-06/omit-keeps` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-06/clear-null` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-06/clear-empty` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-06/delete` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-07/duplicate-id-with-image` | E | images | behavior | pass | e2e-da96a6b1 |
+| `IMG-07/duplicate-after-delete` | E | images | behavior | pass | e2e-da96a6b1 |
 | `IMG-08/pending-and-unknown-results-i` | I | images | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/runtime/images.test.ts` |
 | `IMG-09/signature-enforcement` | L | images | compatibility | unsupported | signature-enforcement-unsupported（Flociは署名/期限を強制しない） |
-| `CLEAN-01/unpublished` | E | cleanup | behavior | pass | e2e-d5c47097 |
-| `CLEAN-01/published-counts` | E | cleanup | behavior | pass | e2e-d5c47097 |
-| `CLEAN-01/event-injection` | E | cleanup | behavior | pass | e2e-d5c47097 |
-| `CLEAN-02/pending-24h-both-sides` | E | cleanup | behavior | pass | e2e-d5c47097 |
-| `CLEAN-02/retired-origin-replace` | E | cleanup | behavior | pass | e2e-d5c47097 |
-| `CLEAN-02/delete-tombstone` | E | cleanup | behavior | pass | e2e-d5c47097 |
-| `CLEAN-03/active-lease` | E | cleanup | behavior | pass | e2e-d5c47097 |
-| `CLEAN-03/expired-lease` | E | cleanup | behavior | pass | e2e-d5c47097 |
-| `CLEAN-03/unrecorded-version` | E | cleanup | behavior | pass | e2e-d5c47097 |
-| `CLEAN-04/committed-protected` | E | cleanup | behavior | pass | e2e-d5c47097 |
-| `CLEAN-05/version-mismatch` | E | cleanup | behavior | pass | e2e-d5c47097 |
-| `CLEAN-05/checksum-mismatch` | E | cleanup | behavior | pass | e2e-d5c47097 |
-| `CLEAN-05/existing-marker-and-absent` | E | cleanup | behavior | pass | e2e-d5c47097 |
-| `CLEAN-06/same-shard-51-two-invokes` | E | cleanup | behavior | pass | e2e-d5c47097 |
-| `CLEAN-09/second-invoke-converges` | E | cleanup | behavior | pass | e2e-d5c47097 |
+| `CLEAN-01/unpublished` | E | cleanup | behavior | pass | e2e-da96a6b1 |
+| `CLEAN-01/published-counts` | E | cleanup | behavior | pass | e2e-da96a6b1 |
+| `CLEAN-01/event-injection` | E | cleanup | behavior | pass | e2e-da96a6b1 |
+| `CLEAN-02/pending-24h-both-sides` | E | cleanup | behavior | pass | e2e-da96a6b1 |
+| `CLEAN-02/retired-origin-replace` | E | cleanup | behavior | pass | e2e-da96a6b1 |
+| `CLEAN-02/delete-tombstone` | E | cleanup | behavior | pass | e2e-da96a6b1 |
+| `CLEAN-03/active-lease` | E | cleanup | behavior | pass | e2e-da96a6b1 |
+| `CLEAN-03/expired-lease` | E | cleanup | behavior | pass | e2e-da96a6b1 |
+| `CLEAN-03/unrecorded-version` | E | cleanup | behavior | pass | e2e-da96a6b1 |
+| `CLEAN-04/committed-protected` | E | cleanup | behavior | pass | e2e-da96a6b1 |
+| `CLEAN-05/version-mismatch` | E | cleanup | behavior | pass | e2e-da96a6b1 |
+| `CLEAN-05/checksum-mismatch` | E | cleanup | behavior | pass | e2e-da96a6b1 |
+| `CLEAN-05/existing-marker-and-absent` | E | cleanup | behavior | pass | e2e-da96a6b1 |
+| `CLEAN-06/same-shard-51-two-invokes` | E | cleanup | behavior | pass | e2e-da96a6b1 |
+| `CLEAN-09/second-invoke-converges` | E | cleanup | behavior | pass | e2e-da96a6b1 |
 | `CLEAN-02/exact-boundary-i` | I | cleanup | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/cleanup-resume.test.ts` |
 | `CLEAN-03/exact-lease-boundary-i` | I | cleanup | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/cleanup-resume.test.ts` |
 | `CLEAN-04/stale-gsi-and-claim-race-i` | I | cleanup | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/cleanup-resume.test.ts`、`tests/runtime/cleanup.test.ts` |
 | `CLEAN-07/page-abort-resume-i` | I | cleanup | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/cleanup-resume.test.ts`、`tests/runtime/cleanup.test.ts` |
 | `CLEAN-08/limits-and-resume-i` | I | cleanup | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/cleanup-resume.test.ts`、`tests/runtime/cleanup.test.ts` |
 | `CLEAN-09/fault-matrix-i` | I | cleanup | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/cleanup-resume.test.ts`、`tests/runtime/cleanup.test.ts` |
-| `OPS-01/two-owners-import-verify-publish` | L | operations | behavior | pass | e2e-d5c47097 |
-| `OPS-02/interrupted-import-resumes-without-duplicates` | L | operations | behavior | pass | e2e-d5c47097 |
-| `OPS-02/changed-inputs-rejected-state-unchanged` | L | operations | behavior | pass | e2e-d5c47097 |
-| `OPS-02/corrupt-image-and-checksum-mismatch-never-publish` | L | operations | behavior | pass | e2e-d5c47097 |
-| `OPS-03/restored-prepare-verify-preserve-rerun` | L | operations | behavior | pass | e2e-d5c47097 |
-| `OPS-03/restored-tables-switch-and-return` | L | operations | behavior | pass | e2e-d5c47097 |
-| `OPS-04/no-automatic-mapping-explicit-remap` | L | operations | behavior | pass | e2e-d5c47097 |
-| `OPS-04/collision-and-bad-counter-never-ready` | L | operations | behavior | pass | e2e-d5c47097 |
+| `OPS-01/two-owners-import-verify-publish` | L | operations | behavior | pass | e2e-da96a6b1 |
+| `OPS-02/interrupted-import-resumes-without-duplicates` | L | operations | behavior | pass | e2e-da96a6b1 |
+| `OPS-02/changed-inputs-rejected-state-unchanged` | L | operations | behavior | pass | e2e-da96a6b1 |
+| `OPS-02/corrupt-image-and-checksum-mismatch-never-publish` | L | operations | behavior | pass | e2e-da96a6b1 |
+| `OPS-03/restored-prepare-verify-preserve-rerun` | L | operations | behavior | pass | e2e-da96a6b1 |
+| `OPS-03/restored-tables-switch-and-return` | L | operations | behavior | pass | e2e-da96a6b1 |
+| `OPS-04/no-automatic-mapping-explicit-remap` | L | operations | behavior | pass | e2e-da96a6b1 |
+| `OPS-04/collision-and-bad-counter-never-ready` | L | operations | behavior | pass | e2e-da96a6b1 |
 | `STORE-07/transaction-uncertain-outcomes-i` | I | operations | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/faults.test.ts` |
 | `IMG-08/real-adapter-fault-positions-i` | I | operations | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/faults.test.ts` |
 | `API-01/ready-dependency-failure-keeps-health200-i` | I | operations | behavior | pass | offline試験の実測で判定（同run、phase offline）: `tests/integration/formal-e2e/faults.test.ts` |
-| `OBS-02/crud-success-result-logs` | E | logging | behavior | pass | e2e-d5c47097 |
-| `OBS-02/input-rejection-result-logs` | E | logging | behavior | pass | e2e-d5c47097 |
-| `OBS-02/gateway-refusal-result-absence` | E | logging | behavior | pass | e2e-d5c47097 |
-| `OBS-03/cleanup-start-end-pairing` | E | logging | behavior | pass | e2e-d5c47097 |
-| `OPS-06/one-time-trigger` | L | scheduler | compatibility | pass | e2e-d5c47097 |
-| `OPS-06/daily-schedule-preserved` | L | scheduler | behavior | pass | e2e-d5c47097 |
+| `OBS-02/crud-success-result-logs` | E | logging | behavior | pass | e2e-da96a6b1 |
+| `OBS-02/input-rejection-result-logs` | E | logging | behavior | pass | e2e-da96a6b1 |
+| `OBS-02/gateway-refusal-result-absence` | E | logging | behavior | pass | e2e-da96a6b1 |
+| `OBS-03/cleanup-start-end-pairing` | E | logging | behavior | pass | e2e-da96a6b1 |
+| `OPS-06/one-time-trigger` | L | scheduler | compatibility | pass | e2e-da96a6b1 |
+| `OPS-06/daily-schedule-preserved` | L | scheduler | behavior | pass | e2e-da96a6b1 |
 
 補記（2026-10-12）: 上の表の「Node全suite（`npm test`）」は、当時の `npm test`（runtime、operations、delivery）の件数である。現在の `npm test` は、offline試験の後にFlociの全suiteを実行し、Floci無しの同等範囲は `npm run test:offline`（`test:e2e:harness` を含む）である。
 

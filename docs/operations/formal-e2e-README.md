@@ -2,7 +2,7 @@
 
 パッチ済みFloci上で、本番の3 Terraform rootと現行ZIPを構築し、実PKCEログインから認証済みAPI、DynamoDB、S3、CloudWatch Logsまでを照合するローカル試験の手順である。実AWS、GHA、本番Cognito、本番データには触れない。
 設計は[設計](../superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)、要件ごとの対応は[対応表](formal-e2e-coverage.md)、実施結果は[結果](formal-e2e-results.md)、できなかったことは[限界](formal-e2e-limitations.md)に分けて書く。
-ここに書いた値は、2026-10-12の `npm test` の実測（run `e2e-d5c47097-978c-4c02-8270-49d047e2783e`、refresh.7）と、offline試験に基づく。
+ここに書いた値は、2026-10-12の `npm test` の実測（未commitの変更を含まない作業ツリー、HEAD 6daf48bでの run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc`、refresh.7）と、offline試験に基づく。
 
 ## 前提
 
@@ -16,7 +16,7 @@
 
 | 目的 | コマンド | 要する時間 |
 | --- | --- | --- |
-| 全体（E、L、Iのすべて。offlineの試験の後にFlociの全suiteを実行する） | `npm test` | Flociが必要。約15分（offline約1分＋全suite約14分。実測は後述の枠に記す）。Flociが無いとpreflightで終了する（exit 2） |
+| 全体（E、L、Iのすべて。offlineの試験の後にFlociの全suiteを実行する） | `npm test` | Flociが必要。約14〜16分（実測869〜974秒。後述の枠に記す）。Flociが無いとpreflightで終了する（exit 2） |
 | Flociを使わないoffline試験（runtime、operations、delivery、結合、`test:e2e:harness`） | `npm run test:offline` | 数十秒〜1分。Flociは不要 |
 | offlineの結合試験（layer I、E2E harness、本書の対応表照合）だけ | `npm run test:integration:e2e` | 約5秒 |
 | Flociの全suite（E、L、I。Floci必須group全て、TF caseを含む） | `npm run test:e2e:floci` | 約12〜15分（refresh.7までの実測751〜833秒。layer Iの実行時間は含まない） |
@@ -40,12 +40,12 @@ layer Iの24件は、同じrunの中で、`offlineEvidence`（`tests/e2e/floci/s
 - runの取消または予算切れで始められなかった場合は、not-run（budget-exhausted、phaseはoffline）であり、passにはならない。caseの所要時間（durationMs）は、対応づけた各fileの実行時間の合計である。同じfileを共有するcaseは、同じfileの時間をそれぞれ数える。
 - layer Iだけを選んだ実行（`--case` または `--suite`）は、Floci、Terraform、fixtureに触れず、構築も回収も行わない。
 
-実測値（2026-10-12、HEAD 07744fc）:
+実測値（2026-10-12、HEAD 6daf48b。未commitの変更を含まない）:
 
-- `npm test` 全体: exit 0、974秒（約16.2分）。offline部分はruntime 188、operations 74、delivery 97、integration 180、harness 107がすべて合格（skip 0）。
-- Flociの全suite: run `e2e-d5c47097-978c-4c02-8270-49d047e2783e`、268件を選び、265件が合格、失敗0、未実行0、未対応3（OBS-04、AUTH-11のhosted revoke、IMG-09の互換性調査）。`partial` は偽、`complete` は真、終了コード0。回収は18件を試行して18件成功、errors 0、leaks 0。layer別はE 228 pass、L 13 pass と 3 unsupported、I 24 pass（phase offline）。
-- 全体の所要時間は約16分である。上の表の「約15分」は、この実測（974秒）に基づく。
-- layer Iの24件は、別の監査で全件が有効（VALID）と判定された。この完了は、Floci上のE・Lの実測と、同じrunのoffline試験の実測（layer I）を合わせた、2026-10-12のユーザー判断の基準による。実AWSなどの限界は[限界](formal-e2e-limitations.md)にある。
+- `npm test` 全体: exit 0、869秒（約14.5分）。offline部分はruntime 188、operations 74、delivery 97、integration 182、harness 107がすべて合格（skip 0）。
+- Flociの全suite: run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc`、268件を選び、265件が合格、失敗0、未実行0、未対応3（OBS-04、AUTH-11のhosted revoke、IMG-09の互換性調査）。`partial` は偽、`complete` は真、終了コード0。回収は18件を試行して18件成功、errors 0、leaks 0。ZIPの `dirtyPaths` は空。layer別はE 228 pass、L 13 pass と 3 unsupported、I 24 pass（phase offline）。
+- 以前のrun: e2e-d5c47097（HEAD 07744fc、974秒）とe2e-ba02c537（HEAD bfe7294、939秒）も同じ件数で、当時は未commitの `src/api/event.ts` を含んでいた。`npm test` 全体の所要時間は、869〜974秒（約14.5〜16分）である。
+- layer Iの24件は、別の監査で全件が有効（VALID）と判定された。この完了は、Floci上のE・Lの実測と、同じrunのoffline試験の実測（layer I）を合わせた、2026-10-12のユーザー判断の基準による。実AWSなどの限界は[限界](formal-e2e-limitations.md)に、判断の経緯は[判断の記録](formal-e2e-decisions.md)にある。
 
 ## 実行の流れ
 

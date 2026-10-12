@@ -60,7 +60,7 @@ git diff --exit-code 253e5e2 -- .devcontainer
 AWS認証やbackend接続は不要です。Provider初回取得にはregistry/release配布元への
 通信が必要です。任意のdownload cacheはGitへ入れません。
 実装用に準備済みのworktreeでは、全npm/npx/Python/preparation commandに
-`PATH=/tmp/aws-sdd-tools/node_modules/.bin:/tmp/aws-sdd-tools/bin:$PATH`を付けます。
+`PATH=<リポジトリ直下>/.superpowers/tools/aws-sdd/node_modules/.bin:<リポジトリ直下>/.superpowers/tools/aws-sdd/bin:$PATH`（git管理外の固定版tool置き場。詳細は[正式E2E手順](docs/operations/formal-e2e-README.md)）を付けます。
 固定Python実行可能ファイルを使う場合もpackage scriptが`python3`で呼ぶためPATHを揃えます。
 
 | command | 用途・入力 |
@@ -181,3 +181,7 @@ mapping/画像/backup/artifacts/cacheはGitに入れずpublic `.example`を使�
 ## 2026-10-12 追記: 正式E2Eの完了
 
 2026-10-12のユーザー判断（layer Iは、同じrunの中で、対応するoffline試験の実際の結果から判定する）の基準で、正式E2Eは完了しました。`npm test`（offline試験の後にFlociの全suite、exit 0、974秒）の run `e2e-d5c47097-978c-4c02-8270-49d047e2783e` は、268件中265件が合格、失敗0、未実行0、未対応3（測定済みの互換性調査）、`complete` は真です。layer Iの24件は、監査で全件が有効と判定されました。結果は[結果](docs/operations/formal-e2e-results.md)、限界は[限界](docs/operations/formal-e2e-limitations.md)にあります。未対応3件、実AWS・IAMとTLSの強制・PITR・Chromeの未実行、上流FlociのDocker依存試験の未実行、ユーザーの未commitの `src/api/event.ts` を含むrun、およびFlociがエミュレーターでありAWSではないことは、完了の後も残る限界です。
+
+## 2026-10-12 追記: 未commitの変更を含まないrun
+
+ユーザーが `src/api/event.ts` のnull-body修正を6daf48bでcommitした後の、未commitの変更を含まない作業ツリーでの `npm test`（869秒、exit 0）の run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc` は、268件中265件が合格、失敗0、未実行0、未対応3、`complete` は真、ZIPの `dirtyPaths` は空でした。これが現在の主たる結果です（[結果](docs/operations/formal-e2e-results.md)）。上の2026-10-12の追記にある「未commitの `src/api/event.ts` を含むrun」は、その前のrun（e2e-d5c47097）についての記録です。実AWS、IAMとTLSの強制、PITR、Chromeの未実行などの限界は変わりません。判断の経緯は[判断の記録](docs/operations/formal-e2e-decisions.md)にあります。

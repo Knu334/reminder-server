@@ -184,3 +184,7 @@ Floci refresh.7（`floci-local:2.2.0-refresh.7-native`）で全suiteを再実行
 2026-10-12のユーザー判断（layer Iは、同じrunの中で、対応するoffline試験の実測から判定する）の基準で、正式E2Eは完了した。`npm test`（HEAD 07744fc、exit 0、974秒）のrun `e2e-d5c47097-978c-4c02-8270-49d047e2783e` は、268件中265件が合格、失敗0、未実行0、未対応3（OBS-04、AUTH-11のhosted revoke、IMG-09。測定済みの互換性調査）、cleanup 18/18（errors 0、leaks 0）、`complete` は真だった。layer別は、E 228 pass、L 13 pass と 3 unsupported、I 24 pass（offline）。layer Iの24件は、監査で全件が有効と判定された。全case一覧は[結果](operations/formal-e2e-results.md)にある。
 
 残る限界: 未対応3件はFlociでの測定結果であり、実AWS、IAMとTLSの強制、PITR、Chromeは実行していない。上流FlociのDocker依存の試験は実行していない。このrunはユーザーの未commitの `src/api/event.ts` を含む。Flociはエミュレーターであり、AWSではない。上の2026-10-11までの記述（layer Iがnot-run、完了と言えない）は、当時の基準の記録として残す。
+
+## 2026-10-12 追記（その2）: 未commitの変更を含まないrun
+
+ユーザーが `src/api/event.ts` のnull-body修正を6daf48bでcommitした後の `npm test`（HEAD 6daf48b、exit 0、869秒）の run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc` は、268件中265件が合格、失敗0、未実行0、未対応3（OBS-04、AUTH-11のhosted revoke、IMG-09）、cleanup 18/18（errors 0、leaks 0）、`complete` は真、ZIPの `dirtyPaths` は空だった。offline部分はruntime 188、operations 74、delivery 97、integration 182、harness 107がすべて合格した。これが現在の主たる結果で、このrunには未commitの変更が含まれない。上の追記にある、未commitの `src/api/event.ts` を含むrunは、その前のrunの記録として残す。実AWS、IAMとTLSの強制、PITR、Chrome、上流FlociのDocker依存試験は実行しておらず、Flociはエミュレーターであり、AWSではない。判断の経緯は[判断の記録](operations/formal-e2e-decisions.md)にある。
