@@ -9,7 +9,7 @@
 | API-09/id-percent | refresh.6では、`%25` を含むIDの読み戻しがFlociの500になった。host filterが保存したpathを、後続の `@PreMatching` filterが `UriInfo.getPath()` で再度decodeし、末尾の `%` で例外になるためである | refresh.7（host filterで `%` を `%25` にしてから組み立てる）で解決。e2e-4e5b822aでAPI-09の全21件が合格 |
 | API-09/id-slash（`a%2Fb`） | refresh.5では失敗だったが、refresh.6で合格した | 解決 |
 
-refresh.7までのrunには、失敗のcaseはなかった。ただし、そのrunではlayer Iを実行していなかった。layer Iは、2026-10-12のユーザー判断により、同じrunの中でoffline試験の実測から判定する。この判定を含むFlociでの再実行の結果は、実施後に[結果](formal-e2e-results.md)へ追記する（未実施）。下記の未対応・未実施の項目は、引き続き合格として扱わない。
+refresh.7までのrunには、失敗のcaseはなかった。ただし、そのrunではlayer Iを実行していなかった。layer Iは、2026-10-12のユーザー判断により、同じrunの中でoffline試験の実測から判定する。この判定を含むFlociでの再実行は実施済みで、結果は[結果](formal-e2e-results.md)にある（2026-10-12、run e2e-d5c47097）。下記の未対応・未実施の項目は、引き続き合格として扱わない。
 
 ## Floci patchの検証
 
@@ -44,7 +44,7 @@ Floci本体へのパッチ（refresh.2のSourceAccount、refresh.3のListVersion
 - layer Iの24件は、liveの環境では実行できない（Floci上に再現できない故障の注入や合成時刻を使う）。そのため、2026-10-12のユーザー判断で、同じrunの中でoffline試験を実行し、その実際の結果が有効（対応する試験がすべて実行され、すべて合格）なときだけ、他のcaseと同じに数える。実行されなかった、または失敗した場合は、fail（`offline-test-missing`、`offline-test-failed`、`offline-run-failed`）であり、passにはしない。対応は[結果](formal-e2e-results.md)にある。これは実AWSやFlociでの観測ではない。2026-10-11までのrun（refresh.7を含む）の `complete` は、この判断より前の基準で、layer Iがnot-runだった。
 - 対応表のOPS-05とTF-04には、専用のcaseがない（TF-01、TF-03のcaseとoffline試験が担う）。AUTH-08、OBS-01、SAFE-04も専用のcaseを持たず、既存の回帰とAに残る。
 - 清掃ログの「60秒以内」は、最後の入力から60.5秒の観測窓と、その後の有界な完了pollである。最悪で約120.5秒かかる。
-- ZIPは、run時点のworking treeから作る。最新のrun（e2e-4e5b822a）にも、ユーザーの未commitのnull-body修正（`src/api/event.ts`）が含まれる。
+- ZIPは、run時点のworking treeから作る。2026-10-11時点の最新のrun（e2e-4e5b822a。2026-10-12のe2e-d5c47097も同様）にも、ユーザーの未commitのnull-body修正（`src/api/event.ts`）が含まれる。
 - `infra:check` は、このsandboxではTerraform initがprovider installで失敗した。3rootの検証としては数えない。
 - Gateway v2のaccess logとScheduler、Terraformの一部のread APIは、Flociの実装に依存する。read APIが501を返す場合は、独立した読み取りで確認したときだけunsupportedとし、それ以外は失敗とする。
 - 画像のS3 URLはBearer相当のcapabilityである。URLを知る者の共有は、別の契約である。

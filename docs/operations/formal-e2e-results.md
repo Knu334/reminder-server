@@ -459,3 +459,5 @@ layer Iの24件は、上の `npm test` の中で、対応づけた試験fileの�
 | `OPS-06/daily-schedule-preserved` | L | scheduler | behavior | pass | e2e-d5c47097 |
 
 補記（2026-10-12）: 上の表の「Node全suite（`npm test`）」は、当時の `npm test`（runtime、operations、delivery）の件数である。現在の `npm test` は、offline試験の後にFlociの全suiteを実行し、Floci無しの同等範囲は `npm run test:offline`（`test:e2e:harness` を含む）である。
+
+補記（2026-10-12）: run e2e-d5c47097 はHEAD 07744fcで実行し、その時点のoffline件数はintegration 180（runtime 188、operations 74、delivery 97、harness 107）だった。その後のcfc2a13は、`coverage.test.ts` の締め直し（I行がpass、対応づけた試験名が一件だけ一致）だけで、対応づけた試験名は変えていない（試験のみの変更）。`npm run test:offline` のintegrationは、cfc2a13の時点で181件、以降のoffline-evidenceの試験追加で182件になる（件数の差は試験の追加による）。
