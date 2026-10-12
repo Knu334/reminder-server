@@ -2,7 +2,7 @@
 
 パッチ済みFloci上で、本番の3 Terraform rootと現行ZIPを構築し、実PKCEログインから認証済みAPI、DynamoDB、S3、CloudWatch Logsまでを照合するローカル試験の手順である。実AWS、GHA、本番Cognito、本番データには触れない。
 設計は[設計](../superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)、要件ごとの対応は[対応表](formal-e2e-coverage.md)、実施結果は[結果](formal-e2e-results.md)、できなかったことは[限界](formal-e2e-limitations.md)に分けて書く。
-ここに書いた値は、2026-10-10のrefresh.7による実測と、offline試験に基づく。
+ここに書いた値は、2026-10-12の `npm test` の実測（run `e2e-d5c47097-978c-4c02-8270-49d047e2783e`、refresh.7）と、offline試験に基づく。
 
 ## 前提
 
@@ -40,9 +40,12 @@ layer Iの24件は、同じrunの中で、`offlineEvidence`（`tests/e2e/floci/s
 - runの取消または予算切れで始められなかった場合は、not-run（budget-exhausted、phaseはoffline）であり、passにはならない。caseの所要時間（durationMs）は、対応づけた各fileの実行時間の合計である。同じfileを共有するcaseは、同じfileの時間をそれぞれ数える。
 - layer Iだけを選んだ実行（`--case` または `--suite`）は、Floci、Terraform、fixtureに触れず、構築も回収も行わない。
 
-実測値（`npm test` 全体のrun ID、件数、所要時間）は、Flociでの再実行の後にここへ追記する。
+実測値（2026-10-12、HEAD 07744fc）:
 
-- （未記入: Flociでの再実行の結果を、controllerが追記する）
+- `npm test` 全体: exit 0、974秒（約16.2分）。offline部分はruntime 188、operations 74、delivery 97、integration 180、harness 107がすべて合格（skip 0）。
+- Flociの全suite: run `e2e-d5c47097-978c-4c02-8270-49d047e2783e`、268件を選び、265件が合格、失敗0、未実行0、未対応3（OBS-04、AUTH-11のhosted revoke、IMG-09の互換性調査）。`partial` は偽、`complete` は真、終了コード0。回収は18件を試行して18件成功、errors 0、leaks 0。layer別はE 228 pass、L 13 pass と 3 unsupported、I 24 pass（phase offline）。
+- 全体の所要時間は約16分である。上の表の「約15分」は、この実測（974秒）に基づく。
+- layer Iの24件は、別の監査で全件が有効（VALID）と判定された。この完了は、Floci上のE・Lの実測と、同じrunのoffline試験の実測（layer I）を合わせた、2026-10-12のユーザー判断の基準による。実AWSなどの限界は[限界](formal-e2e-limitations.md)にある。
 
 ## 実行の流れ
 

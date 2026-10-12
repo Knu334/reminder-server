@@ -125,3 +125,9 @@ latency. Historical audit/approval material remains historical.
 - 実AWS、IAMの強制、PITR、Chromeは対象外であり、別途の承認が必要である。
 
 補記（2026-10-12）: `npm test` は、offline試験の後にFlociの全suite（約15分、`artifacts/` にevidenceを書く）を実行する。上の「README verification block」でFlociが使えない場合は、`npm test` の代わりに、Floci無しの `npm run test:offline` を実行する。
+
+## 2026-10-12 追記: 正式E2Eの完了
+
+2026-10-12のユーザー判断（layer Iは、同じrunの中で、対応するoffline試験の実測から判定する）の基準で、正式E2Eは完了した。`npm test`（HEAD 07744fc、exit 0、974秒）のrun `e2e-d5c47097-978c-4c02-8270-49d047e2783e` は、268件中265件が合格、失敗0、未実行0、未対応3（OBS-04、AUTH-11のhosted revoke、IMG-09。測定済みの互換性調査）、cleanup 18/18（errors 0、leaks 0）、`complete` は真だった。layer別は、E 228 pass、L 13 pass と 3 unsupported、I 24 pass（offline）。layer Iの24件は、監査で全件が有効と判定された。全case一覧は[結果](formal-e2e-results.md)にある。
+
+残る限界: 未対応3件はFlociでの測定結果であり、実AWS、IAMとTLSの強制、PITR、Chromeは実行していない。上流FlociのDocker依存の試験は実行していない。このrunはユーザーの未commitの `src/api/event.ts` を含む。Flociはエミュレーターであり、AWSではない。上の2026-10-11までの記述（layer Iがnot-run、完了と言えない）は、当時の基準の記録として残す。

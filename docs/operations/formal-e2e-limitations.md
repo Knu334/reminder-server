@@ -49,3 +49,17 @@ Floci本体へのパッチ（refresh.2のSourceAccount、refresh.3のListVersion
 - Gateway v2のaccess logとScheduler、Terraformの一部のread APIは、Flociの実装に依存する。read APIが501を返す場合は、独立した読み取りで確認したときだけunsupportedとし、それ以外は失敗とする。
 - 画像のS3 URLはBearer相当のcapabilityである。URLを知る者の共有は、別の契約である。
 - 費用は変更していない。東京の総額は、未取得の単価で再計算していない。
+
+
+## 2026-10-12 追記: 完了の判定と残る限界
+
+2026-10-12のユーザー判断（layer Iは、同じrunの中で、対応するoffline試験を実行して、その実際の結果から判定し、有効なら他のcaseと同じに数える）の基準で、正式E2Eは**完了**した。run `e2e-d5c47097-978c-4c02-8270-49d047e2783e`（HEAD 07744fc、`npm test`、exit 0）は、268件中265件が合格、失敗0、未実行0、未対応3、`partial` は偽、`complete` は真である。layer Iの24件は、別の監査で全件が有効（VALID）と判定された。これより上の記述（layer Iがnot-runで完了と言えない、など）は、2026-10-11までの基準での記録として残す。
+
+完了とは言っても、次の限界は残る。合格として扱わない。
+
+- 未対応3件（OBS-04のGateway access log配信、AUTH-11のhosted `/oauth2/revoke`、IMG-09のS3の署名・期限の強制）は、Flociでの測定結果であり、互換性調査として完了しているだけである。各機能の動作は確認していない。
+- 実AWS、IAMの強制、TLSの強制、PITRの実復旧、Chromeの実ブラウザ、GHAの実行は実行していない。Flociはエミュレーターであり、AWSではない。
+- 上流FlociのDocker依存の試験（Lambda、WebSocketなど）は、開発コンテナで動かせないため実行していない。
+- このrunのZIPは、ユーザーの未commitの `src/api/event.ts`（null-body修正）を含む。`tests/runtime/api.test.ts` と `tests/runtime/boundaries.test.ts` の未commitの変更も同様に、commitされていない。
+- layer Iの24件は、Floci上の観測ではなく、合成のfakeとfault注入によるoffline試験の実測である。
+- `npm run infra:check` は、このsandboxで3 rootの検証が成功していない（2026-10-10の記録のまま）。同じ3 rootの構築はlive runで成功している。

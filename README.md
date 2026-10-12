@@ -177,3 +177,7 @@ mapping/画像/backup/artifacts/cacheはGitに入れずpublic `.example`を使�
 `.env.actions`と`reminders.json`はローカルを保持してindexだけ外し、過去履歴は変更していません。
 補助hookは文字列検査でsandboxの代わりにはなりません。Codex/Claudeの対応・trust・
 有効feature・harness読み込み条件と未実施integrationはCLAUDEに記載しています。
+
+## 2026-10-12 追記: 正式E2Eの完了
+
+2026-10-12のユーザー判断（layer Iは、同じrunの中で、対応するoffline試験の実際の結果から判定する）の基準で、正式E2Eは完了しました。`npm test`（offline試験の後にFlociの全suite、exit 0、974秒）の run `e2e-d5c47097-978c-4c02-8270-49d047e2783e` は、268件中265件が合格、失敗0、未実行0、未対応3（測定済みの互換性調査）、`complete` は真です。layer Iの24件は、監査で全件が有効と判定されました。結果は[結果](docs/operations/formal-e2e-results.md)、限界は[限界](docs/operations/formal-e2e-limitations.md)にあります。未対応3件、実AWS・IAMとTLSの強制・PITR・Chromeの未実行、上流FlociのDocker依存試験の未実行、ユーザーの未commitの `src/api/event.ts` を含むrun、およびFlociがエミュレーターでありAWSではないことは、完了の後も残る限界です。
