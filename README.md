@@ -24,7 +24,7 @@ scoped独立re-reviewも完了し、5件すべての修正を確認しました�
 [実装引き継ぎと新セッション用プロンプト](docs/superpowers/handoffs/2026-10-08-reminder-server-formal-e2e-implementation.md)を参照してください。
 本番Terraformの3rootをrunにつき一組だけ構築・設定確認し、入力に対するHTTP・DDB・S3・API/清掃ログを照合する案です。Gatewayログ配信は互換性調査として制限を記録します。
 API結果ログは[独立した先行計画](docs/superpowers/plans/2026-10-08-reminder-server-api-result-logging.md)で承認・検証・コミット後に、E2Eの前提とします。
-API操作の結果ログと正式E2Eのnpm入口（`npm run test:e2e:floci`、`test:e2e:terraform`、`test:integration:e2e`）は2026-10-10に実装済みです。実行手順は[正式E2E手順](docs/operations/formal-e2e-README.md)、実測結果は[結果](docs/operations/formal-e2e-results.md)、制限は[限界](docs/operations/formal-e2e-limitations.md)にあります。最新の全suite実行（Floci refresh.7）は268件中241件が合格、失敗0件、24件が未実行（layer I、offline試験で実施）、3件が未対応（測定済みの互換性調査）でした。未実行の24件が残るため、liveの実行としては完了と言えません。上記の過去の成功件数には含めません。
+API操作の結果ログと正式E2Eのnpm入口（`npm run test:e2e:floci`、`test:e2e:terraform`、`test:integration:e2e`）は2026-10-10に実装済みです。実行手順は[正式E2E手順](docs/operations/formal-e2e-README.md)、実測結果は[結果](docs/operations/formal-e2e-results.md)、制限は[限界](docs/operations/formal-e2e-limitations.md)にあります。最新の全suite実行（Floci refresh.7）は268件中241件が合格、失敗0件、24件が未実行（layer I、offline試験で実施）、3件が未対応（測定済みの互換性調査）でした。未実行の24件が残るため、liveの実行としては完了と言えません。上記の過去の成功件数には含めません。2026-10-12のユーザー判断により、layer Iの24件は、同じrunの中でoffline試験を実行し、その実際の結果から判定します（`npm test` はoffline試験の後にFlociの全suiteを実行し、Flociが必要です。Flociを使わない入口は `npm run test:offline`）。この基準でのFloci再実行の結果は、実施後に結果文書へ追記します（未実施）。
 
 ## ローカル検証
 
@@ -65,7 +65,8 @@ AWS認証やbackend接続は不要です。Provider初回取得にはregistry/re
 
 | command | 用途・入力 |
 | --- | --- |
-| `npm test` | runtime/operations/delivery。先にbuild/package |
+| `npm test` | `test:offline` の後に `test:e2e:floci`（E、L、Iの全件。Flociが必要で約15分、なければexit 2）。先にbuild/package |
+| `npm run test:offline` | runtime/operations/delivery/結合試験。Floci不要 |
 | `npm run test:runtime` / `test:operations` / `test:delivery` | 合成fixtureによる個別suite |
 | `npm run typecheck` / `lint` | strict TypeScript、typed ESLint |
 | `npm run build` / `package` / `verify:zip` / `test:packaging` | bundle、再現可能ZIP、単独load/hash、Python packaging試験 |

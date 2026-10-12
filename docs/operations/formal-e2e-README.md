@@ -16,19 +16,36 @@
 
 | 目的 | コマンド | 要する時間 |
 | --- | --- | --- |
-| offlineの結合試験（layer I、E2E harness、本書の対応表照合） | `npm run test:integration:e2e` | 約5秒（163件） |
-| 全suite（Floci必須group全て、TF caseを含む） | `npm run test:e2e:floci` | 約12〜14分（実測751〜833秒。最新は821秒） |
+| 全体（E、L、Iのすべて。offlineの試験の後にFlociの全suiteを実行する） | `npm test` | Flociが必要。約15分（offline約1分＋全suite約14分。実測は後述の枠に記す）。Flociが無いとpreflightで終了する（exit 2） |
+| Flociを使わないoffline試験（runtime、operations、delivery、結合） | `npm run test:offline` | 数十秒〜1分。Flociは不要 |
+| offlineの結合試験（layer I、E2E harness、本書の対応表照合）だけ | `npm run test:integration:e2e` | 約5秒 |
+| Flociの全suite（E、L、I。Floci必須group全て、TF caseを含む） | `npm run test:e2e:floci` | 約12〜15分（refresh.7までの実測751〜833秒。layer Iの実行時間は含まない） |
 | Terraform構築だけの診断 | `npm run test:e2e:terraform` | 構築は約2分（実測128秒） |
 | 一つのsuiteだけ | `npx tsx scripts/e2e/run.ts --layer floci --suite api` | suiteによる |
-| 一つのcaseだけ | `npx tsx scripts/e2e/run.ts --layer floci --case API-09/id-percent` | 構築と回収を含む |
+| 一つのcaseだけ | `npx tsx scripts/e2e/run.ts --layer floci --case API-09/id-percent` | 構築と回収を含む。layer IのcaseだけをFlociなしで選んだ場合は、構築も回収も行わない（下記） |
 
 実測前の見積りは22〜65分だった。期限は実行75分と回収15分で、全suiteの実測はその約6分の1である。
 suite名は `harness`、`terraform`、`fixture`、`auth`、`api`、`storage`、`images`、`cleanup`、`operations`、`logging`、`scheduler` で、この順に逐次実行する。一部だけを選んだ実行は `partial: true` になり、成功しても全体の完了とは扱わない。
 `npm run test:e2e:terraform` はTF-01/applyだけを実行する構築の診断で、全suite成功後に同じ構築を再実行する目的では使わない。
 
+## layer Iの判定（2026-10-12のユーザー判断）
+
+layer Iの24件は、同じrunの中で、`offlineEvidence`（`tests/e2e/floci/support/cases.ts`）に書いた試験fileを子processの `node --test` で実行し、その実際の結果から判定する。Flociの設定gateやsmokeの結果には依存しない。
+
+- 各caseに対応づけた試験名ごとに、同名、または語の区切りで続く名前の試験（`STORE-06/…-i:` のような接頭辞の書き方を含む）が一つ以上実行され、対応するすべての試験が合格したときだけpassになる。
+- 対応する試験が実行されなければfail（`offline-test-missing`）。対応する試験が失敗、skip、todo、cancelledならfail（`offline-test-failed`）。
+- 子processが試験の失敗以外の理由で異常終了、timeout、中断、または報告を読めなかった場合は、そのfileに対応するcaseがすべてfail（`offline-run-failed`）になる。
+- 報告は子processの標準出力をメモリ上で読むだけで、生の出力、ログ、環境は保存も表示もしない。evidenceには固定語彙の結果だけが残る。
+- runの取消または予算切れで始められなかった場合は、not-run（budget-exhausted）であり、passにはならない。
+- layer Iだけを選んだ実行（`--case` または `--suite`）は、Floci、Terraform、fixtureに触れず、構築も回収も行わない。
+
+実測値（`npm test` 全体のrun ID、件数、所要時間）は、Flociでの再実行の後にここへ追記する。
+
+- （未記入: Flociでの再実行の結果を、controllerが追記する）
+
 ## 実行の流れ
 
-1. preflightの後、本番3 rootの公開sourceを一時copyに置き、source digestを記録する。
+1. preflightの後、offlineの試験でlayer Iを判定する。続いて、本番3 rootの公開sourceを一時copyに置き、source digestを記録する。
 2. 変換は、2つのvariable validation（owned issuerとauth base URL）と、platformの2つのoutput.value、接続・隔離の生成設定だけである。それ以外の変更は拒否する。変換後digestと差分の区分を記録する。
 3. 現行buildからZIPを作り、digestを固定してS3へ登録する。ZIPの内容は、実行時点のworking treeである。
 4. 一組の基盤を構築し、設定を読み戻す（TF-03）。ここで一つでも不一致なら、以降のE/Lは全てnot-run（prerequisite-failed）になる。
@@ -42,8 +59,8 @@ suite名は `harness`、`terraform`、`fixture`、`auth`、`api`、`storage`、`
 
 出力の最後のJSONに `selected`、`passed`、`failed`、`notRun`、`unsupported`、`cleanup`、`exitCode`、`complete` が出る。
 
-- `complete` が真になるのは、registry全件を選び、failとnot-runが0で、回収に失敗も漏れも無いときだけである。部分選択や、layer Iのnot-runが残る場合は偽になる。測定済みの互換性調査のunsupportedは、`complete` を妨げない。最新のrunで偽になった原因は、layer Iの24件のnot-runだけである。
-- layer Iのcaseはliveでは実行されず、not-run（implementation-pending）として残る。offlineの試験は `npm run test:integration:e2e` が行う。各Iのcaseと試験fileの対応は[結果](formal-e2e-results.md)にあり、`tests/integration/formal-e2e/coverage.test.ts` が存在を確認する。
+- `complete` が真になるのは、registry全件を選び、failとnot-runが0で、回収に失敗も漏れも無いときだけである。部分選択は偽になる。測定済みの互換性調査のunsupportedは、`complete` を妨げない。layer Iの24件は、offlineの実測で合格すれば他のcaseと同じに数える（2026-10-12のユーザー判断）。
+- layer Iのcaseは、`npm test` または `npm run test:e2e:floci` の中で、offlineの試験の実測から判定する（上の節）。各Iのcaseと試験fileの対応は[結果](formal-e2e-results.md)にあり、`tests/integration/formal-e2e/coverage.test.ts` が、試験名の一致まで確認する。
 - `unsupported` は、互換性調査の項目で、測定した結果として未対応と判明した場合に付く。この場合は終了コードに影響しない。behaviorのcaseは、TF-01/applyで必須APIの未対応を測定した場合（required-api-unsupported）だけがunsupportedになり、終了コードは1になる。それ以外のbehaviorのcaseは、failとして数える。
 - `fail` は、入力を送った後の不一致である。not-runへ戻さない。
 - 結果は `artifacts/formal-e2e/<run ID>/` の `results.json`（case別）、`inventory.json`、`manifest.json`（所有リソースとprocess）、`independent-absence.json` に保存する。token、code、URL、本文、生ログは保存しない。このdirectoryはgit管理外である。

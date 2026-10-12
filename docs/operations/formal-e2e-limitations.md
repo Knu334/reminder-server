@@ -9,7 +9,7 @@
 | API-09/id-percent | refresh.6では、`%25` を含むIDの読み戻しがFlociの500になった。host filterが保存したpathを、後続の `@PreMatching` filterが `UriInfo.getPath()` で再度decodeし、末尾の `%` で例外になるためである | refresh.7（host filterで `%` を `%25` にしてから組み立てる）で解決。e2e-4e5b822aでAPI-09の全21件が合格 |
 | API-09/id-slash（`a%2Fb`） | refresh.5では失敗だったが、refresh.6で合格した | 解決 |
 
-現在、失敗のcaseはない。ただし、下記の未対応・未実施の項目と、layer Iがliveで実行されない点により、正式E2Eはliveの実行としては完了と言えない。
+refresh.7までのrunには、失敗のcaseはなかった。ただし、そのrunではlayer Iを実行していなかった。layer Iは、2026-10-12のユーザー判断により、同じrunの中でoffline試験の実測から判定する。この判定を含むFlociでの再実行の結果は、実施後に[結果](formal-e2e-results.md)へ追記する（未実施）。下記の未対応・未実施の項目は、引き続き合格として扱わない。
 
 ## Floci patchの検証
 
@@ -41,7 +41,7 @@ Floci本体へのパッチ（refresh.2のSourceAccount、refresh.3のListVersion
 
 ## 結果の読み方に関わる制約
 
-- layer Iの24件は、live実行ではnot-runのまま残る（既存のharnessの設計）。offline試験で実施し、[結果](formal-e2e-results.md)に対応を記録した。そのため `complete` はliveの実行だけでは真にならない。この扱いを変える場合は、harnessの設計判断が必要になる。
+- layer Iの24件は、liveの環境では実行できない（Floci上に再現できない故障の注入や合成時刻を使う）。そのため、2026-10-12のユーザー判断で、同じrunの中でoffline試験を実行し、その実際の結果が有効（対応する試験がすべて実行され、すべて合格）なときだけ、他のcaseと同じに数える。実行されなかった、または失敗した場合は、fail（`offline-test-missing`、`offline-test-failed`、`offline-run-failed`）であり、passにはしない。対応は[結果](formal-e2e-results.md)にある。これは実AWSやFlociでの観測ではない。2026-10-11までのrun（refresh.7を含む）の `complete` は、この判断より前の基準で、layer Iがnot-runだった。
 - 対応表のOPS-05とTF-04には、専用のcaseがない（TF-01、TF-03のcaseとoffline試験が担う）。AUTH-08、OBS-01、SAFE-04も専用のcaseを持たず、既存の回帰とAに残る。
 - 清掃ログの「60秒以内」は、最後の入力から60.5秒の観測窓と、その後の有界な完了pollである。最悪で約120.5秒かかる。
 - ZIPは、run時点のworking treeから作る。最新のrun（e2e-4e5b822a）にも、ユーザーの未commitのnull-body修正（`src/api/event.ts`）が含まれる。
