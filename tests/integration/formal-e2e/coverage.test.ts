@@ -22,6 +22,10 @@ const coverageRows = rows(read('docs/operations/formal-e2e-coverage.md'), /^\| [
 const resultRows = rows(read('docs/operations/formal-e2e-results.md'), /^\| `[A-Z]+-\d\d\//);
 const resultId = (row: string[]): string => row[0]!.replaceAll('`', '');
 const STATUSES = ['pass', 'fail', 'not-run', 'unsupported'];
+/** Names of the tests a source file declares with test(...) or it(...). */
+function declaredTests(text: string): string[] {
+  return [...text.matchAll(/\b(?:void\s+)?(?:test|it)\(\s*(['"`])((?:\\.|(?!\1).)*)\1/g)].map(match => match[2]!);
+}
 
 function single(id: string, layer: CaseDefinition['layer'] = 'E', acceptance: CaseDefinition['acceptance'] = 'behavior'): CaseDefinition {
   return { id, requirementId: id.split('/')[0]!, layer, required: true, acceptance, suite: 'harness', source: `formal-e2e-coverage/${id.split('/')[0]!}`, outputs: [
@@ -80,12 +84,12 @@ void test('every_integration_case_is_linked_to_existing_offline_evidence', () =>
       assert.ok(existsSync(join(root, link.file)), `${def.id}: ${link.file} is missing`);
       const text = read(link.file); assert.ok(link.titles.length > 0, def.id);
       // The E2E run judges each title from an executed test: the title must equal a registered test name or continue it after a word boundary.
-      const names = [...text.matchAll(/\b(?:void\s+)?(?:test|it)\(\s*(['"`])((?:\\.|(?!\1).)*)\1/g)].map(match => match[2]!);
-      for (const title of link.titles) assert.ok(names.some(name => titleMatches(title, name)), `${def.id}: "${title}" matches no test in ${link.file}`);
+      const names = declaredTests(text);
+      for (const title of link.titles) assert.equal(names.filter(name => titleMatches(title, name)).length, 1, `${def.id}: "${title}" must match exactly one test in ${link.file}`);
     }
-    // The E2E run judges these from the real offline results: a recorded row is pass, or still not-run in a report from before that change; never fail-as-pass or unsupported.
+    // The E2E run judges these from the real offline results (phase offline): the recorded row must be pass.
     const row = resultRows.find(item => resultId(item) === def.id)!;
-    assert.ok(['pass', 'not-run'].includes(row[4]!), `${def.id} is recorded pass or (older report) not-run, not ${row[4]}`);
+    assert.equal(row[4], 'pass', `${def.id} must be recorded pass, not ${row[4]}`);
     for (const link of links) assert.ok(row[5]!.includes(link.file), `${def.id} result row cites ${link.file}`);
   }
   for (const [id, files] of Object.entries(requirementEvidence)) {
@@ -192,4 +196,17 @@ void test('documented_entrypoints_exist_in_package_scripts_and_registry', () => 
   for (const suite of new Set([...guide.matchAll(/--suite ([a-z]+)/g)].map(match => match[1]!))) assert.ok(suites.has(suite), `--suite ${suite} is not a registry suite`);
   for (const suite of suites) assert.ok(guide.includes(`\`${suite}\``), `suite ${suite} is not described`);
   assert.match(read('README.md'), /formal-e2e-README\.md/);
+});
+
+void test('title_matching_counts_declared_tests_so_duplicates_and_missing_titles_are_caught', () => {
+  const source = [
+    "void test('alpha_one', () => {});", "void test('alpha_one', () => {});", "test(\"beta: first\", () => {});", "test('beta: second', () => {});", "it('gamma', () => {});",
+  ].join('\n');
+  const names = declaredTests(source);
+  const count = (title: string): number => names.filter(name => titleMatches(title, name)).length;
+  assert.equal(count('alpha_one'), 2, 'a duplicated test name is ambiguous');
+  assert.equal(count('beta:'), 2, 'a family prefix matching two tests is not unique');
+  assert.equal(count('beta: first'), 1);
+  assert.equal(count('gamma'), 1);
+  assert.equal(count('delta'), 0, 'a missing title matches nothing');
 });
