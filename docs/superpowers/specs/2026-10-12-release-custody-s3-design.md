@@ -73,7 +73,7 @@ prefix は `<種類>/<run_id>/<run_attempt>/` とする。`run_attempt` は、�
 `manifest.json` には次を入れる。
 
 - 種類、root、run ID、`run_attempt`
-- 作成時刻（`createdAt`）と利用期限（`expiresAt`）
+- 作成時刻（`createdAt`）。`registered-release` と `release-review` では利用期限（`expiresAt`）も入れる。`release-result` と `failure-diagnostics` は人が読む保管用であり、workflow が読むことは無いので、`expiresAt` を持たず、利用期限の検査も適用しない（保持は lifecycle だけで決まる）
 - ファイル名と SHA-256 の一覧
 - `release-review` では、plan の digest（`plan-guard` の `reviewSha256`）と、`custody.json` の SHA-256。ZIP を再利用した preview では、元の preview の manifest の SHA-256 も入れる
 
@@ -196,7 +196,8 @@ hash の照合は「内容が変わっていない」ことを確かめるだけ
 | ファイルの集合が種類ごとの集合と違う | 止まる |
 | ファイルの SHA-256 が合わない | 止まる |
 | 利用期限を過ぎた、または日時が不正 | 止まる。新しい preview が必要になる |
-| レビューした manifest の SHA-256 が `expected_review_sha256` と違う、または plan の digest が元と違う | 止まる |
+| レビューした manifest の SHA-256 が `expected_review_sha256` と違う | 止まる |
+| レビュー済みの変更を apply する経路で、作り直した plan の digest が元の preview と違う（ZIP を再利用した preview では、設定を変えるので plan の digest は元と違ってよい） | 止まる |
 | 既存の key への書き込み | S3 が拒否し、止まる |
 | S3 に接続できない、権限が無い | 止まる |
 
@@ -239,6 +240,18 @@ private のリポジトリを public に切り替える場合は、切り替え�
   - job の output と `needs` で、custody の置き場所を受け渡す。
   - `CUSTODY_BUCKET` の variable を使う。
 - `infra/bootstrap`: bucket、bucket policy、lifecycle、role の権限、output を追加する。
+
+### 3つの digest の区別
+
+実装では、次の3つの値を混同しない。今の `workflow.ts` は入力の `expected_review_sha256` を plan の digest と直接比べているので、比べる相手を変える。`plan-guard.ts` の plan の digest の計算と `verifySavedPlan` は変えない。
+
+| 値 | 照合する相手 |
+| --- | --- |
+| 入力の `expected_review_sha256` | 元の preview の `release-review` の `manifest.json` の bytes |
+| plan の job が output で渡す manifest の SHA-256 | 同じ run の apply の job が取り出す `manifest.json` の bytes |
+| 照合済みの manifest の中の plan の digest | 作り直した plan の digest と、`review.json` の `reviewSha256`（レビュー済みの変更を apply する経路だけ） |
+
+既存の試験の「preview と apply の run の plan の digest が等しい」は、manifest の中の plan の digest が等しいことを確かめる形にする。run ID、作成時刻、binary が変わりうる manifest の SHA-256 には、同一であることを求めない。preview であることの確認（今の `preview.json`）は残す。
 
 ## 試験
 
