@@ -46,9 +46,14 @@ void test('STORE-06/image-128mib-boundary-i: images may fill exactly 134217728 b
   const h = createHarness(); h.seedStorage(OWNER, 0, BYTES - IMAGE);
   await h.service.create(OWNER, validCreate({ id: 'fill', thumbnail: png(IMAGE) }), testBudget());
   assert.equal(h.snapshot().storage[0]?.imageBytes, BYTES);
+  // A further 13-byte image over the cap is refused; the exact cap + 1 byte case follows below.
   await assert.rejects(h.service.create(OWNER, validCreate({ id: 'over', thumbnail: png(syntheticPngBytes.length + 1) }), testBudget()), { status: 413, code: 'OWNER_STORAGE_LIMIT_EXCEEDED' });
   const snap = h.snapshot(); assert.equal(snap.storage[0]?.imageBytes, BYTES); assert.equal(snap.reminders.length, 1); assert.equal(snap.jobs.filter(job => job.state === 'committed').length, 1);
   await h.service.create(OWNER, validCreate({ id: 'no-image' }), testBudget()); assert.equal(h.snapshot().storage[0]?.imageBytes, BYTES);
+  // Exactly cap + 1: seed one byte more than the room a full image needs, then add that image (total BYTES + 1). It is refused and nothing changes.
+  const plusOne = createHarness(); plusOne.seedStorage(OWNER, 0, BYTES - IMAGE + 1);
+  await assert.rejects(plusOne.service.create(OWNER, validCreate({ id: 'plus-one', thumbnail: png(IMAGE) }), testBudget()), { status: 413, code: 'OWNER_STORAGE_LIMIT_EXCEEDED' });
+  const refused = plusOne.snapshot(); assert.equal(refused.storage[0]?.imageBytes, BYTES - IMAGE + 1, 'the counter is unchanged by the refused create'); assert.equal(refused.reminders.length, 0); assert.equal(refused.jobs.filter(job => job.state === 'committed').length, 0);
 });
 
 void test('STORE-06/image-128mib-concurrent-i: two 1 MiB creates from one slot below the cap give one success and one 413', async () => {

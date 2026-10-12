@@ -43,7 +43,7 @@ function rig(t: TestContext, rules: FaultRule[] = [], published = true) {
   const api = withApiResultLogging(createApiHandler({ config: harnessConfig, service, owners, images, clock }));
   const trace = (command: string): number => [...ddb.trace, ...s3.trace].filter(entry => entry.command === command).length;
   const results = (): { operation?: string; status?: number; code?: string }[] => lines.map(line => JSON.parse(line) as { operation?: string; status?: number; code?: string });
-  return { h, fakes, api, trace, results, call: (method: string, path: string, body?: string) => api(event(method, path, body), context()) };
+  return { h, fakes, api, trace, tokens: () => ddb.tokens, total: (): number => ddb.trace.length + s3.trace.length, results, call: (method: string, path: string, body?: string) => api(event(method, path, body), context()) };
 }
 const createWithImage = (r: Rig, id = 'reminder-1') => r.call('POST', '/v2/reminders', JSON.stringify(validCreate({ id, thumbnail: syntheticPngBase64 })));
 const unavailable = (response: { statusCode?: number | undefined; body?: string | undefined }): boolean => response.statusCode === 503 && (JSON.parse(response.body ?? '{}') as { code?: string }).code === 'SERVICE_UNAVAILABLE';
@@ -79,6 +79,11 @@ void test('store_07_commit_before_send_resends_the_same_command_and_commits_exac
     const response = await createWithImage(r); assert.equal(response.statusCode, 201);
     const state = r.h.snapshot();
     assert.equal(r.trace('TransactWriteItems'), 2, 'the unknown outcome was verified absent and the same token was sent again');
+    // Both sends (the dropped one and the resend) carry the same non-empty ClientRequestToken: it is one logical operation, not a second one.
+    const [first, second] = r.tokens(); assert.equal(r.tokens().length, 2); assert.ok(first && first === second, 'the resend reuses the ClientRequestToken');
+    // A new logical operation gets a different token.
+    assert.equal((await createWithImage(r, 'reminder-2')).statusCode, 201);
+    assert.equal(r.tokens().length, 3); assert.notEqual(r.tokens()[2], first, 'a different create is a different transaction token');
     assert.equal(state.reminders.length, 1); assert.deepEqual(state.storage.map(row => [row.itemCount, row.imageBytes]), [[1, png]]);
     assert.deepEqual(state.jobs.map(job => job.state), ['committed']);
   }
@@ -108,6 +113,28 @@ void test('store_07_rate_failure_before_and_after_the_send_is_503_and_never_retr
     const after = rig(t, [rule('UpdateItem', 1, 'after', effect)]);
     assert.ok(unavailable(await after.call('GET', '/v2/reminders'))); assert.deepEqual(after.h.snapshot().rates.map(row => row.count), [1]); assert.equal(after.trace('UpdateItem'), 1, 'an unknown rate write is not retried');
     assert.equal(after.h.snapshot().reminders.length, 0);
+  }
+});
+
+void test('img_08_pending_job_creation_before_send_is_503_with_no_job_no_object_and_nothing_committed', async t => {
+  for (const effect of effects) {
+    // PutItem 1 is the pending-job creation that must precede the S3 upload (nothing else in a create sends a bare PutItem).
+    const r = rig(t, [rule('PutItem', 1, 'before', effect)]);
+    assert.ok(unavailable(await createWithImage(r))); const state = r.h.snapshot();
+    assert.equal(r.trace('PutItem'), 1, 'the creation is not retried into a second job');
+    assert.deepEqual(state.jobs, [], 'no job was written'); assert.deepEqual(r.h.imageVersions(), [], 'no object may exist before its pending job'); assert.equal(r.trace('PutObject'), 0, 'the upload never started');
+    assert.equal(state.reminders.length, 0); assert.deepEqual(state.storage, []);
+  }
+});
+
+void test('img_08_pending_job_creation_response_lost_leaves_one_pending_job_and_no_object_or_second_job', async t => {
+  for (const effect of effects) {
+    const r = rig(t, [rule('PutItem', 1, 'after', effect)]);
+    assert.ok(unavailable(await createWithImage(r))); const state = r.h.snapshot();
+    assert.equal(r.trace('PutItem'), 1, 'the unknown creation is not resent');
+    assert.deepEqual(state.jobs.map(job => [job.state, job.versionId]), [['pending', undefined]], 'the job that did commit stays pending for cleanup');
+    assert.deepEqual(r.h.imageVersions(), [], 'no object was uploaded after the unknown creation'); assert.equal(r.trace('PutObject'), 0);
+    assert.equal(state.reminders.length, 0); assert.deepEqual(state.storage, []); assert.deepEqual(r.h.imageDeleteMarkers(), []); assert.deepEqual(r.fakes.permanentDeletes, []);
   }
 });
 
@@ -163,8 +190,8 @@ void test('api_01_ready_dependency_probe_fault_is_503_with_the_logged_code_while
   for (const [command, occurrence] of faults) for (const phase of ['before', 'after'] as const) {
     const r = rig(t, [rule(command, occurrence, phase, 'throw')]);
     const ready = await r.call('GET', '/readyz'); assert.ok(unavailable(ready), `${command}#${occurrence}/${phase}`);
-    const dependencyCallsBefore = r.trace('GetItem') + r.trace('HeadBucket'); const health = await r.call('GET', '/healthz');
-    assert.equal(health.statusCode, 200); assert.deepEqual(JSON.parse(health.body ?? '{}'), { healthy: true }); assert.equal(r.trace('GetItem') + r.trace('HeadBucket'), dependencyCallsBefore, 'health uses no dependency');
+    const dependencyCallsBefore = r.total(); const health = await r.call('GET', '/healthz');
+    assert.equal(health.statusCode, 200); assert.deepEqual(JSON.parse(health.body ?? '{}'), { healthy: true }); assert.equal(r.total(), dependencyCallsBefore, 'health sends no SDK command of any kind');
     assert.deepEqual(r.results().map(result => [result.operation, result.status, result.code]), [['ready', 503, 'SERVICE_UNAVAILABLE'], ['health', 200, undefined]]);
   }
   const control = rig(t); assert.equal((await control.call('GET', '/readyz')).statusCode, 200);

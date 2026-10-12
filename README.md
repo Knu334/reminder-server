@@ -46,7 +46,7 @@ npm run lint
 npm run build
 npm run package
 npm run verify:zip
-npm test
+npm test   # offlineの後にFlociの全suiteを実行する。Flociが必要で約15分。Floci無しで同じ範囲のoffline試験だけなら npm run test:offline
 npm run test:packaging
 npm run infra:check
 npm run audit:runtime

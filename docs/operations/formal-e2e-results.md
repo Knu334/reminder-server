@@ -108,7 +108,7 @@ Task 1〜11の各taskはreview済みで、live中に見つかったharnessの欠
 | ID | 層 | suite | 区分 | 結果 | 根拠 |
 | --- | --- | --- | --- | --- | --- |
 | `SAFE-01/transport` | I | harness | behavior | not-run | liveでは未実行（implementation-pending）。offline: `tests/integration/formal-e2e/harness.test.ts` |
-| `SAFE-02/inventory` | I | harness | behavior | not-run | liveでは未実行（implementation-pending）。offline: `tests/integration/formal-e2e/harness.test.ts` |
+| `SAFE-02/inventory` | I | harness | behavior | not-run | liveでは未実行（implementation-pending）。offline: `tests/integration/formal-e2e/harness.test.ts`、`tests/integration/formal-e2e/coverage.test.ts`、`tests/e2e/floci/fixture.test.ts`、`tests/e2e/floci/scheduler.test.ts` |
 | `SAFE-03/redaction` | I | harness | behavior | not-run | liveでは未実行（implementation-pending）。offline: `tests/integration/formal-e2e/harness.test.ts` |
 | `TF-02/driver-isolation` | I | terraform | behavior | not-run | liveでは未実行（implementation-pending）。offline: `tests/integration/formal-e2e/terraform-driver.test.ts` |
 | `TF-01/apply` | L | terraform | behavior | pass | e2e-4e5b822a |
@@ -375,3 +375,5 @@ Task 1〜11の各taskはreview済みで、live中に見つかったharnessの欠
 | `OBS-03/cleanup-start-end-pairing` | E | logging | behavior | pass | e2e-4e5b822a |
 | `OPS-06/one-time-trigger` | L | scheduler | compatibility | pass | e2e-4e5b822a |
 | `OPS-06/daily-schedule-preserved` | L | scheduler | behavior | pass | e2e-4e5b822a |
+
+補記（2026-10-12）: 上の表の「Node全suite（`npm test`）」は、当時の `npm test`（runtime、operations、delivery）の件数である。現在の `npm test` は、offline試験の後にFlociの全suiteを実行し、Floci無しの同等範囲は `npm run test:offline`（`test:e2e:harness` を含む）である。

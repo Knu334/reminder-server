@@ -199,8 +199,13 @@ void test('unknown_selection_exits_2_without_preflight', async t => {
   assert.equal(diagnostic, 'E2E_INVALID_SELECTION'.repeat(3));
 });
 
-void test('child_env_discards_ambient_credentials_proxy_and_node_hooks', () => {
+void test('child_env_discards_ambient_credentials_proxy_and_node_hooks', t => {
+  // The ambient variables must be present for the absence to mean anything.
+  const ambient = { AWS_PROFILE: 'ambient-profile', HTTP_PROXY: 'http://ambient.invalid:3128', HTTPS_PROXY: 'http://ambient.invalid:3128', NODE_OPTIONS: '--require ambient-hook', AWS_SESSION_TOKEN: 'ambient-token', AWS_WEB_IDENTITY_TOKEN_FILE: '/ambient/token', TF_VAR_ambient: 'x' };
+  for (const [name, value] of Object.entries(ambient)) { const prior = process.env[name]; process.env[name] = value; t.after(() => { if (prior === undefined) delete process.env[name]; else process.env[name] = prior; }); }
   const env = childEnvironment();
+  for (const name of Object.keys(ambient)) assert.equal(env[name], undefined, name);
+  assert.equal(Object.values(env).some(value => value?.includes('ambient')), false);
   assert.equal(env.AWS_PROFILE, undefined); assert.equal(env.HTTP_PROXY, undefined); assert.equal(env.NODE_OPTIONS, undefined);
   assert.equal(env.AWS_SHARED_CREDENTIALS_FILE, '/dev/null'); assert.equal(env.AWS_CONFIG_FILE, '/dev/null');
   assert.equal(env.AWS_EC2_METADATA_DISABLED, 'true'); assert.equal(env.AWS_ACCESS_KEY_ID, 'local');

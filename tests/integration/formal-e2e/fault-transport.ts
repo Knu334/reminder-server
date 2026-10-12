@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { S3ClientConfig } from '@aws-sdk/client-s3';
 
 /** The handler type the SDK client config accepts (not a bare object of options), so a faulted handler plugs into any product client unchanged. */
@@ -38,20 +39,22 @@ const failure = (rule: FaultRule): Error => Object.assign(new Error(`synthetic $
  * SDK's own abort signal fires. The trace holds only the fixed command name, its per-command occurrence and the phase: never a
  * header, URL, query or body.
  */
-export function createFaultTransport(delegate: RequestHandler, rules: readonly FaultRule[]): { handler: RequestHandler; trace: ReadonlyArray<FaultTrace> } {
+export function createFaultTransport(delegate: RequestHandler, rules: readonly FaultRule[]): { handler: RequestHandler; trace: ReadonlyArray<FaultTrace>; tokens: ReadonlyArray<string> } {
   const seen = new Set<string>();
   for (const rule of rules) {
     const key = `${rule.command}#${rule.occurrence}`;
     if (!Object.hasOwn(COMMANDS, rule.command) || !Number.isSafeInteger(rule.occurrence) || rule.occurrence < 1 || !['before', 'after', 'delay'].includes(rule.phase) || !['throw', 'abort'].includes(rule.effect) || seen.has(key)) throw new Error('FAULT_RULE_REJECTED');
     seen.add(key);
   }
-  const counts = new Map<string, number>(); const trace: FaultTrace[] = [];
+  const counts = new Map<string, number>(); const trace: FaultTrace[] = []; const tokens: string[] = [];
   const handler = {
     metadata: { handlerProtocol: 'http/1.1' },
     destroy(): void { (delegate as { destroy?: () => void }).destroy?.(); },
     async handle(request: Request, options?: Options) {
       const wire = request as unknown as Wire; const command = commandOf(wire); if (command === undefined) throw new Error('FAULT_COMMAND_UNMAPPED');
       const occurrence = (counts.get(command) ?? 0) + 1; counts.set(command, occurrence);
+      // Idempotency evidence: a short digest of each transaction's ClientRequestToken as sent, including a send that a fault then drops. The token itself is never kept.
+      if (command === 'TransactWriteItems') { const body = (request as unknown as { body?: unknown }).body; const text = typeof body === 'string' ? body : body instanceof Uint8Array ? Buffer.from(body).toString('utf8') : undefined; const token = text !== undefined ? (JSON.parse(text) as { ClientRequestToken?: string }).ClientRequestToken : undefined; tokens.push(token ? createHash('sha256').update(token).digest('hex').slice(0, 16) : ''); }
       const rule = rules.find(item => item.command === command && item.occurrence === occurrence);
       if (!rule) { trace.push({ command, occurrence, phase: 'pass' }); return delegate.handle(request, options); }
       trace.push({ command, occurrence, phase: rule.phase });
@@ -64,5 +67,5 @@ export function createFaultTransport(delegate: RequestHandler, rules: readonly F
       await delegate.handle(request, options); throw failure(rule);
     },
   };
-  return { handler: handler as unknown as RequestHandler, trace };
+  return { handler: handler as unknown as RequestHandler, trace, tokens };
 }

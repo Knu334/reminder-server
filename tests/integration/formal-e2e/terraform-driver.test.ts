@@ -6,7 +6,7 @@ import { PassThrough, Readable } from 'node:stream';
 import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { mkdtemp, readFile, rm, unlink } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, unlink, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import fsPromises from 'node:fs/promises';
@@ -63,7 +63,8 @@ void test('default endpoint is rejected before public-source preparation', async
   t.after(() => rm(directory, { recursive: true, force: true }));
   const source = await import('../../../scripts/e2e/terraform-source.ts').catch(() => undefined);
   assert.equal(typeof source?.prepareProductionRoots, 'function');
-  await assert.rejects(source!.prepareProductionRoots({ endpoint: 'https://amazonaws.com' as 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map([['floci', '8.8.8.8']]) }, join(directory, 'roots')));
+  await assert.rejects(source!.prepareProductionRoots({ endpoint: 'https://amazonaws.com' as 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map([['floci', '8.8.8.8']]) }, join(directory, 'roots')), /LOCAL_TARGET_REJECTED/);
+  await assert.rejects(stat(join(directory, 'roots')), { code: 'ENOENT' }, 'nothing was prepared before the rejection');
 });
 
 void test('unknown automatically loaded variable names are rejected before their contents are read', async t => {

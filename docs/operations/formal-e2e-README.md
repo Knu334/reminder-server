@@ -17,7 +17,7 @@
 | 目的 | コマンド | 要する時間 |
 | --- | --- | --- |
 | 全体（E、L、Iのすべて。offlineの試験の後にFlociの全suiteを実行する） | `npm test` | Flociが必要。約15分（offline約1分＋全suite約14分。実測は後述の枠に記す）。Flociが無いとpreflightで終了する（exit 2） |
-| Flociを使わないoffline試験（runtime、operations、delivery、結合） | `npm run test:offline` | 数十秒〜1分。Flociは不要 |
+| Flociを使わないoffline試験（runtime、operations、delivery、結合、`test:e2e:harness`） | `npm run test:offline` | 数十秒〜1分。Flociは不要 |
 | offlineの結合試験（layer I、E2E harness、本書の対応表照合）だけ | `npm run test:integration:e2e` | 約5秒 |
 | Flociの全suite（E、L、I。Floci必須group全て、TF caseを含む） | `npm run test:e2e:floci` | 約12〜15分（refresh.7までの実測751〜833秒。layer Iの実行時間は含まない） |
 | Terraform構築だけの診断 | `npm run test:e2e:terraform` | 構築は約2分（実測128秒） |
@@ -30,13 +30,14 @@ suite名は `harness`、`terraform`、`fixture`、`auth`、`api`、`storage`、`
 
 ## layer Iの判定（2026-10-12のユーザー判断）
 
-layer Iの24件は、同じrunの中で、`offlineEvidence`（`tests/e2e/floci/support/cases.ts`）に書いた試験fileを子processの `node --test` で実行し、その実際の結果から判定する。Flociの設定gateやsmokeの結果には依存しない。
+layer Iの24件は、同じrunの中で、`offlineEvidence`（`tests/e2e/floci/support/cases.ts`）に書いた試験fileを子processの `node --test` で実行し、その実際の結果から判定する。Flociの設定gateやsmokeの結果には依存しない。ただし、全体または混在の選択では、runの最初のpreflight（Flociのhealthなど）が失敗するとI caseも実行されず、not-run（preflight-failed）で終了コードは2になる。
 
 - 各caseに対応づけた試験名ごとに、同名、または語の区切りで続く名前の試験（`STORE-06/…-i:` のような接頭辞の書き方を含む）が一つ以上実行され、対応するすべての試験が合格したときだけpassになる。
 - 対応する試験が実行されなければfail（`offline-test-missing`）。対応する試験が失敗、skip、todo、cancelledならfail（`offline-test-failed`）。
-- 子processが試験の失敗以外の理由で異常終了、timeout、中断、または報告を読めなかった場合は、そのfileに対応するcaseがすべてfail（`offline-run-failed`）になる。
+- 子processが試験の失敗以外の理由で異常終了、timeout、中断、または報告を読めなかった場合は、そのfileに対応するcaseがすべてfail（`offline-run-failed`）になる。ここには、試験が合格した後のprocess終了（`process.exit`）や、試験の終了後に起きた未捕捉の例外も含まれる（子processにはfileの絶対pathを渡し、fileそのものの失敗を示す報告を検出する）。対応づけた試験名が一つも無いcaseと、試験名の一覧が空のcaseは、passにならずfail（`offline-test-missing`）になる。
+- caseごとの各assertionの状態は、そのcaseに対応づけた全試験名の判定（全て合格か）から導いた同じ状態である。assertionごとに別々に測ったものではない。試験名ごとの件数は保存しない（evidenceの固定項目を弱めないため）。per-I-caseの合格は、対応づけた試験の集まりが全て合格したことを意味する。
 - 報告は子processの標準出力をメモリ上で読むだけで、生の出力、ログ、環境は保存も表示もしない。evidenceには固定語彙の結果だけが残る。
-- runの取消または予算切れで始められなかった場合は、not-run（budget-exhausted）であり、passにはならない。
+- runの取消または予算切れで始められなかった場合は、not-run（budget-exhausted、phaseはoffline）であり、passにはならない。caseの所要時間（durationMs）は、対応づけた各fileの実行時間の合計である。同じfileを共有するcaseは、同じfileの時間をそれぞれ数える。
 - layer Iだけを選んだ実行（`--case` または `--suite`）は、Floci、Terraform、fixtureに触れず、構築も回収も行わない。
 
 実測値（`npm test` 全体のrun ID、件数、所要時間）は、Flociでの再実行の後にここへ追記する。

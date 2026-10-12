@@ -123,3 +123,5 @@ latency. Historical audit/approval material remains historical.
 - layer Iがliveで実行されず、未対応3件があるため、正式E2Eはliveの実行としては完了と言えない。S3のTLS・署名・期限の強制は未検証のままである。
 - Floci patchのJava回帰試験は、Temurin JDK 25で実行し、refresh.7の対象11クラスが300/300合格した。上流のDocker依存の試験は実行していない。
 - 実AWS、IAMの強制、PITR、Chromeは対象外であり、別途の承認が必要である。
+
+補記（2026-10-12）: `npm test` は、offline試験の後にFlociの全suite（約15分、`artifacts/` にevidenceを書く）を実行する。上の「README verification block」でFlociが使えない場合は、`npm test` の代わりに、Floci無しの `npm run test:offline` を実行する。

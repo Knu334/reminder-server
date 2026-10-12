@@ -6,7 +6,7 @@
     "test:runtime": "tsx --test tests/runtime/*.test.ts",
     "test:operations": "tsx --test tests/operations/*.test.ts",
     "test:delivery": "tsx --test tests/delivery/*.test.ts",
-    "test:offline": "npm run test:runtime && npm run test:operations && npm run test:delivery && npm run test:integration:e2e",
+    "test:offline": "npm run test:runtime && npm run test:operations && npm run test:delivery && npm run test:integration:e2e && npm run test:e2e:harness",
     "test": "npm run test:offline && npm run test:e2e:floci",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
@@ -27,6 +27,7 @@
     "release:workflow": "tsx scripts/release/workflow.ts",
     "e2e:preflight": "tsx scripts/e2e/preflight.ts",
     "test:integration:e2e": "tsx --test tests/integration/formal-e2e/*.test.ts",
+    "test:e2e:harness": "tsx --test tests/e2e/floci/*.test.ts",
     "test:e2e:floci": "tsx scripts/e2e/run.ts --layer floci",
     "test:e2e:terraform": "tsx scripts/e2e/run.ts --layer terraform"
   },
