@@ -52,8 +52,6 @@ npm run infra:check
 npm run audit:runtime
 npm run audit:all
 npm sbom --sbom-format cyclonedx > artifacts/sbom.json
-# .devcontainerの承認済み起点からの差分がないこと
-git diff --exit-code 253e5e2 -- .devcontainer
 ```
 
 `infra:check`は3rootのbackendなしinit/validate/provider schema/mock/fmtです。

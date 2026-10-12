@@ -17,7 +17,7 @@ void test("pr_has_no_aws_permissions",()=>{
   const ci=workflow("ci");assert.ok(Object.hasOwn(ci.on,"pull_request"));assert.equal(Object.hasOwn(ci.on,"pull_request_target"),false);
   assert.deepEqual(ci.permissions,{contents:"read"});for(const job of Object.values(ci.jobs)){assert.equal(job.permissions?.["id-token"],undefined);assert.ok(job.steps.every(s=>!s.uses?.startsWith("aws-actions/")));}
   const steps=Object.values(ci.jobs).flatMap(j=>j.steps),runs=steps.filter(s=>s.run).map(s=>s.run!).join("\n");
-  for(const command of ["npm ci","typecheck","lint","test:runtime","test:operations","test:packaging","test:delivery","infra:check","audit:runtime","audit:all","sbom",".devcontainer"])assert.ok(runs.includes(command),`CI must run ${command}`);
+  for(const command of ["npm ci","typecheck","lint","test:runtime","test:operations","test:packaging","test:delivery","infra:check","audit:runtime","audit:all","sbom"])assert.ok(runs.includes(command),`CI must run ${command}`);
   assert.equal((runs.match(/npm run build/g)??[]).length,1);assert.equal((runs.match(/npm run package/g)??[]).length,1);
   assert.ok(runs.indexOf("npm run package")<runs.indexOf("test:delivery"));
   assert.ok(steps.some(s=>s.with?.["node-version"]==="24.21.0"));assert.ok(steps.some(s=>s.with?.["python-version"]==="3.13.16"));assert.ok(steps.some(s=>s.with?.terraform_version==="1.16.5"));

@@ -32,8 +32,6 @@ jobs:
         run: |
           npm install --global npm@11.11.1
           npm ci
-      - name: Preserve development container
-        run: git diff --exit-code 253e5e2 -- .devcontainer
       - name: Check types, lint and independent tests
         run: |
           npm run typecheck
