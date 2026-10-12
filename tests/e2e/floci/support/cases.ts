@@ -372,8 +372,8 @@ const authGroups = new Map<string, string>([
 export function caseAuthId(def: { id: string; suite: string }): string { return def.suite === 'api' ? authGroups.get(def.id) ?? def.id : def.id; }
 
 /**
- * Offline evidence for every layer-I case. A live Floci run never executes these cases (they stay `not-run` there);
- * `npm run test:integration:e2e` (and, where named, `npm test`) does. Each title must occur in the named test file.
+ * Offline evidence for every layer-I case. The E2E run (scripts/e2e/offline-evidence.ts) executes each named file and judges the case
+ * from the real result of every title: an executed test whose name equals the title or continues it after a word boundary (titleMatches).
  */
 export type OfflineLink = { file: string; titles: string[] };
 const harnessFile = 'tests/integration/formal-e2e/harness.test.ts';
@@ -400,7 +400,7 @@ export const offlineEvidence: Record<string, OfflineLink[]> = {
   'CLEAN-03/exact-lease-boundary-i': [{ file: cleanupFile, titles: ['clean_03_deleting_lease_reclaimed_at_expiry_and_new_lease_20_minutes'] }],
   'CLEAN-04/stale-gsi-and-claim-race-i': [{ file: cleanupFile, titles: ['clean_04_stale_gsi_rows_skipped_without_claim_or_delete', 'clean_04_upload_during_claim_race_is_protected'] }, { file: 'tests/runtime/cleanup.test.ts', titles: ['stale_index_and_commit_race_cannot_delete'] }],
   'CLEAN-07/page-abort-resume-i': [{ file: cleanupFile, titles: ['clean_07_abort_mid_page_keeps_page_start_cursor_and_resume_has_one_marker_each'] }, { file: 'tests/runtime/cleanup.test.ts', titles: ['partial_page_replays_without_skipping', 'late_gsi_candidate_is_seen_next_invocation_after_partition_end'] }],
-  'CLEAN-08/limits-and-resume-i': [{ file: cleanupFile, titles: ['clean_08_runtime_limit_tests_retained_by_name', 'clean_08_600_second_cap_stops_new_work_then_later_invoke_finishes', 'limits_candidates_deletes_time_and_parallelism'] }],
+  'CLEAN-08/limits-and-resume-i': [{ file: cleanupFile, titles: ['clean_08_runtime_limit_tests_retained_by_name', 'clean_08_600_second_cap_stops_new_work_then_later_invoke_finishes'] }, { file: 'tests/runtime/cleanup.test.ts', titles: ['limits_candidates_deletes_time_and_parallelism'] }],
   'CLEAN-09/fault-matrix-i': [{ file: cleanupFile, titles: ['clean_09_marker_with_lost_response_found_by_head_not_repeated', 'clean_09_delete_never_sent_retried_once_with_one_marker', 'clean_09_checkpoint_failure_fails_invocation_without_heartbeat', 'clean_09_metric_failure_fails_invocation_after_checkpoint_saved', 'clean_09_heartbeat_only_after_saved_checkpoint_and_completed_run', 'no_permanent_version_delete_and_trace_can_see_one'] }, { file: 'tests/runtime/cleanup.test.ts', titles: ['unknown_claim_and_complete_outcomes_are_reconciled'] }],
   'STORE-07/transaction-uncertain-outcomes-i': [{ file: faultsFile, titles: ['store_07_commit_response_lost_is_confirmed_by_strong_read_without_a_second_send_or_double_count', 'store_07_commit_before_send_resends_the_same_command_and_commits_exactly_once', 'store_07_reconciliation_read_failure_is_503_while_the_committed_item_image_and_counter_stay_protected', 'store_07_rate_failure_before_and_after_the_send_is_503_and_never_retried_into_a_second_increment'] }],
   'IMG-08/real-adapter-fault-positions-i': [{ file: faultsFile, titles: ['img_08_put_before_send_is_503_with_one_tracked_pending_job_and_no_object', 'img_08_put_response_lost_leaves_one_unrecorded_pending_key_and_never_puts_that_key_again', 'img_08_upload_record_failure_leaves_the_object_under_a_pending_job_and_commits_nothing', 'img_08_commit_failure_never_exposes_or_deletes_the_image_and_keeps_the_pending_job_for_cleanup'] }],

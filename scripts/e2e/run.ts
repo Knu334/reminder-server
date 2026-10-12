@@ -16,12 +16,12 @@ import '../../tests/e2e/floci/support/operation-cases.ts';
 import '../../tests/e2e/floci/support/logging-cases.ts';
 import '../../tests/e2e/floci/support/scheduler-cases.ts';
 
-export const deadlines = { run: 75 * 60_000, cleanup: 15 * 60_000, total: 90 * 60_000, http: 30_000, terraform: 10 * 60_000, authExpiry: 330_000, logs: 60_000, scheduler: 90_000, cleanupInvoke: 700_000 } as const;
+export const deadlines = { run: 75 * 60_000, cleanup: 15 * 60_000, total: 90 * 60_000, http: 30_000, terraform: 10 * 60_000, authExpiry: 330_000, logs: 60_000, scheduler: 90_000, cleanupInvoke: 700_000, offline: 5 * 60_000 } as const;
 export class RunBudget {
   private readonly started: number;
   private cleanupStarted: number | undefined;
   constructor(private readonly clock: () => number = () => performance.now()) { this.started = clock(); }
-  allow(phase: 'http' | 'terraform' | 'authExpiry' | 'logs' | 'scheduler' | 'cleanupInvoke'): number {
+  allow(phase: 'http' | 'terraform' | 'authExpiry' | 'logs' | 'scheduler' | 'cleanupInvoke' | 'offline'): number {
     if (this.cleanupStarted !== undefined) return 0;
     return this.clock() - this.started + deadlines[phase] <= deadlines.run ? deadlines[phase] : 0;
   }
@@ -149,12 +149,20 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
     const evidence = await createEvidence(selected, join(process.cwd(), 'artifacts', 'formal-e2e', `e2e-${randomUUID()}`));
     await writeFile(join(evidenceContext(evidence).directory, 'inventory.json'), JSON.stringify(inventory, null, 2) + '\n', { mode: 0o600 });
     let stack: ProvisionedStack | undefined; let fixture: E2EFixture | undefined; let phase = 'preflight';
+    // Layer I is judged from the real offline test results (user decision 2026-10-12), whatever the Floci gate says.
+    const integration = selected.filter(def => def.layer === 'I');
+    const live = selected.filter(def => def.layer !== 'I');
     try {
+      if (!live.length) {
+        // An I-only selection needs no Floci, Terraform or fixture: nothing is probed or constructed.
+        phase = 'offline'; await runIntegrationCases(evidence, integration, { budget, signal: controller.signal });
+      } else {
       const { preflight } = await import('./preflight.ts');
       const target = await preflight(result => recordProcess(evidence, result));
+      phase = 'offline'; await runIntegrationCases(evidence, integration, { budget, signal: controller.signal });
+      phase = 'provision';
       const definition = layer === 'terraform' ? selected.find(def => def.id === 'TF-01/apply') : inventory.find(def => def.id === 'TF-01/apply');
       if (definition) {
-        phase = 'provision';
         if (!budget.allow('terraform') || controller.signal.aborted) await evidence.record({ id: definition.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'budget-exhausted' });
         else {
           const construct = async () => {
@@ -170,8 +178,8 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
       if (layer !== 'terraform' && stack?.constructionOutputs.length === 4) {
         phase = 'fixture'; const { createRunFixture, readDeployedSettings } = await import('../../tests/e2e/floci/support/fixture.ts');
         fixture = await createRunFixture(stack, evidence, { budget, signal: controller.signal });
-        const ready = await runFixturePrerequisites(evidence, selected, fixture);
-        const remaining = selected.filter(def => !['TF-01/apply', 'TF-03/settings', 'TF-03/settings-final', 'OBS-02/smoke', 'OBS-03/gateway-refusal', 'OBS-04/gateway-delivery'].includes(def.id));
+        const ready = await runFixturePrerequisites(evidence, live, fixture);
+        const remaining = live.filter(def => !['TF-01/apply', 'TF-03/settings', 'TF-03/settings-final', 'OBS-02/smoke', 'OBS-03/gateway-refusal', 'OBS-04/gateway-delivery'].includes(def.id));
         const executable = remaining.filter(def => caseActions.has(def.id));
         if (ready && executable.length) {
           const { createFixture, fixtureState, fixtureStates } = await import('../../tests/e2e/floci/support/fixture.ts');
@@ -187,13 +195,14 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
           suiteErrors += suiteResult.errors;
         }
         await recordUnstarted(evidence, remaining, ready);
-        const finalSettings = selected.find(def => def.id === 'TF-03/settings-final');
+        const finalSettings = live.find(def => def.id === 'TF-03/settings-final');
         const { fixtureState } = await import('../../tests/e2e/floci/support/fixture.ts');
         if (fixtureState(fixture).settingsComplete) {
           if (finalSettings) await runCase(finalSettings, evidence, async recorder => { await readDeployedSettings(fixture!); for (const output of finalSettings.outputs) recorder.recordOutput({ kind: output.kind, status: 'pass', assertions: output.assertions.map(name => ({ name, status: 'pass' })) }); });
           else await readDeployedSettings(fixture);
         } else if (finalSettings) await evidence.record({ id: finalSettings.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'prerequisite-failed' });
-      } else await recordConstructionDependents(evidence, selected, stack);
+      } else await recordConstructionDependents(evidence, live, stack);
+      }
     } catch {
       driverFailed = true; exit = phase === 'preflight' ? 2 : 1;
       for (const def of selected) { try { await evidence.record({ id: def.id, status: 'not-run', phase: phase === 'preflight' ? 'preflight' : 'provision', durationMs: 0, reason: phase === 'preflight' ? 'preflight-failed' : 'prerequisite-failed' }); } catch (error) { if (!(error instanceof Error) || error.message !== 'INVALID_CASE_TRANSITION') throw error; } }
@@ -235,6 +244,13 @@ export async function runSuiteCase(evidence: Evidence, def: CaseDefinition, suit
 /** Cases never started stay not-run: prerequisite-failed when the settings/smoke gate failed, implementation-pending when no action exists. */
 export async function recordUnstarted(evidence: Evidence, remaining: CaseDefinition[], ready: boolean): Promise<void> {
   for (const def of remaining.filter(def => !ready || !caseActions.has(def.id))) await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: ready ? 'implementation-pending' : 'prerequisite-failed' });
+}
+
+/** Run the selected layer-I cases from their offline test files. Cancellation or a spent budget leaves them not-run (budget-exhausted), never passed. */
+export async function runIntegrationCases(evidence: Evidence, selected: CaseDefinition[], options: { budget: RunBudget; signal: AbortSignal }): Promise<void> {
+  if (!selected.length) return;
+  const { runOfflineEvidence } = await import('./offline-evidence.ts');
+  await runOfflineEvidence(evidence, selected, { signal: options.signal, allow: () => options.budget.allow('offline') });
 }
 
 /** The one run-end disposal: the fixture owns SDK recovery and Terraform teardown, so it is called exactly once. */

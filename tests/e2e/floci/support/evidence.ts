@@ -5,8 +5,8 @@ import type { CaseDefinition, CaseRecorder, CaseResult, Evidence, LogCheckResult
 import { localRequest } from './transport.ts';
 
 const kinds = ['http', 'dynamodb', 's3', 'logs'] as const;
-const phases = new Set(['inventory', 'preflight', 'provision', 'input', 'outputs', 'logs', 'complete', 'cleanup']);
-const reasons = new Set(['implementation-pending', 'preflight-failed', 'prerequisite-failed', 'budget-exhausted', 'action-failed', 'output-mismatch', 'logs-pending', 'logs-missing', 'observer-failed', 'out-of-scope', 'gateway-delivery-unsupported', 'scheduler-trigger-unsupported', 'signature-enforcement-unsupported', 'hosted-revoke-unsupported', 'required-api-unsupported']);
+const phases = new Set(['inventory', 'preflight', 'provision', 'input', 'outputs', 'logs', 'complete', 'cleanup', 'offline']);
+const reasons = new Set(['implementation-pending', 'preflight-failed', 'prerequisite-failed', 'budget-exhausted', 'action-failed', 'output-mismatch', 'logs-pending', 'logs-missing', 'observer-failed', 'out-of-scope', 'gateway-delivery-unsupported', 'scheduler-trigger-unsupported', 'signature-enforcement-unsupported', 'hosted-revoke-unsupported', 'required-api-unsupported', 'offline-test-missing', 'offline-test-failed', 'offline-run-failed']);
 const compatibilityReasons = new Set(['gateway-delivery-unsupported', 'scheduler-trigger-unsupported', 'signature-enforcement-unsupported', 'hosted-revoke-unsupported']);
 const codes = new Set(['INVALID_JSON', 'INVALID_INPUT', 'UNSUPPORTED_MEDIA_TYPE', 'PAYLOAD_TOO_LARGE', 'LEGACY_API_REMOVED', 'REMINDER_NOT_FOUND', 'THUMBNAIL_NOT_FOUND', 'INVALID_THUMBNAIL', 'THUMBNAIL_TOO_LARGE', 'OWNER_STORAGE_LIMIT_EXCEEDED', 'INVALID_LIMIT', 'INVALID_CURSOR', 'PRECONDITION_REQUIRED', 'PRECONDITION_FAILED', 'METHOD_NOT_ALLOWED', 'RATE_LIMIT_EXCEEDED', 'SERVICE_UNAVAILABLE', 'UNAUTHORIZED', 'FORBIDDEN', 'FOREIGN_KEY_COMPOSITE', 'FOREIGN_SIGNATURE_VERIFIABLE']);
 const label = /^[a-zA-Z0-9][a-zA-Z0-9/_.-]{0,159}$/;

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createEvidence } from '../../e2e/floci/support/evidence.ts';
 import { definitions, offlineEvidence, requirementEvidence } from '../../e2e/floci/support/cases.ts';
 import { claimsFullCompletion, recordConstructionDependents } from '../../../scripts/e2e/run.ts';
+import { titleMatches } from '../../../scripts/e2e/offline-evidence.ts';
 import type { CaseDefinition, OutputResult, RunSummary } from '../../e2e/floci/support/types.ts';
 
 const root = process.cwd();
@@ -78,11 +79,13 @@ void test('every_integration_case_is_linked_to_existing_offline_evidence', () =>
     for (const link of links) {
       assert.ok(existsSync(join(root, link.file)), `${def.id}: ${link.file} is missing`);
       const text = read(link.file); assert.ok(link.titles.length > 0, def.id);
-      for (const title of link.titles) assert.ok(text.includes(title), `${def.id}: "${title}" not found in ${link.file}`);
+      // The E2E run judges each title from an executed test: the title must equal a registered test name or continue it after a word boundary.
+      const names = [...text.matchAll(/\b(?:void\s+)?(?:test|it)\(\s*(['"`])((?:\\.|(?!\1).)*)\1/g)].map(match => match[2]!);
+      for (const title of link.titles) assert.ok(names.some(name => titleMatches(title, name)), `${def.id}: "${title}" matches no test in ${link.file}`);
     }
-    // A live run never executes these; the report says so instead of showing them as passed.
+    // The E2E run judges these from the real offline results: a recorded row is pass, or still not-run in a report from before that change; never fail-as-pass or unsupported.
     const row = resultRows.find(item => resultId(item) === def.id)!;
-    assert.equal(row[4], 'not-run', `${def.id} is recorded not-run in the live inventory`);
+    assert.ok(['pass', 'not-run'].includes(row[4]!), `${def.id} is recorded pass or (older report) not-run, not ${row[4]}`);
     for (const link of links) assert.ok(row[5]!.includes(link.file), `${def.id} result row cites ${link.file}`);
   }
   for (const [id, files] of Object.entries(requirementEvidence)) {

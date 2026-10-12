@@ -356,7 +356,7 @@ Task 1〜11の各taskはreview済みで、live中に見つかったharnessの欠
 | `CLEAN-03/exact-lease-boundary-i` | I | cleanup | behavior | not-run | liveでは未実行（implementation-pending）。offline: `tests/integration/formal-e2e/cleanup-resume.test.ts` |
 | `CLEAN-04/stale-gsi-and-claim-race-i` | I | cleanup | behavior | not-run | liveでは未実行（implementation-pending）。offline: `tests/integration/formal-e2e/cleanup-resume.test.ts`、`tests/runtime/cleanup.test.ts` |
 | `CLEAN-07/page-abort-resume-i` | I | cleanup | behavior | not-run | liveでは未実行（implementation-pending）。offline: `tests/integration/formal-e2e/cleanup-resume.test.ts`、`tests/runtime/cleanup.test.ts` |
-| `CLEAN-08/limits-and-resume-i` | I | cleanup | behavior | not-run | liveでは未実行（implementation-pending）。offline: `tests/integration/formal-e2e/cleanup-resume.test.ts` |
+| `CLEAN-08/limits-and-resume-i` | I | cleanup | behavior | not-run | liveでは未実行（implementation-pending）。offline: `tests/integration/formal-e2e/cleanup-resume.test.ts`、`tests/runtime/cleanup.test.ts` |
 | `CLEAN-09/fault-matrix-i` | I | cleanup | behavior | not-run | liveでは未実行（implementation-pending）。offline: `tests/integration/formal-e2e/cleanup-resume.test.ts`、`tests/runtime/cleanup.test.ts` |
 | `OPS-01/two-owners-import-verify-publish` | L | operations | behavior | pass | e2e-4e5b822a |
 | `OPS-02/interrupted-import-resumes-without-duplicates` | L | operations | behavior | pass | e2e-4e5b822a |
