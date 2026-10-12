@@ -57,7 +57,7 @@ void test("skipped_registration_successful_plan_still_allows_only_authorized_unc
   }
 });
 void test("all_actions_pinned_and_apply_not_cancelled",()=>{
-  for(const name of ["ci","deploy"]){const w=workflow(name);for(const job of Object.values(w.jobs))for(const s of job.steps)if(s.uses)assert.match(s.uses,/@[0-9a-f]{40}$/);}
+  for(const name of ["ci","deploy","floci-e2e"]){const w=workflow(name);for(const job of Object.values(w.jobs))for(const s of job.steps)if(s.uses)assert.match(s.uses,/@[0-9a-f]{40}$/);}
   const d=workflow("deploy");assert.equal(d.concurrency?.["cancel-in-progress"],false);assert.equal(d.concurrency?.group,"reminder-production");assert.deepEqual(d.permissions,{contents:"read"});
   const roleVars:string[]=[];for(const [name,job] of Object.entries(d.jobs)){const aws=job.steps.filter(s=>s.uses?.startsWith("aws-actions/"));assert.equal(job.permissions?.["id-token"]==="write",aws.length>0);if(aws.length){assert.ok(["register","plan","apply"].includes(name));assert.equal(aws.length,1);roleVars.push(String(aws[0]!.with?.["role-to-assume"]));assert.equal(aws[0]!.with?.["aws-access-key-id"],undefined);assert.ok(job.if?.includes("needs.authorize.result == 'success'"));}}
   assert.equal(new Set(roleVars).size,3);
@@ -68,8 +68,8 @@ void test("private_custody_before_oidc_and_one_day_transfer",()=>{
   assert.ok(uploads>=2);
 });
 void test("maintenance_or_user_admin_workflow_absent",()=>{
-  assert.deepEqual(readdirSync(".github/workflows").filter(f=>/\.ya?ml$/.test(f)).sort(),["ci.yml","deploy.yml"]);
-  for(const name of ["ci","deploy"]){const w=workflow(name);assert.ok(!/Admin(Create|Delete|Initiate|Respond)|migrate:json|recovery:verify|maintenance|docker compose/i.test(JSON.stringify(w)));}
+  assert.deepEqual(readdirSync(".github/workflows").filter(f=>/\.ya?ml$/.test(f)).sort(),["ci.yml","deploy.yml","floci-e2e.yml"]);
+  for(const name of ["ci","deploy","floci-e2e"]){const w=workflow(name);assert.ok(!/Admin(Create|Delete|Initiate|Respond)|migrate:json|recovery:verify|maintenance|docker compose/i.test(JSON.stringify(w)));}
   const dep=parseDocument(readFileSync(".github/dependabot.yml","utf8")).toJS() as {updates:Array<{"package-ecosystem":string;directory:string;schedule:{interval:string}}>};assert.deepEqual(dep.updates.map(u=>u["package-ecosystem"]).sort(),["github-actions","npm","terraform","terraform","terraform"]);for(const u of dep.updates){assert.equal(u.schedule.interval,"weekly");assert.ok(!u.directory.includes(".devcontainer"));}
 });
 
@@ -91,4 +91,14 @@ void test("bootstrap fixture subjects match the actual three workflow environmen
   const subject=new RegExp(`${role}\\s*=\\s*"([^"]+)"`).exec(subjects)![1];
   assert.equal(subject,`repo:synthetic/reminder-server:environment:${d.jobs[job]!.environment}`);
  }
+});
+
+void test("floci_e2e_runs_the_full_local_suite_without_aws_or_secrets",()=>{
+  const w=workflow("floci-e2e");assert.equal(Object.hasOwn(w.on,"pull_request_target"),false);assert.deepEqual(w.permissions,{contents:"read"});
+  assert.ok(!/secrets\.|AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|PROFILE)/.test(JSON.stringify(w)));
+  for(const job of Object.values(w.jobs)){assert.equal(job.permissions,undefined);assert.ok(job.steps.every(s=>!s.uses?.startsWith("aws-actions/")));}
+  const steps=Object.values(w.jobs).flatMap(j=>j.steps),runs=steps.filter(s=>s.run).map(s=>s.run!).join("\n");
+  assert.ok(runs.includes("-f .github/floci/Dockerfile"));assert.ok(runs.includes("--build-context patch=.devcontainer/floci"));
+  assert.ok(runs.indexOf("npm run package")<runs.indexOf("npm test"));
+  assert.ok(steps.some(s=>s.with?.["node-version"]==="24.21.0"));assert.ok(steps.some(s=>s.with?.["python-version"]==="3.13.16"));assert.ok(steps.some(s=>s.with?.terraform_version==="1.16.5"));
 });

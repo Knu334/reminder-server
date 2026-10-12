@@ -9,6 +9,7 @@ import { createEvidence, runCase, flushPendingLogs, recordProcess } from '../../
 import { localRequest } from '../../e2e/floci/support/transport.ts';
 import { definitions } from '../../e2e/floci/support/cases.ts';
 import { runMain, runChild, childEnvironment, RunBudget } from '../../../scripts/e2e/run.ts';
+import { acceptedFlociVersion } from '../../../scripts/e2e/preflight.ts';
 import type { CaseDefinition, Evidence, LocalTarget, OutputResult, PendingLogCheck, LogExpectation } from '../../e2e/floci/support/types.ts';
 
 const target: LocalTarget = { endpoint: 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map([['floci', '172.18.0.2']]) };
@@ -526,4 +527,9 @@ void test('image_url_fetch_accepts_the_path_style_url_floci_issues_on_its_own_pi
   for (const host of ['172.18.0.9', '169.254.169.254']) await assert.rejects(fetchOwnedImage(imageFixture, signed(host, `/owned-images/${imageRef.key}`), imageRef), /IMAGE_URL_REJECTED|LOCAL_TARGET_REJECTED/);
   await assert.rejects(fetchOwnedImage(imageFixture, signed('172.18.0.2', `/other-bucket/${imageRef.key}`), imageRef), /IMAGE_URL_REJECTED/);
   assert.equal(seen.length, 1);
+});
+
+void test('preflight_accepts_only_the_patched_native_or_ci_jvm_floci', () => {
+  for (const version of ['2.2.0-local-refresh.7-native', '2.2.0-local-refresh.7-jvm']) assert.equal(acceptedFlociVersion(version), true, version);
+  for (const version of ['2.2.0', '2.2.0-local-refresh.6-native', '2.2.0-local-refresh.7', '2.2.0-local-refresh.7-jvm ', 7, undefined]) assert.equal(acceptedFlociVersion(version), false, String(version));
 });

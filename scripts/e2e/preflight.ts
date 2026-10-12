@@ -6,6 +6,10 @@ import type { LocalTarget } from '../../tests/e2e/floci/support/types.ts';
 import { runChild } from './run.ts';
 import type { ProcessEvidence } from '../../tests/e2e/floci/support/evidence.ts';
 
+// The development container runs the native image; CI runs the same source and patch on the JVM.
+const flociVersions = new Set(['2.2.0-local-refresh.7-native', '2.2.0-local-refresh.7-jvm']);
+export function acceptedFlociVersion(version: unknown): boolean { return typeof version === 'string' && flociVersions.has(version); }
+
 export async function preflight(record?: (result: ProcessEvidence) => Promise<void>): Promise<LocalTarget> {
   try {
     if (process.version !== 'v24.21.0') throw new Error('version');
@@ -25,7 +29,7 @@ export async function preflight(record?: (result: ProcessEvidence) => Promise<vo
     const health = await localRequest(target, new URL('/_localstack/health', target.endpoint), {});
     if (health.status !== 200) throw new Error('health');
     const body: unknown = JSON.parse(health.bytes.toString('utf8'));
-    if (!body || typeof body !== 'object' || !('version' in body) || body.version !== '2.2.0-local-refresh.7-native') throw new Error('version');
+    if (!body || typeof body !== 'object' || !('version' in body) || !acceptedFlociVersion(body.version)) throw new Error('version');
     return target;
   } catch { throw new Error('E2E_PREFLIGHT_FAILED'); }
 }

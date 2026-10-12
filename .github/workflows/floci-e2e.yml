@@ -1,0 +1,71 @@
+name: Formal E2E on Floci
+# 正式E2E（E/L/I）をローカルのFloci（JVM build）で実行する。AWSの認証情報は使わない。
+on:
+  push:
+    branches: [ci/floci-e2e]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: floci-e2e-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.13.16'
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: '1.16.5'
+          terraform_wrapper: false
+      - name: Build the patched Floci on the JVM
+        run: docker build -t floci-ci:refresh.7-jvm --build-context patch=.devcontainer/floci -f .github/floci/Dockerfile .github/floci
+      - name: Install locked dependencies
+        run: |
+          npm install --global npm@11.11.1
+          npm ci
+      - name: Prepare the E2E tool directory
+        # E2Eの子プロセスはPATHを継承しないため、固定版のツールをここへ集める。
+        run: |
+          tools=.superpowers/tools/aws-sdd
+          mkdir -p "$tools/bin" "$tools/provider-probe"
+          for tool in node npm npx python3 terraform; do ln -s "$(command -v "$tool")" "$tools/bin/$tool"; done
+          printf 'terraform {\n  required_providers {\n    aws = { source = "hashicorp/aws", version = "= 6.67.0" }\n  }\n}\n' > "$tools/provider-probe/main.tf"
+          terraform -chdir="$tools/provider-probe" init -input=false -backend=false -no-color
+      - name: Start Floci
+        run: |
+          docker network create floci-e2e
+          docker run -d --name floci --hostname floci --network floci-e2e --init \
+            -v /var/run/docker.sock:/var/run/docker.sock --tmpfs /app/data \
+            -e FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS=true -e FLOCI_STORAGE_MODE=memory \
+            -e FLOCI_SERVICES_DOCKER_NETWORK=floci-e2e \
+            floci-ci:refresh.7-jvm
+          for _ in $(seq 60); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' floci)" = healthy ] && break
+            sleep 2
+          done
+          [ "$(docker inspect -f '{{.State.Health.Status}}' floci)" = healthy ]
+          ip="$(docker inspect -f '{{(index .NetworkSettings.Networks "floci-e2e").IPAddress}}' floci)"
+          echo "$ip floci" | sudo tee -a /etc/hosts
+          curl -fsS http://floci:4566/_localstack/health | jq -r .version
+      - name: Build and package before the ZIP-dependent tests
+        run: |
+          npm run build
+          npm run package
+      - name: Run offline tests and the formal E2E
+        run: npm test
+      - name: Show Floci status on failure
+        if: ${{ failure() }}
+        run: |
+          docker ps -a --format '{{.Names}} {{.Image}} {{.Status}}'
+          docker logs --tail 80 floci 2>&1 | grep -E 'ERROR|WARN|Exception' | tail -40 || true
