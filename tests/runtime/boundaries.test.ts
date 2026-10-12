@@ -25,6 +25,34 @@ function rejectsStatus(status: number, action: () => unknown): void {
 }
 function authenticate(value: unknown): string { return requireOwner(parseGatewayEvent(value, config), config, "write"); }
 
+void test("gateway_null_body_is_normalized_as_absent_without_changing_strings", () => {
+  for (const isBase64Encoded of [false, true]) {
+    for (const body of [undefined, null]) {
+      assert.equal(parseGatewayEvent(gatewayEvent({ body, isBase64Encoded }), config).body, undefined);
+    }
+    for (const body of ["", "{}", "e30="]) {
+      assert.equal(parseGatewayEvent(gatewayEvent({ body, isBase64Encoded }), config).body, body);
+    }
+  }
+});
+
+void test("gateway_null_body_support_keeps_other_body_types_invalid", () => {
+  for (const body of [0, 1, false, true, [], {}, ["{}"]]) {
+    assert.throws(() => parseGatewayEvent(gatewayEvent({ body }), config),
+      (error: unknown) => error instanceof ApiError && error.status === 400 && error.code === "INVALID_GATEWAY_EVENT");
+  }
+  for (const overrides of [{ apiId: "other" }, { stage: "other" }]) {
+    rejectsStatus(400, () => parseGatewayEvent(gatewayEvent({ body: null, requestContext: { ...context(), ...overrides } }), config));
+  }
+});
+
+void test("gateway_null_body_is_still_invalid_json_for_authenticated_writes", () => {
+  for (const isBase64Encoded of [false, true]) {
+    assert.throws(() => parseJsonBody(parseGatewayEvent(gatewayEvent({ body: null, isBase64Encoded }), config), config),
+      (error: unknown) => error instanceof ApiError && error.status === 400 && error.code === "INVALID_JSON");
+  }
+});
+
 void test("owner_is_issuer_sub_not_client_or_email", () => {
   assert.equal(ownerIdFor("issuer-a", "sub"), createHash("sha256").update(JSON.stringify(["issuer-a", "sub"]), "utf8").digest("hex"));
   assert.notEqual(ownerIdFor("issuer-a", "sub"), ownerIdFor("issuer-b", "sub"));

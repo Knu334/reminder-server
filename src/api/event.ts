@@ -42,7 +42,7 @@ export function parseGatewayEvent(value: unknown, config: Pick<Config, "expected
       typeof http.method !== "string" || !/^[A-Z]+$/.test(http.method) ||
       (event.routeKey !== "$default" && !event.routeKey.startsWith(`${http.method} /`) && !event.routeKey.startsWith("ANY /")) ||
       typeof context.requestId !== "string" || !context.requestId || typeof http.sourceIp !== "string" ||
-      typeof event.isBase64Encoded !== "boolean" || (event.body !== undefined && typeof event.body !== "string")) return invalidGateway();
+      typeof event.isBase64Encoded !== "boolean" || (event.body !== undefined && event.body !== null && typeof event.body !== "string")) return invalidGateway();
   const headers: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const [key, field] of Object.entries(strings(event.headers))) {
     const name = key.toLowerCase();
@@ -68,7 +68,7 @@ export function parseGatewayEvent(value: unknown, config: Pick<Config, "expected
   }
   return {
     method: http.method, routeKey: event.routeKey, rawPath: event.rawPath, pathParameters, query: strings(event.queryStringParameters), headers,
-    body: event.body as string | undefined, isBase64Encoded: event.isBase64Encoded, requestId: context.requestId, sourceIp: http.sourceIp, jwt,
+    body: event.body === null ? undefined : event.body as string | undefined, isBase64Encoded: event.isBase64Encoded, requestId: context.requestId, sourceIp: http.sourceIp, jwt,
   };
 }
 

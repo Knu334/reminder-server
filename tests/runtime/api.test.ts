@@ -23,6 +23,36 @@ function setup(overrides: Partial<ApiDeps> = {}, config = harnessConfig) {
 }
 const item = { pathParameters: { id: "reminder-1" } };
 
+void test("gateway_null_body_allows_public_health_and_readiness_gets", async () => {
+  const s = setup();
+  for (const path of ["/healthz", "/readyz"]) {
+    const base = event("GET", path) as { requestContext: Record<string, unknown> };
+    const response = await s.call("GET", path, { body: null, requestContext: { ...base.requestContext, authorizer: {} } });
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(json(response), path === "/healthz" ? { healthy: true } : { ready: true });
+  }
+});
+
+void test("gateway_null_body_does_not_skip_authentication_for_protected_gets", async () => {
+  const s = setup();
+  const base = event("GET", "/v2/reminders") as { requestContext: Record<string, unknown> };
+  const response = await s.call("GET", "/v2/reminders", { body: null, requestContext: { ...base.requestContext, authorizer: {} } });
+  assert.equal(response.statusCode, 401);
+  assert.equal(json(response).code, "UNAUTHORIZED");
+  assert.deepEqual(s.h.snapshot().rates, []);
+});
+
+void test("gateway_null_body_does_not_create_a_reminder_without_json", async () => {
+  for (const body of [undefined, null, ""]) {
+    const s = setup();
+    const response = await s.call("POST", "/v2/reminders", { body });
+    assert.equal(response.statusCode, 400);
+    assert.equal(json(response).code, "INVALID_JSON");
+    assert.deepEqual(s.h.snapshot().reminders, []);
+    assert.deepEqual(s.h.snapshot().rates.map(rate => rate.count), [1]);
+  }
+});
+
 void test("v2_crud_returns_contract_and_etags", async () => {
   const s = setup();
   const empty = await s.call("GET", "/v2/reminders"); assert.equal(empty.statusCode, 200); assert.deepEqual(json(empty), { items: [], nextCursor: null });
