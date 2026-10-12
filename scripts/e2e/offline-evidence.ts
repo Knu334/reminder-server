@@ -65,6 +65,12 @@ export function parseJunit(xml: string, spawnedPath?: string): TestOutcome[] | u
   return tests.length ? tests : undefined;
 }
 
+/** A non-zero exit is acceptable only when a test FAILED in the report (skipped/todo tests do not make Node exit non-zero); otherwise the run failed for another reason. */
+export function outcomeOfExit(code: number | null, tests: TestOutcome[] | undefined): FileOutcome {
+  if (!tests || (code !== 0 && !tests.some(test => test.status === 'fail'))) return { kind: 'run-failed' };
+  return { kind: 'tests', tests };
+}
+
 /** Run one test file in a child process (synthetic environment, own process group, timeout and cancellation) and reduce its report to outcomes. */
 export const runOfflineFile: FileRunner = (file, options) => new Promise<FileOutcome>(resolveOutcome => {
   void import('./run.ts').then(({ childEnvironment }) => {
@@ -84,8 +90,7 @@ export const runOfflineFile: FileRunner = (file, options) => new Promise<FileOut
       if (settled) return; settled = true; clearTimeout(timer); options.signal?.removeEventListener('abort', kill);
       const tests = timedOut || overflow ? undefined : parseJunit(stdout, spawned);
       stdout = '';
-      // A non-zero exit is acceptable only when the report itself shows the failing test; otherwise the run failed for another reason.
-      resolveOutcome(!tests || (code !== 0 && !tests.some(test => test.status !== 'pass')) ? { kind: 'run-failed' } : { kind: 'tests', tests });
+      resolveOutcome(outcomeOfExit(code, tests));
     };
     child.on('error', () => finish(null)); child.on('close', finish);
   }, () => resolveOutcome({ kind: 'run-failed' }));

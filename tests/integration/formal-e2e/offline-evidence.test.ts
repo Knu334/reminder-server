@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createEvidence } from '../../e2e/floci/support/evidence.ts';
 import { definitions, offlineEvidence } from '../../e2e/floci/support/cases.ts';
 import { RunBudget, runIntegrationCases } from '../../../scripts/e2e/run.ts';
-import { judgeCase, parseJunit, runOfflineEvidence, runOfflineFile, titleMatches, type FileOutcome, type FileRunner, type TestOutcome } from '../../../scripts/e2e/offline-evidence.ts';
+import { judgeCase, outcomeOfExit, parseJunit, runOfflineEvidence, runOfflineFile, titleMatches, type FileOutcome, type FileRunner, type TestOutcome } from '../../../scripts/e2e/offline-evidence.ts';
 import type { CaseResult } from '../../e2e/floci/support/types.ts';
 
 const clean = { attempted: 0, succeeded: 0, errors: 0, leaks: 0 };
@@ -258,4 +258,16 @@ void test('budget_exhausted_cases_use_the_offline_phase', async t => {
   await runOfflineEvidence(evidence, [caseById(SINGLE)], { runner: runnerFor([SINGLE]).runner, allow: () => 0 });
   const result = (await resultsOf(directory)).get(SINGLE)!;
   assert.deepEqual([result.status, result.phase, result.reason], ['not-run', 'offline', 'budget-exhausted']);
+});
+
+void test('a_non_zero_exit_is_a_tests_outcome_only_when_a_test_failed', () => {
+  const pass: TestOutcome = { name: 'mapped', status: 'pass' };
+  const skipped: TestOutcome = { name: 'other', status: 'not-pass' };
+  const failed: TestOutcome = { name: 'other', status: 'fail' };
+  assert.deepEqual(outcomeOfExit(1, [pass, skipped]), { kind: 'run-failed' }, 'a non-zero exit explained only by skip/todo is unexplained');
+  assert.deepEqual(outcomeOfExit(3, [pass]), { kind: 'run-failed' });
+  assert.deepEqual(outcomeOfExit(null, [pass]), { kind: 'run-failed' });
+  assert.deepEqual(outcomeOfExit(1, [pass, failed]), { kind: 'tests', tests: [pass, failed] }, 'a failing test explains the exit');
+  assert.deepEqual(outcomeOfExit(0, [pass, skipped]), { kind: 'tests', tests: [pass, skipped] });
+  assert.deepEqual(outcomeOfExit(0, undefined), { kind: 'run-failed' });
 });
