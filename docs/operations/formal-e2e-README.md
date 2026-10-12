@@ -86,9 +86,16 @@ processが強制終了（SIGKILL）された場合は、finallyが走らない�
 3. その一覧にあるリソースだけを、Floci（`http://floci:4566`）上で削除する。同じ名前でも、一覧に無いものには触れない。
 4. 削除後に不在を読み戻し、残ったlockを消す。
 
-## CI runnerの準備
+## CIでの実行
 
-GHAのworkflowは変更していない。CIで走らせる場合も、同じ固定版のツール、固定版のパッチ済みFloci、`floci` という名前で解決できるprivate IPv4が必要である。これらを満たすrunnerの用意と、workflowの追加は、別途の承認を必要とする。
+`.github/workflows/floci-e2e.yml` が、`main` へのpushごとに `npm test`（offline試験と正式E2E）を実行する。AWSの認証情報とsecretsは使わず、権限は `contents: read` だけである。
+
+- Flociは `.github/floci/Dockerfile` でbuildする。開発コンテナと同じFloci 2.2.0のcommitとrefresh.7のpatch（`.devcontainer/floci/floci-refresh.patch`）を使い、native-imageではなくJVMで動かす。native buildは数十分と6GBのheapを要し、privateのrunnerに向かないためである。healthのversionは `2.2.0-local-refresh.7-jvm` で、preflightはこれと `-native` だけを受け付ける。
+- Flociは `floci` というhostname、専用のDocker network、`docker.sock` で起動し、runnerの `/etc/hosts` に `floci` のprivate IPv4を書く。
+- 子プロセスはPATHを継承しないため、固定版のnode、npm、Python、Terraformへのsymlinkと、AWS provider 6.67.0を `.superpowers/tools/aws-sdd` に用意する。
+- 2026-10-12の確認run（GHA run 38216808905、E2E run `e2e-8559f77c`）は、268件中265件が合格、失敗0、未実行0、未対応3、`complete` は真、清掃18/18、残存0だった。Flociのbuildは約2分、`npm test` は約17分だった。
+
+JVM版とnative版はsourceとpatchが同じだが、build方式が違う。native版に固有の問題はCIでは検出できないため、開発コンテナでの実行も引き続き使う。CIのrunもFloci上の観測であり、実AWSでの動作の証拠ではない。
 
 ## 今回この手順で実施していないこと
 

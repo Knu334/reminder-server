@@ -68,3 +68,10 @@ Floci本体へのパッチ（refresh.2のSourceAccount、refresh.3のListVersion
 ## 2026-10-12 追記（その2）: 未commitの変更を含まないrun
 
 run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc`（HEAD 6daf48b、`npm test`、exit 0、869秒）は、268件中265件が合格、失敗0、未実行0、未対応3、`complete` は真で、ZIPの `dirtyPaths` は空だった。このrunには、未commitの変更が含まれない。上の「ユーザーの未commitの `src/api/event.ts` を含む」という限界は、e2e-ba02c537以前のrun（e2e-d5c47097、e2e-4e5b822a）についての記録であり、現在の主たるrunには当てはまらない（null-body修正は、ユーザーが6daf48bでcommitした）。その他の限界（未対応3件、実AWS・IAM・TLSの強制・PITR・Chromeの未実行、上流FlociのDocker依存試験の未実行、Flociがエミュレーターであること、layer Iが合成のfakeによるoffline試験の実測であること）は変わらない。判断の経緯は[判断の記録](formal-e2e-decisions.md)にある。
+
+## 2026-10-12 追記（その3）: GHAでの実行
+
+ユーザーの判断により、正式E2Eを `main` へのpushごとにGHAで実行する（`.github/workflows/floci-e2e.yml`、手順は[README](formal-e2e-README.md#ciでの実行)）。上の「GHAの実行は実行していない」は、デプロイ用のworkflowと本番の受け入れについての記述として残る。確認run（GHA run 38216808905、E2E run `e2e-8559f77c`）は、268件中265件が合格、失敗0、未実行0、未対応3、`complete` は真だった。
+
+- CIのFlociはJVM版（`2.2.0-local-refresh.7-jvm`）である。sourceとpatchはnative版と同じだが、native版に固有の問題は検出できない。
+- CIのrunもFloci上の観測であり、実AWS、IAMの強制、TLSの強制の証拠ではない。未対応3件も変わらない。

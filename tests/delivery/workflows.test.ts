@@ -94,7 +94,7 @@ void test("bootstrap fixture subjects match the actual three workflow environmen
 });
 
 void test("floci_e2e_runs_the_full_local_suite_without_aws_or_secrets",()=>{
-  const w=workflow("floci-e2e");assert.equal(Object.hasOwn(w.on,"pull_request_target"),false);assert.deepEqual(w.permissions,{contents:"read"});
+  const w=workflow("floci-e2e");assert.deepEqual(w.on,{push:{branches:["main"]}});assert.deepEqual(w.permissions,{contents:"read"});
   assert.ok(!/secrets\.|AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|SESSION_TOKEN|PROFILE)/.test(JSON.stringify(w)));
   for(const job of Object.values(w.jobs)){assert.equal(job.permissions,undefined);assert.ok(job.steps.every(s=>!s.uses?.startsWith("aws-actions/")));}
   const steps=Object.values(w.jobs).flatMap(j=>j.steps),runs=steps.filter(s=>s.run).map(s=>s.run!).join("\n");

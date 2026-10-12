@@ -2,8 +2,7 @@ name: Formal E2E on Floci
 # 正式E2E（E/L/I）をローカルのFloci（JVM build）で実行する。AWSの認証情報は使わない。
 on:
   push:
-    branches: [ci/floci-e2e]
-  workflow_dispatch:
+    branches: [main]
 permissions:
   contents: read
 concurrency:
