@@ -326,6 +326,24 @@ void test("reviewed_plan_attempt_uses_successful_plan_job_attempt",async()=>{
   assert.throws(()=>d.selectReviewedPlanAttempt({jobs:[job("plan","failure",1),job("register","success",2)]}));
   assert.throws(()=>d.selectReviewedPlanAttempt({jobs:[]}));assert.throws(()=>d.selectReviewedPlanAttempt({}));assert.throws(()=>d.selectReviewedPlanAttempt({jobs:[{name:"plan",conclusion:"success",run_attempt:0}]}));
 });
+void test("reviewed_plan_attempt_reads_every_jobs_page",async()=>{
+  const d=await driver();const job=(name:string,conclusion:string,run_attempt:number)=>({name,conclusion,run_attempt});
+  const filler=(n:number,attempt:number)=>Array.from({length:n},(_,i)=>job(["authorize","register","apply"][i%3]!,"success",attempt));
+  /** jobs API の応答を per_page 件ずつ返す合成のページ。呼ばれたページ番号を記録する。 */
+  const pages=(all:unknown[],perPage=100)=>{const calls:number[]=[];return {calls,get:async(page:number)=>{calls.push(page);return {total_count:all.length,jobs:all.slice((page-1)*perPage,page*perPage)};}};};
+  // 成功した plan が2ページ目にだけある。
+  const second=pages([...filler(100,1),job("plan","success",2)]);
+  assert.equal(d.selectReviewedPlanAttempt(await d.collectReviewedRunJobs(second.get)),2);assert.deepEqual(second.calls,[1,2]);
+  // ページをまたいで成功した試行が複数あれば、最大の試行を選ぶ。
+  const across=pages([job("plan","success",1),...filler(99,1),...filler(50,2),job("plan","success",3),job("plan","failure",4)]);
+  assert.equal(d.selectReviewedPlanAttempt(await d.collectReviewedRunJobs(across.get)),3);assert.deepEqual(across.calls,[1,2]);
+  // 1ページで足りれば次を読まない。
+  const one=pages([job("plan","success",1)]);await d.collectReviewedRunJobs(one.get);assert.deepEqual(one.calls,[1]);
+  // 件数の上限（10ページ）を超える run、途中で空のページ、壊れた応答は拒否する。
+  await assert.rejects(d.collectReviewedRunJobs(pages(filler(1001,1)).get),/too many jobs/);
+  await assert.rejects(d.collectReviewedRunJobs(async(page:number)=>({total_count:150,jobs:page===1?filler(100,1):[]})),/incomplete/);
+  await assert.rejects(d.collectReviewedRunJobs(async()=>({jobs:[]})));
+});
 void test("changed_transfer_digest_derived_show_and_initial_platform_output_mismatch_stop_success",async()=>{
   const a=await approved();try{const f=a.next;
     await assert.rejects(f.d.applyRelease(a.c,{...a.refs,current:{...a.refs.current,manifestSha256:"f".repeat(64)}},a.services),/manifest digest/);assert.equal(ranApply(f),false);

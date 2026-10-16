@@ -59,6 +59,23 @@ export function selectReviewedPlanAttempt(jobs:unknown):number{
   const attempts=jobsResponse.parse(jobs).jobs.filter(j=>j.name==="plan"&&j.conclusion==="success").map(j=>j.run_attempt);
   if(attempts.length===0)throw Error("Reviewed run has no successful plan job");return Math.max(...attempts);
 }
+const JOBS_PER_PAGE=100,MAX_JOBS_PAGES=10;
+const jobsPage=z.object({total_count:z.number().int().nonnegative(),jobs:z.array(z.unknown())});
+/**
+ * jobs API（filter=all）を total_count に達するまでページ順に読み、全 job をまとめて返す。
+ * 100件は1ページの上限であり全件ではないので、成功した plan job が後のページにあっても見落とさない。
+ * 10ページ（1000件）を超える run と、total_count に届く前に空のページが来る応答は拒否する。
+ */
+export async function collectReviewedRunJobs(getPage:(page:number)=>Promise<unknown>):Promise<{jobs:unknown[]}>{
+  const jobs:unknown[]=[];
+  for(let page=1;;page++){
+    const response=jobsPage.parse(await getPage(page));
+    if(response.total_count>JOBS_PER_PAGE*MAX_JOBS_PAGES)throw Error("Reviewed run has too many jobs");
+    jobs.push(...response.jobs);
+    if(jobs.length>=response.total_count)return {jobs};
+    if(response.jobs.length===0||page>=MAX_JOBS_PAGES)throw Error("Reviewed run jobs listing is incomplete");
+  }
+}
 const request=(c:WorkflowContext)=>({root:c.root,commit:c.commit,region:c.region,published:c.published,schedulerEnabled:c.schedulerEnabled});
 function equal(a:unknown,b:unknown):boolean{return JSON.stringify(a)===JSON.stringify(b);}
 function checkedContext(c:WorkflowContext):void{
@@ -313,7 +330,7 @@ export async function workflowMain(argv:string[],inject:WorkflowInjection={}):Pr
       const repo=required("GITHUB_REPOSITORY");if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))throw Error("Invalid repository");
       const get=async(url:string):Promise<unknown>=>{const response=await fetch(url,{headers:{Authorization:`Bearer ${required("DRIVER_GITHUB_TOKEN")}`,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"}});if(!response.ok)throw Error("Reviewed run inaccessible");return response.json();};
       verifyReviewedRunMetadata(await get(`https://api.github.com/repos/${repo}/actions/runs/${reviewedRun}`),repo);
-      const attempt=selectReviewedPlanAttempt(await get(`https://api.github.com/repos/${repo}/actions/runs/${reviewedRun}/jobs?filter=all&per_page=100`));
+      const attempt=selectReviewedPlanAttempt(await collectReviewedRunJobs(page=>get(`https://api.github.com/repos/${repo}/actions/runs/${reviewedRun}/jobs?filter=all&per_page=${JOBS_PER_PAGE}&page=${page}`)));
       await writeFile(required("GITHUB_OUTPUT"),`reviewed_attempt=${attempt}\n`,{flag:"a"});
     }
     return;
