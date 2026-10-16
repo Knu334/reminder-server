@@ -9,6 +9,7 @@ import {z} from "zod";
 import {createRegistrationClient,readRegisteredArtifact,type RegisteredArtifact,type ReleaseManifest} from "./artifact";
 import {createPlanManifest,verifySavedPlan,verifyPostApplyBaseline,validateRegisteredArtifact,type ReleaseBaseline,type ReleaseRoot,type PrivatePlanManifest} from "./plan-guard";
 import {verifyMain} from "./verify-release";
+import {applicationCustodyNames,custodyNames} from "./custody";
 import {smoke} from "./smoke";
 
 export interface WorkflowContext {
@@ -72,11 +73,10 @@ async function shownPlan(c:WorkflowContext,run:CommandRunner):Promise<unknown>{
   // JSON is never accepted from a caller: derive it from this exact binary in both phases.
   const text=await run("terraform",[`-chdir=${rootPath(c.root)}`,"show","-json",path(c,"saved.tfplan")]);const plan:unknown=JSON.parse(text);await privateFile(path(c,"plan.json"),text);return plan;
 }
-const custodyNames=["inputs.json","baseline.json","artifact.json","request.json","backend.hcl","review.json","saved.tfplan","preview.json"];
-async function saveCustody(c:WorkflowContext):Promise<void>{const files:Record<string,string>={};for(const name of custodyNames)files[name]=hash(await readFile(path(c,name)));if(c.root==="application")for(const name of ["registered.json","audit.json","sbom.json","tests.txt","platform-outputs.json"])files[name]=hash(await readFile(path(c,name)));await privateJson(path(c,"custody.json"),files);}
+async function saveCustody(c:WorkflowContext):Promise<void>{const files:Record<string,string>={};for(const name of custodyNames)files[name]=hash(await readFile(path(c,name)));if(c.root==="application")for(const name of applicationCustodyNames)files[name]=hash(await readFile(path(c,name)));await privateJson(path(c,"custody.json"),files);}
 async function checkCustody(c:WorkflowContext):Promise<void>{
   const bytes=await readFile(path(c,"custody.json"));if(c.expectedCustodySha256!==undefined&&hash(bytes)!==sha.parse(c.expectedCustodySha256))throw Error("Transferred custody digest changed");
-  const files=jsonObject.parse(JSON.parse(bytes.toString()));const expected=c.root==="application"?[...custodyNames,"registered.json","audit.json","sbom.json","tests.txt","platform-outputs.json"]:custodyNames;
+  const files=jsonObject.parse(JSON.parse(bytes.toString()));const expected=c.root==="application"?[...custodyNames,...applicationCustodyNames]:custodyNames;
   if(!equal(Object.keys(files).sort(),[...expected].sort()))throw Error("Incomplete custody manifest");for(const name of expected)if(files[name]!==hash(await readFile(path(c,name))))throw Error("Private release bytes changed");
 }
 /** Finite production plan phase. No build, registration, state dump or caller-supplied plan JSON. */
