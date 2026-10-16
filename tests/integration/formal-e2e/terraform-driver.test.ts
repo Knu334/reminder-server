@@ -207,13 +207,13 @@ void test('partial apply retains cleanup handle, reserves before create, and ref
   let failure: InstanceType<typeof driver.ProvisioningFailure> | undefined;
   try { await driver.provisionStack(target,{publication:false},artifact,evidence); } catch(error) { if(error instanceof driver.ProvisioningFailure) failure=error; else throw error; }
   assert.ok(failure); assert.equal(failure.phase,'bootstrap-apply'); assert.equal(reserved, true);
-  assert.equal(initialIntents, 44);
+  assert.equal(initialIntents, 50);
   await assert.rejects(failure.ownedStack.destroy(),/CLEANUP_REJECTED/);
   await store.finalizeResults(evidence);
   const result=await failure.ownedStack.destroy();
   assert.equal(calls.at(-1),'destroy'); assert.equal(result.errors,0); assert.equal(result.leaks,0);
   const after = store.evidenceContext(evidence).manifest.resources;
-  assert.equal(after.filter(item => item.kind === 'terraform-address').length, 44);
+  assert.equal(after.filter(item => item.kind === 'terraform-address').length, 50);
   assert.ok(after.filter(item => item.name.startsWith('platform/') || item.name.startsWith('application/')).every(item => !item.created && !item.removed));
   assert.ok(after.filter(item => item.kind === 'terraform-root' && item.name !== 'bootstrap').every(item => !item.created && !item.removed));
   await evidence.finish(result);
@@ -562,6 +562,41 @@ void test('resource ID ownership rules reject unknown kinds, foreign accounts, c
     { type: 'aws_cognito_user_pool_client', identity: 'SECRET_CANARY', parent: 'ap-northeast-1_Synthetic1' },
   ]) assert.throws(() => driver.assertOwnedIdentity(resource, owner), /FOREIGN_STATE_REJECTED/);
   driver.assertOwnedIdentity({ type: 'aws_apigatewayv2_stage', identity: '$default', parent: 'abcdefghij' }, owner);
+});
+
+void test('bootstrap custody bucket is owned, relayed and required by the construction readback', async t => {
+  const driver = await import('../../../scripts/e2e/terraform.ts'); const owner = { prefix: 'e2e-deadbeef', account: '123456789012' };
+  const name = (suffix: string) => `e2e-deadbeef-123456789012-ap-northeast-1-${suffix}`;
+  assert.deepEqual(store.ownedBucketNames(owner.prefix, owner.account, 'ap-northeast-1'), ['state', 'artifacts', 'custody', 'images'].map(name));
+  for (const type of ['aws_s3_bucket', 'aws_s3_bucket_versioning', 'aws_s3_bucket_policy', 'aws_s3_bucket_public_access_block', 'aws_s3_bucket_server_side_encryption_configuration', 'aws_s3_bucket_lifecycle_configuration']) driver.assertOwnedIdentity({ type, identity: name('custody') }, owner);
+  for (const identity of [name('custody-other'), 'e2e-deadbeef-999999999999-ap-northeast-1-custody']) assert.throws(() => driver.assertOwnedIdentity({ type: 'aws_s3_bucket', identity }, owner), /FOREIGN_STATE_REJECTED/);
+  const target = { endpoint: 'http://floci:4566' as const, region: 'ap-northeast-1' as const, addresses: new Map([['floci', '172.18.0.2']]) };
+  // Terraform の子プロセスに通信を許す bucket も、同じ4つの bucket とする。
+  assert.deepEqual(driver.terraformTransportScope(target, owner), { accountId: owner.account, buckets: ['state', 'artifacts', 'custody', 'images'].map(name) });
+  // 構築後の読み戻しは、bootstrap の3つと platform の images の4つの bucket を前提にする。
+  type Kind = 'bucket' | 'version' | 'policy';
+  const resource = (type: string, instances: Record<string, unknown>[]) => ({ mode: 'managed', type, name: 'synthetic', instances: instances.map(attributes => ({ attributes })) });
+  const constructed = (suffixes = ['state', 'artifacts', 'custody', 'images'], change: (suffix: string, kind: Kind, attributes: Record<string, unknown>) => Record<string, unknown> = (_suffix, _kind, attributes) => attributes) => ({ resources: [
+    resource('aws_s3_bucket', suffixes.map(suffix => change(suffix, 'bucket', { bucket: name(suffix), force_destroy: false }))),
+    resource('aws_s3_bucket_versioning', suffixes.map(suffix => change(suffix, 'version', { bucket: name(suffix), versioning_configuration: [{ status: 'Enabled' }] }))),
+    resource('aws_s3_bucket_policy', suffixes.map(suffix => change(suffix, 'policy', { bucket: name(suffix), policy: '{"Statement":[{"Condition":{"Bool":{"aws:SecureTransport":"false"}}}]}' }))),
+  ] });
+  const scope = { ...owner, region: 'ap-northeast-1' };
+  assert.doesNotThrow(() => driver.assertConstructedBuckets(constructed(), scope));
+  const custody = (kind: Kind, replacement: Record<string, unknown>) => constructed(undefined, (suffix, current, attributes) => suffix === 'custody' && current === kind ? { ...attributes, ...replacement } : attributes);
+  for (const [label, state] of [
+    ['custody missing', constructed(['state', 'artifacts', 'images'])],
+    ['foreign fourth bucket', constructed(['state', 'artifacts', 'custody-other', 'images'])],
+    ['custody force_destroy', custody('bucket', { force_destroy: true })],
+    ['custody versioning suspended', custody('version', { versioning_configuration: [{ status: 'Suspended' }] })],
+    ['custody policy without transport guard', custody('policy', { policy: '{"Statement":[]}' })],
+    ['custody versioning on another bucket', custody('version', { bucket: name('state') })],
+  ] as const) assert.throws(() => driver.assertConstructedBuckets(state, scope), /READBACK_REJECTED/, label);
+  // 独立の読み取り probe も custody bucket を所有として扱い、似た名前は通信の前に拒否する。
+  let requests = 0;
+  t.mock.method(http, 'request', (_url: URL, _options: unknown, callback: (response: http.IncomingMessage) => void) => { requests++; const response = Readable.from([Buffer.from('<VersioningConfiguration/>')]) as http.IncomingMessage; response.statusCode = 200; response.rawHeaders = []; const outgoing = new PassThrough(); process.nextTick(() => callback(response)); return outgoing; });
+  assert.equal(await store.measureRequiredApiUnsupported(target, { action: 'GetBucketVersioning', identity: name('custody'), prefix: owner.prefix, account: owner.account }), undefined); assert.equal(requests, 1);
+  await assert.rejects(store.measureRequiredApiUnsupported(target, { action: 'GetBucketVersioning', identity: name('custody-other'), prefix: owner.prefix, account: owner.account }), /API_PROBE_OWNERSHIP_REJECTED/); assert.equal(requests, 1);
 });
 
 const restoredOwner = { prefix: 'e2e-0a1b2c3d', account: '123456789012', region: 'ap-northeast-1' };

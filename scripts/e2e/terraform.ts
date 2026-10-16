@@ -9,7 +9,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { ArtifactSnapshot, CleanupSummary, Evidence, FixtureOptions, LocalTarget, PreparedTerraformRoots, ProvisionedStack, RequiredReadApi, RestoredState, RestoredTarget } from '../../tests/e2e/floci/support/types.ts';
 import { assertRestoredTarget, TABLE_KEYS, type RestoredContext } from '../../tests/e2e/floci/support/restored-tables.ts';
 import { localRequest } from '../../tests/e2e/floci/support/transport.ts';
-import { evidenceContext, markResource, reserveResource, recordProcess, bindResourceIdentities, measureRequiredApiUnsupported, MeasuredRequiredApiUnsupported } from '../../tests/e2e/floci/support/evidence.ts';
+import { evidenceContext, markResource, reserveResource, recordProcess, bindResourceIdentities, measureRequiredApiUnsupported, MeasuredRequiredApiUnsupported, ownedBucketNames } from '../../tests/e2e/floci/support/evidence.ts';
 import { registerArtifact, verifyArtifactSnapshot } from '../../tests/e2e/floci/support/artifact.ts';
 import { assertLocalTarget, assertRegular, bindCognitoIdentity, discoveredCognitoIdentity, cleanupOverrides, ownsRoot, prepareProductionRoots, productionResourceAddresses, verifyProductionRoots, writeProductionInputs, type RootName } from './terraform-source.ts';
 import { RunBudget, runChild } from './run.ts';
@@ -104,6 +104,18 @@ export function assertRestoredState(root: RootName, state: OwnedState, map: Reco
   }
 }
 export async function setRestoredTables(stack: ProvisionedStack, target: RestoredTarget | null): Promise<void> { await stack.setRestoredTables(target); }
+/** Terraform の子プロセスに許す account と bucket。run が所有する4つの bucket だけを通す。 */
+export function terraformTransportScope(target: LocalTarget, owner: { prefix: string; account: string }): { accountId: string; buckets: string[] } {
+  return { accountId: owner.account, buckets: ownedBucketNames(owner.prefix, owner.account, target.region) };
+}
+/** 構築後の読み戻し: bootstrap と platform の bucket が所有の4つちょうどで、それぞれ versioning と通信の保護の policy を持つこと。 */
+export function assertConstructedBuckets(state: OwnedState, owner: { prefix: string; account: string; region: string }): void {
+  const attributes = (type: string) => (state.resources ?? []).filter(resource => resource.mode === 'managed' && resource.type === type).flatMap(resource => resource.instances.map(instance => instance.attributes));
+  const names = ownedBucketNames(owner.prefix, owner.account, owner.region).sort();
+  const covers = (items: Record<string, unknown>[]) => items.length === names.length && isDeepStrictEqual(items.map(a => a.bucket).sort(), names);
+  const buckets = attributes('aws_s3_bucket'); const versions = attributes('aws_s3_bucket_versioning'); const policies = attributes('aws_s3_bucket_policy');
+  if (!(covers(buckets) && buckets.every(a => a.force_destroy === false) && covers(versions) && versions.every(a => (a.versioning_configuration as { status: string }[]).some(config => config.status === 'Enabled')) && covers(policies) && policies.every(a => typeof a.policy === 'string' && a.policy.includes('aws:SecureTransport')))) throw new Error('READBACK_REJECTED');
+}
 export type OwnedResource = { type: string; identity: string; parent?: string; address?: string };
 export function assertOwnedIdentity(resource: OwnedResource, owner: { prefix: string; account: string }): void {
   const { type, identity, parent } = resource; const { prefix, account } = owner;
@@ -113,7 +125,7 @@ export function assertOwnedIdentity(resource: OwnedResource, owner: { prefix: st
   const pool = (value: string | undefined) => typeof value === 'string' && /^ap-northeast-1_[A-Za-z0-9]+$/.test(value);
   const api = (value: string | undefined) => typeof value === 'string' && /^[a-z0-9]{10}$/.test(value);
   const policies = ['github-production-read', 'production-api-ceiling', 'production-cleanup-ceiling', 'production-scheduler-ceiling'].map(name => `arn:aws:iam::${account}:policy/${role(name)}`);
-  const buckets = ['state', 'artifacts', 'images'].map(name => `${prefix}-${account}-ap-northeast-1-${name}`);
+  const buckets = ownedBucketNames(prefix, account, 'ap-northeast-1');
   const bucketTypes = ['aws_s3_bucket', 'aws_s3_bucket_versioning', 'aws_s3_bucket_policy', 'aws_s3_bucket_public_access_block', 'aws_s3_bucket_server_side_encryption_configuration', 'aws_s3_bucket_lifecycle_configuration', 'aws_s3_bucket_cors_configuration'];
   let valid = false;
   if (bucketTypes.includes(type)) valid = buckets.includes(identity) && parent === undefined;
@@ -262,7 +274,7 @@ export async function provisionStack(target: LocalTarget, options: FixtureOption
     await ownedState(root);
     const timeoutMs = cleanup ? Math.min(600_000, budget.cleanupRemaining()) : budget.allow('terraform');
     if (!timeoutMs || (!cleanup && signal?.aborted)) throw new Error('BUDGET_EXHAUSTED');
-    const transport = await withTerraformTransport(target, terraformProxy => runChild('terraform', args, { cwd: roots![root], timeoutMs, terraformProxy, ...(!cleanup && signal ? { signal } : {}) }), { accountId: account, buckets: ['state', 'artifacts', 'images'].map(suffix => `${prefix}-${account}-${target.region}-${suffix}`) });
+    const transport = await withTerraformTransport(target, terraformProxy => runChild('terraform', args, { cwd: roots![root], timeoutMs, terraformProxy, ...(!cleanup && signal ? { signal } : {}) }), terraformTransportScope(target, { prefix, account }));
     await recordProcess(evidence, { ...transport.value, blockedEndpoints: transport.denied, blockedEndpointCounts: transport.blockedEndpointCounts, forwarded: transport.forwarded });
     if (!cleanup && !transport.denied.length && transport.value.status === 'failed' && budget.allow('terraform')) {
       const types: Partial<Record<string, string>> = { DescribeTable: 'aws_dynamodb_table', GetRole: 'aws_iam_role', GetPolicy: 'aws_iam_policy', GetFunction: 'aws_lambda_function', GetOpenIDConnectProvider: 'aws_iam_openid_connect_provider', ListTagsForResource: 'aws_s3_bucket', GetBucketVersioning: 'aws_s3_bucket', GetBucketPolicy: 'aws_s3_bucket' };
@@ -472,9 +484,7 @@ export async function provisionStack(target: LocalTarget, options: FixtureOption
     requireCheck(aliases.length === 2 && aliases.every(a => a.name === 'production' && functions.some(fn => fn.function_name === a.function_name && fn.version === a.function_version)));
     const tables = attributes(finalPlatform, 'aws_dynamodb_table');
     requireCheck(tables.length === 3 && tables.every(a => a.deletion_protection_enabled === true && a.billing_mode === 'PAY_PER_REQUEST' && (a.point_in_time_recovery as { enabled: boolean; recovery_period_in_days: number }[]).some(pitr => pitr.enabled && pitr.recovery_period_in_days === 35)));
-    const all = { resources: [...(finalPlatform.resources ?? []), ...(finalBootstrap.resources ?? [])] };
-    const buckets = attributes(all, 'aws_s3_bucket'); const versions = attributes(all, 'aws_s3_bucket_versioning'); const policies = attributes(all, 'aws_s3_bucket_policy');
-    requireCheck(buckets.length === 3 && buckets.every(a => a.force_destroy === false) && versions.length === 3 && versions.every(a => (a.versioning_configuration as { status: string }[]).some(config => config.status === 'Enabled')) && policies.length === 3 && policies.every(a => typeof a.policy === 'string' && a.policy.includes('aws:SecureTransport')));
+    assertConstructedBuckets({ resources: [...(finalPlatform.resources ?? []), ...(finalBootstrap.resources ?? [])] }, { prefix, account, region: target.region });
     const groups = attributes(finalPlatform, 'aws_cloudwatch_log_group'); requireCheck(groups.length === 3 && groups.every(a => a.retention_in_days === 30));
     requireCheck(attributes(finalApplication, 'aws_scheduler_schedule').every(a => a.state === 'DISABLED'));
     stack.constructionOutputs = [

@@ -160,6 +160,58 @@ void test('Gateway CORS compares public settings with the API service zero MaxAg
   for (const changed of [{ AllowHeaders: ['authorization'] }, { AllowCredentials: true }, { AllowOrigins: ['https://foreign.test'] }, { MaxAge: 300 }, { AllowMethods: ['GET'] }, { ExposeHeaders: [] }]) assert.throws(() => assertGatewayCors({ ...cors, ...changed }), /SETTINGS_MISMATCH/);
 });
 
+void test('TF-03/settings reads back the custody bucket versioning encryption public block policy and lifecycle', async () => {
+  const { readBucketSettings } = await import('./support/fixture.ts'); const { bootstrapBucketSuffixes } = await import('./support/evidence.ts');
+  assert.deepEqual(bootstrapBucketSuffixes, ['state', 'artifacts', 'custody']);
+  const owner = { prefix: 'e2e-deadbeef', account: '000000000000', region: 'ap-northeast-1' }; const bucket = (suffix: string) => `e2e-deadbeef-000000000000-ap-northeast-1-${suffix}`;
+  const policy = (suffix: string) => ({ Version: '2012-10-17', Statement: [{ Sid: `Synthetic${suffix}`, Effect: 'Deny', Principal: '*', Action: 's3:*', Resource: `arn:aws:s3:::${bucket(suffix)}/*`, Condition: { Bool: { 'aws:SecureTransport': 'false' } } }] });
+  const expected = { bucketPolicies: { state: JSON.stringify(policy('state')), artifacts: JSON.stringify(policy('artifacts')), custody: JSON.stringify(policy('custody')) }, imagesBucketPolicy: JSON.stringify(policy('images')) };
+  const custodyRule = (id: string, days: number) => ({ ID: id, Status: 'Enabled', Filter: { Prefix: `${id}/` }, Expiration: { Days: days }, NoncurrentVersionExpiration: { NoncurrentDays: 1 } });
+  const custodyRules = () => [custodyRule('failure-diagnostics', 1), custodyRule('registered-release', 1), custodyRule('release-result', 30), custodyRule('release-review', 1), { ID: 'expired-delete-markers', Status: 'Enabled', Filter: {}, Expiration: { ExpiredObjectDeleteMarker: true } }];
+  type Responses = Record<string, Record<string, unknown>>;
+  const responses = (suffix: string): Responses => ({
+    GetBucketVersioningCommand: { Status: 'Enabled' },
+    GetBucketEncryptionCommand: { ServerSideEncryptionConfiguration: { Rules: [{ ApplyServerSideEncryptionByDefault: { SSEAlgorithm: 'AES256' } }] } },
+    GetPublicAccessBlockCommand: { PublicAccessBlockConfiguration: { BlockPublicAcls: true, IgnorePublicAcls: true, BlockPublicPolicy: true, RestrictPublicBuckets: true } },
+    GetBucketPolicyCommand: { Policy: JSON.stringify(policy(suffix)) },
+    GetBucketLifecycleConfigurationCommand: { Rules: suffix === 'images' ? [{ ID: 'retain-noncurrent-images-60-days', Status: 'Enabled', Filter: { Prefix: 'images/' }, NoncurrentVersionExpiration: { NoncurrentDays: 60 } }] : custodyRules() },
+    GetBucketCorsCommand: { CORSRules: [{ AllowedOrigins: ['https://extension.example.test'], AllowedMethods: ['GET', 'HEAD'] }] },
+  });
+  const run = async (change: (responses: Responses) => void = () => {}) => {
+    const phases: string[] = []; const sent: string[] = [];
+    const s3 = { send: async (command: { constructor: { name: string }; input: { Bucket: string } }) => { const suffix = command.input.Bucket.slice(bucket('').length); sent.push(`${suffix}:${command.constructor.name}`); const all = responses(suffix); if (suffix === 'custody') change(all); return all[command.constructor.name]; } };
+    const same = (actual: unknown, wanted: unknown) => { try { assert.deepEqual(actual, wanted); } catch { throw new Error('SETTINGS_MISMATCH'); } };
+    await readBucketSettings({ s3: s3 as never, read: send => send({}), same, requireSetting: valid => same(valid, true), phase: name => phases.push(name) }, owner, expected);
+    return { phases, sent };
+  };
+  const { phases, sent } = await run();
+  assert.deepEqual(phases.filter(name => name.startsWith('s3-custody-')), ['s3-custody-versioning', 's3-custody-encryption', 's3-custody-public-access', 's3-custody-policy', 's3-custody-lifecycle']);
+  assert.deepEqual(sent.filter(item => item.startsWith('custody:')).map(item => item.slice('custody:'.length)), ['GetBucketVersioningCommand', 'GetBucketEncryptionCommand', 'GetPublicAccessBlockCommand', 'GetBucketPolicyCommand', 'GetBucketLifecycleConfigurationCommand']);
+  assert.deepEqual([...new Set(sent.map(item => item.split(':')[0]))], ['state', 'artifacts', 'custody', 'images']);
+  await run(all => { (all.GetBucketLifecycleConfigurationCommand as { Rules: unknown[] }).Rules.reverse(); });
+  for (const [label, change] of [
+    ['versioning suspended', all => { all.GetBucketVersioningCommand = { Status: 'Suspended' }; }],
+    ['encryption changed', all => { all.GetBucketEncryptionCommand = { ServerSideEncryptionConfiguration: { Rules: [{ ApplyServerSideEncryptionByDefault: { SSEAlgorithm: 'aws:kms' } }] } }; }],
+    ['public block relaxed', all => { all.GetPublicAccessBlockCommand = { PublicAccessBlockConfiguration: { BlockPublicAcls: true, IgnorePublicAcls: true, BlockPublicPolicy: false, RestrictPublicBuckets: true } }; }],
+    ['policy differs', all => { all.GetBucketPolicyCommand = { Policy: JSON.stringify(policy('state')) }; }],
+    ['result retained 1 day', all => { all.GetBucketLifecycleConfigurationCommand = { Rules: custodyRules().map(rule => rule.ID === 'release-result' ? { ...rule, Expiration: { Days: 1 } } : rule) }; }],
+    ['noncurrent kept longer', all => { all.GetBucketLifecycleConfigurationCommand = { Rules: custodyRules().map(rule => rule.ID === 'release-review' ? { ...rule, NoncurrentVersionExpiration: { NoncurrentDays: 30 } } : rule) }; }],
+    ['delete marker rule missing', all => { all.GetBucketLifecycleConfigurationCommand = { Rules: custodyRules().filter(rule => rule.ID !== 'expired-delete-markers') }; }],
+    ['prefix rule disabled', all => { all.GetBucketLifecycleConfigurationCommand = { Rules: custodyRules().map(rule => rule.ID === 'registered-release' ? { ...rule, Status: 'Disabled' } : rule) }; }],
+  ] as [string, (all: Responses) => void][]) await assert.rejects(run(change), /SETTINGS_MISMATCH/, label);
+});
+
+void test('expected bucket policies evaluate the custody policy from the bootstrap source', async () => {
+  const { expectedIam } = await import('./support/expected-iam.ts');
+  const prefix = 'e2e-deadbeef'; const account = '000000000000';
+  const stack = { target: { endpoint: 'http://floci:4566', region: 'ap-northeast-1', addresses: new Map() }, bindings: { prefix, account_id: account, api_id: 'abcdefghij', cleanup_alias_arn: `arn:aws:lambda:ap-northeast-1:${account}:function:${prefix}-production-cleanup:production` } } as unknown as import('./support/types.ts').ProvisionedStack;
+  const expected = await expectedIam(stack);
+  assert.deepEqual(Object.keys(expected.bucketPolicies).sort(), ['artifacts', 'custody', 'state']);
+  const custody = JSON.parse(expected.bucketPolicies.custody!) as { Statement: { Sid: string; Resource: string | string[] }[] }; const arn = `arn:aws:s3:::${prefix}-${account}-ap-northeast-1-custody`;
+  assert.deepEqual(custody.Statement.map(statement => statement.Sid), ['DenyInsecureTransport', 'RequireCreateOnlyWrite', 'DenyCustodyDeletion']);
+  assert.ok(custody.Statement.every(statement => [statement.Resource].flat().every(resource => resource === arn || resource === `${arn}/*`)));
+});
+
 void test('fixture HTTP preserves the actual owned Gateway endpoint path and rejects prefix escapes', async () => {
   const { gatewayRequestUrl } = await import('./support/fixture.ts');
   assert.equal(gatewayRequestUrl('http://floci:4566/owned-api/abcdefghij', '/v2/reminders?limit=1').href, 'http://floci:4566/owned-api/abcdefghij/v2/reminders?limit=1');

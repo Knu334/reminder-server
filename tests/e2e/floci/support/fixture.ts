@@ -12,7 +12,7 @@ import { CloudWatchClient, DescribeAlarmsCommand } from '@aws-sdk/client-cloudwa
 import { CloudWatchLogsClient, DescribeLogGroupsCommand } from '@aws-sdk/client-cloudwatch-logs';
 import { STSClient } from '@aws-sdk/client-sts';
 import { GetBucketVersioningCommand, GetBucketEncryptionCommand, GetPublicAccessBlockCommand, GetBucketPolicyCommand, GetBucketLifecycleConfigurationCommand, GetBucketCorsCommand, ListObjectVersionsCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
-import type { ListObjectVersionsCommandOutput, HeadObjectCommandOutput } from '@aws-sdk/client-s3';
+import type { ListObjectVersionsCommandOutput, HeadObjectCommandOutput, S3Client } from '@aws-sdk/client-s3';
 import { CognitoIdentityProviderClient, DescribeUserPoolCommand, DescribeUserPoolClientCommand, DescribeResourceServerCommand, DescribeUserPoolDomainCommand } from '@aws-sdk/client-cognito-identity-provider';
 import type { Cors } from '@aws-sdk/client-apigatewayv2';
 import { ApiGatewayV2Client, GetApiCommand, GetRoutesCommand, GetAuthorizersCommand, GetIntegrationsCommand, GetStageCommand } from '@aws-sdk/client-apigatewayv2';
@@ -21,7 +21,7 @@ import { IAMClient, GetOpenIDConnectProviderCommand, GetRoleCommand, ListRolePol
 import { localS3 } from '../../../../scripts/e2e/terraform.ts';
 import { localRequest } from './transport.ts';
 import { loadConfig } from '../../../../src/config.ts';
-import { evidenceContext } from './evidence.ts';
+import { evidenceContext, ownedBucketSuffixes } from './evidence.ts';
 import { sdkObserver, suiteLogStates, type LogObserver, type CleanupCompletion } from './logs.ts';
 import type { E2EFixture, FixtureAuth, SuiteFixture, SuiteOptions, ProvisionedStack, Evidence, LogExpectation, CleanupSummary, LocalTarget } from './types.ts';
 import { createCaseAuth, verifyOwnedSdkAbsence } from './auth.ts';
@@ -55,6 +55,36 @@ export async function runReadbackBoundary(state: RunFixtureState, action: () => 
       catch (probeError) { const probe = probeError as { name?: string; $metadata?: { httpStatusCode?: number } }; const probeStatus = probe.$metadata?.httpStatusCode ?? state.readbackSdkStatus; state.independentReadback = { succeeded: false, code: sdkCodes.includes(probe.name ?? '') ? probe.name! : 'unclassified', ...(probeStatus !== undefined ? { httpStatus: probeStatus } : {}) }; }
     }
     throw new Error("SETTINGS_READBACK_FAILED");
+  }
+}
+/** custody の lifecycle の期待値（ID の順）: prefix ごとの現行の version の失効の日数と古い version の1日の失効、失効した delete marker の削除。 */
+const custodyLifecycle = [...Object.entries({ 'failure-diagnostics': 1, 'registered-release': 1, 'release-result': 30, 'release-review': 1 }).map(([id, days]) => [id, 'Enabled', `${id}/`, days, false, 1]), ['expired-delete-markers', 'Enabled', '', null, true, null]].sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+export type BucketReadbackIo = { s3: S3Client; read: <T>(send: (options: HttpHandlerOptions) => Promise<T>) => Promise<T>; same: (actual: unknown, expected: unknown, field?: string) => void; requireSetting: (valid: boolean, field?: string) => void; phase: (name: string) => void };
+/** TF-03/settings の s3 の読み戻し。所有の4つの bucket の versioning・暗号化・public access block・policy と、custody と images の lifecycle、images の CORS を確かめる。 */
+export async function readBucketSettings(io: BucketReadbackIo, owner: { prefix: string; account: string; region: string }, expected: Pick<ExpectedIam, 'bucketPolicies' | 'imagesBucketPolicy'>): Promise<void> {
+  const { s3, read, same, requireSetting, phase } = io;
+  for (const suffix of ownedBucketSuffixes) {
+    const Bucket = `${owner.prefix}-${owner.account}-${owner.region}-${suffix}`; phase(`s3-${suffix}-versioning`);
+    same((await read(options => s3.send(new GetBucketVersioningCommand({ Bucket }), options))).Status, 'Enabled', 'VersioningStatus');
+    phase(`s3-${suffix}-encryption`);
+    const encryption = await read(options => s3.send(new GetBucketEncryptionCommand({ Bucket }), options)); same(encryption.ServerSideEncryptionConfiguration?.Rules?.map(rule => rule.ApplyServerSideEncryptionByDefault?.SSEAlgorithm), ['AES256'], 'ServerSideEncryptionConfiguration-Rules-ApplyServerSideEncryptionByDefault-SSEAlgorithm');
+    phase(`s3-${suffix}-public-access`);
+    same((await read(options => s3.send(new GetPublicAccessBlockCommand({ Bucket }), options))).PublicAccessBlockConfiguration, { BlockPublicAcls: true, IgnorePublicAcls: true, BlockPublicPolicy: true, RestrictPublicBuckets: true }, 'PublicAccessBlockConfiguration');
+    phase(`s3-${suffix}-policy`);
+    const policy = JSON.parse((await read(options => s3.send(new GetBucketPolicyCommand({ Bucket }), options))).Policy ?? '{}') as { Statement?: { Sid: string; Condition?: unknown }[] };
+    requireSetting(policiesEqual(policy, suffix === 'images' ? expected.imagesBucketPolicy : expected.bucketPolicies[suffix]), 'full-policy-semantics');
+    if (suffix === 'custody') {
+      // 規則の順は問わない。空の filter は、Prefix の欠落と空文字を同じに扱う。
+      phase('s3-custody-lifecycle');
+      const lifecycle = await read(options => s3.send(new GetBucketLifecycleConfigurationCommand({ Bucket }), options));
+      same(lifecycle.Rules?.map(r => [r.ID, r.Status, r.Filter?.Prefix ?? '', r.Expiration?.Days ?? null, r.Expiration?.ExpiredObjectDeleteMarker === true, r.NoncurrentVersionExpiration?.NoncurrentDays ?? null]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))), custodyLifecycle, 'Rules-ID-Status-Filter-Prefix-Expiration-NoncurrentVersionExpiration');
+    }
+    if (suffix === 'images') {
+      phase('s3-images-lifecycle');
+      const lifecycle = await read(options => s3.send(new GetBucketLifecycleConfigurationCommand({ Bucket }), options)); same(lifecycle.Rules?.map(r => [r.ID, r.Status, r.Filter?.Prefix, r.NoncurrentVersionExpiration?.NoncurrentDays]), [['retain-noncurrent-images-60-days', 'Enabled', 'images/', 60]], 'Rules-ID-Status-Filter-Prefix-NoncurrentVersionExpiration-NoncurrentDays');
+      phase('s3-images-cors');
+      const cors = (await read(options => s3.send(new GetBucketCorsCommand({ Bucket }), options))).CORSRules; same(cors?.length, 1, 'required-public-definition-fields'); same(cors?.[0]?.AllowedOrigins, ['https://extension.example.test'], 'AllowedOrigins'); same(cors?.[0]?.AllowedMethods?.slice().sort(), ['GET', 'HEAD'], 'AllowedMethods'); requireSetting(!cors?.[0]?.AllowedHeaders?.length && !cors?.[0]?.ExposeHeaders?.length, 'AllowedHeaders-ExposeHeaders');
+    }
   }
 }
 async function readSettings(fixture: SuiteFixture): Promise<void> {
@@ -98,23 +128,7 @@ async function readSettings(fixture: SuiteFixture): Promise<void> {
     if (suffix === 'image-jobs') { same(indexes.length, 1, 'index-count'); same([indexes[0]?.IndexName, indexes[0]?.Projection?.ProjectionType, indexes[0]?.KeySchema], ['cleanup_by_due', 'KEYS_ONLY', [{ AttributeName: 'cleanupPartition', KeyType: 'HASH' }, { AttributeName: 'cleanupSortKey', KeyType: 'RANGE' }]], 'IndexName-Projection-ProjectionType-KeySchema'); } else same(indexes.length, 0, 'index-count');
   }
   state.readbackPhase = 's3';
-  for (const suffix of ['state', 'artifacts', 'images']) {
-    const Bucket = `${prefix}-${account}-${region}-${suffix}`; state.readbackPhase = `s3-${suffix}-versioning`;
-    same((await read(options => fixture.clients.s3.send(new GetBucketVersioningCommand({ Bucket }), options))).Status, 'Enabled', 'VersioningStatus');
-    state.readbackPhase = `s3-${suffix}-encryption`;
-    const encryption = await read(options => fixture.clients.s3.send(new GetBucketEncryptionCommand({ Bucket }), options)); same(encryption.ServerSideEncryptionConfiguration?.Rules?.map(rule => rule.ApplyServerSideEncryptionByDefault?.SSEAlgorithm), ['AES256'], 'ServerSideEncryptionConfiguration-Rules-ApplyServerSideEncryptionByDefault-SSEAlgorithm');
-    state.readbackPhase = `s3-${suffix}-public-access`;
-    same((await read(options => fixture.clients.s3.send(new GetPublicAccessBlockCommand({ Bucket }), options))).PublicAccessBlockConfiguration, { BlockPublicAcls: true, IgnorePublicAcls: true, BlockPublicPolicy: true, RestrictPublicBuckets: true }, 'PublicAccessBlockConfiguration');
-    state.readbackPhase = `s3-${suffix}-policy`;
-    const policy = JSON.parse((await read(options => fixture.clients.s3.send(new GetBucketPolicyCommand({ Bucket }), options))).Policy ?? '{}') as { Statement?: { Sid: string; Condition?: unknown }[] };
-    requireSetting(policiesEqual(policy, suffix === 'images' ? expected.imagesBucketPolicy : expected.bucketPolicies[suffix]), 'full-policy-semantics');
-    if (suffix === 'images') {
-      state.readbackPhase = 's3-images-lifecycle';
-      const lifecycle = await read(options => fixture.clients.s3.send(new GetBucketLifecycleConfigurationCommand({ Bucket }), options)); same(lifecycle.Rules?.map(r => [r.ID, r.Status, r.Filter?.Prefix, r.NoncurrentVersionExpiration?.NoncurrentDays]), [['retain-noncurrent-images-60-days', 'Enabled', 'images/', 60]], 'Rules-ID-Status-Filter-Prefix-NoncurrentVersionExpiration-NoncurrentDays');
-      state.readbackPhase = 's3-images-cors';
-      const cors = (await read(options => fixture.clients.s3.send(new GetBucketCorsCommand({ Bucket }), options))).CORSRules; same(cors?.length, 1, 'required-public-definition-fields'); same(cors?.[0]?.AllowedOrigins, ['https://extension.example.test'], 'AllowedOrigins'); same(cors?.[0]?.AllowedMethods?.slice().sort(), ['GET', 'HEAD'], 'AllowedMethods'); requireSetting(!cors?.[0]?.AllowedHeaders?.length && !cors?.[0]?.ExposeHeaders?.length, 'AllowedHeaders-ExposeHeaders');
-    }
-  }
+  await readBucketSettings({ s3: fixture.clients.s3, read, same, requireSetting, phase: name => { state.readbackPhase = name; } }, { prefix, account, region }, expected);
   state.readbackPhase = 'artifact-original-receipt';
   same([b.artifact_bucket, b.artifact_key, b.artifact_sha256_base64], [`${prefix}-${account}-${region}-artifacts`, `releases/${fixture.artifact.sha256Hex}/reminder-server.zip`, fixture.artifact.sha256Base64], 'artifact_bucket-artifact_key-artifact_sha256_base64'); requireSetting(!!b.artifact_version_id && b.artifact_version_id !== 'null', 'artifact_version_id');
   state.readbackPhase = 'artifact-ListObjectVersions';
