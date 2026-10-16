@@ -10,6 +10,7 @@ import { definitions, caseActions, caseGuards, caseMeasurements, measurementUnsu
 import '../../tests/e2e/floci/support/auth-cases.ts';
 import '../../tests/e2e/floci/support/api-cases.ts';
 import '../../tests/e2e/floci/support/storage-cases.ts';
+import '../../tests/e2e/floci/support/custody-cases.ts';
 import '../../tests/e2e/floci/support/image-cases.ts';
 import '../../tests/e2e/floci/support/cleanup-cases.ts';
 import '../../tests/e2e/floci/support/operation-cases.ts';

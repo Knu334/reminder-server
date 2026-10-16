@@ -357,7 +357,7 @@ definitions.push(...schedulerDefinitions);
 export type MeasuredOutcome = 'pass' | 'unsupported' | 'fail';
 export const caseMeasurements = new Map<string, (fixture: import('./types.ts').SuiteFixture) => Promise<MeasuredOutcome | { outcome: MeasuredOutcome; httpStatus: number }>>();
 /** Fixed evidence reason of a measurement that ends unsupported; the default is signature-enforcement-unsupported. */
-export const measurementUnsupportedReasons = new Map<string, 'hosted-revoke-unsupported' | 'scheduler-trigger-unsupported'>([['AUTH-11/hosted-revoke-endpoint', 'hosted-revoke-unsupported'], ['OPS-06/one-time-trigger', 'scheduler-trigger-unsupported']]);
+export const measurementUnsupportedReasons = new Map<string, 'hosted-revoke-unsupported' | 'scheduler-trigger-unsupported' | 'conditional-write-unsupported'>([['AUTH-11/hosted-revoke-endpoint', 'hosted-revoke-unsupported'], ['OPS-06/one-time-trigger', 'scheduler-trigger-unsupported'], ['REL-01/custody-conditional-write', 'conditional-write-unsupported']]);
 /** A guard returns true when a prerequisite case has not passed; the runner then records not-run. */
 export const caseGuards = new Map<string, (fixture: import('./types.ts').SuiteFixture) => boolean>();
 /**

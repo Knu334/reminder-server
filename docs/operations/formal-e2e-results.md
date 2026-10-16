@@ -268,7 +268,9 @@ layer Iの24件は、上の `npm test` の中で、対応づけた試験fileの�
 
 判定の基準は run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc` である。layer Iは、同runのoffline試験の実測（phase offline）で判定し、根拠に試験fileを示す。以前のrun（e2e-4e5b822a）では、layer Iはnot-runだった。
 
-全268件: pass 265 / fail 0 / not-run 0 / unsupported 3
+全270件: pass 265 / fail 0 / not-run 2 / unsupported 3
+
+`REL-01` の2件（release custodyの往復と条件付き書き込み）は、上のrunの後にregistryへ加えたcaseで、まだFloci上で実行していない。表ではnot-run（implementation-pending）とし、上のrunの件数（268件）には含めない。
 
 | ID | 層 | suite | 区分 | 結果 | 根拠 |
 | --- | --- | --- | --- | --- | --- |
@@ -540,6 +542,8 @@ layer Iの24件は、上の `npm test` の中で、対応づけた試験fileの�
 | `OBS-03/cleanup-start-end-pairing` | E | logging | behavior | pass | e2e-da96a6b1 |
 | `OPS-06/one-time-trigger` | L | scheduler | compatibility | pass | e2e-da96a6b1 |
 | `OPS-06/daily-schedule-preserved` | L | scheduler | behavior | pass | e2e-da96a6b1 |
+| `REL-01/custody-roundtrip` | L | custody | behavior | not-run | implementation-pending（上のrunの後に追加。Floci上は未実行） |
+| `REL-01/custody-conditional-write` | L | custody | compatibility | not-run | implementation-pending（上のrunの後に追加。Floci上は未実行） |
 
 補記（2026-10-12）: 上の表の「Node全suite（`npm test`）」は、当時の `npm test`（runtime、operations、delivery）の件数である。現在の `npm test` は、offline試験の後にFlociの全suiteを実行し、Floci無しの同等範囲は `npm run test:offline`（`test:e2e:harness` を含む）である。
 

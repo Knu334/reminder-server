@@ -6,8 +6,11 @@ import { localRequest } from './transport.ts';
 
 const kinds = ['http', 'dynamodb', 's3', 'logs'] as const;
 const phases = new Set(['inventory', 'preflight', 'provision', 'input', 'outputs', 'logs', 'complete', 'cleanup', 'offline']);
-const reasons = new Set(['implementation-pending', 'preflight-failed', 'prerequisite-failed', 'budget-exhausted', 'action-failed', 'output-mismatch', 'logs-pending', 'logs-missing', 'observer-failed', 'out-of-scope', 'gateway-delivery-unsupported', 'scheduler-trigger-unsupported', 'signature-enforcement-unsupported', 'hosted-revoke-unsupported', 'required-api-unsupported', 'offline-test-missing', 'offline-test-failed', 'offline-run-failed']);
-const compatibilityReasons = new Set(['gateway-delivery-unsupported', 'scheduler-trigger-unsupported', 'signature-enforcement-unsupported', 'hosted-revoke-unsupported']);
+const reasons = new Set(['implementation-pending', 'preflight-failed', 'prerequisite-failed', 'budget-exhausted', 'action-failed', 'output-mismatch', 'logs-pending', 'logs-missing', 'observer-failed', 'out-of-scope', 'gateway-delivery-unsupported', 'scheduler-trigger-unsupported', 'signature-enforcement-unsupported', 'hosted-revoke-unsupported', 'conditional-write-unsupported', 'required-api-unsupported', 'offline-test-missing', 'offline-test-failed', 'offline-run-failed']);
+const compatibilityReasons = new Set(['gateway-delivery-unsupported', 'scheduler-trigger-unsupported', 'signature-enforcement-unsupported', 'hosted-revoke-unsupported', 'conditional-write-unsupported']);
+/** 1つの case だけに使える互換性の理由。登録した case はこの理由でしか unsupported にならず、他の case はこの理由を使えない。 */
+const caseBoundReasons = new Map([['REL-01/custody-conditional-write', 'conditional-write-unsupported']]);
+const reasonFits = (id: string, reason: string | undefined): boolean => { const bound = caseBoundReasons.get(id); return bound !== undefined ? reason === bound : ![...caseBoundReasons.values()].includes(reason ?? ''); };
 const codes = new Set(['INVALID_JSON', 'INVALID_INPUT', 'UNSUPPORTED_MEDIA_TYPE', 'PAYLOAD_TOO_LARGE', 'LEGACY_API_REMOVED', 'REMINDER_NOT_FOUND', 'THUMBNAIL_NOT_FOUND', 'INVALID_THUMBNAIL', 'THUMBNAIL_TOO_LARGE', 'OWNER_STORAGE_LIMIT_EXCEEDED', 'INVALID_LIMIT', 'INVALID_CURSOR', 'PRECONDITION_REQUIRED', 'PRECONDITION_FAILED', 'METHOD_NOT_ALLOWED', 'RATE_LIMIT_EXCEEDED', 'SERVICE_UNAVAILABLE', 'UNAUTHORIZED', 'FORBIDDEN', 'FOREIGN_KEY_COMPOSITE', 'FOREIGN_SIGNATURE_VERIFIABLE']);
 const label = /^[a-zA-Z0-9][a-zA-Z0-9/_.-]{0,159}$/;
 type PendingCase = { definition: CaseDefinition; result: CaseResult; checks: PendingLogCheck[] };
@@ -120,7 +123,7 @@ function safeResult(def: CaseDefinition, result: CaseResult): CaseResult {
   if (requiredApiUnsupported) safe.requiredApiNonSupport = result.requiredApiNonSupport!;
   if (status === 'not-run' && (result.httpStatus !== undefined || (result.outputs?.length ?? 0) > 0 || ['input', 'outputs', 'logs', 'complete'].includes(result.phase))) { safe.status = 'fail'; safe.reason = 'output-mismatch'; }
   if (status === 'pass' && !projection.complete) { safe.status = 'fail'; safe.reason = 'output-mismatch'; }
-  if (status === 'unsupported' && !requiredApiUnsupported && (def.acceptance !== 'compatibility' || !projection.complete || !compatibilityReasons.has(safe.reason ?? ''))) {
+  if (status === 'unsupported' && !requiredApiUnsupported && (def.acceptance !== 'compatibility' || !projection.complete || !compatibilityReasons.has(safe.reason ?? '') || !reasonFits(def.id, safe.reason))) {
     safe.status = 'fail'; safe.reason = 'output-mismatch';
   }
   if (status === 'out-of-scope' && def.layer !== 'A' && def.layer !== 'U') { safe.status = 'fail'; safe.reason = 'output-mismatch'; }

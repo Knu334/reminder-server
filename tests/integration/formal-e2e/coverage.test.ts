@@ -43,7 +43,7 @@ async function temporary(t: TestContext): Promise<string> {
 
 void test('every_required_case_has_result_and_source', () => {
   const coverageIds = new Set(coverageRows.map(row => row[0]!.split(' / ')[0]!));
-  assert.equal(coverageIds.size, 69);
+  assert.equal(coverageIds.size, 70);
   for (const row of coverageRows) assert.equal(row.length, 10, `${row[0]} needs the result column`);
   const byId = new Map(resultRows.map(row => [resultId(row), row]));
   assert.equal(byId.size, resultRows.length, 'a result row is listed twice');

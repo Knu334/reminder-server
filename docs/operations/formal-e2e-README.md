@@ -25,7 +25,7 @@
 | 一つのcaseだけ | `npx tsx scripts/e2e/run.ts --layer floci --case API-09/id-percent` | 構築と回収を含む。layer IのcaseだけをFlociなしで選んだ場合は、構築も回収も行わない（下記） |
 
 実測前の見積りは22〜65分だった。期限は実行75分と回収15分で、全suiteの実測はその約6分の1である。
-suite名は `harness`、`terraform`、`fixture`、`auth`、`api`、`storage`、`images`、`cleanup`、`operations`、`logging`、`scheduler` で、この順に逐次実行する。一部だけを選んだ実行は `partial: true` になり、成功しても全体の完了とは扱わない。
+suite名は `harness`、`terraform`、`fixture`、`auth`、`api`、`storage`、`images`、`cleanup`、`operations`、`logging`、`scheduler`、`custody` で、この順に逐次実行する。`custody` はrelease custodyのモジュールをrun所有のcustody bucketで動かすsuiteで、最後に実行する。書いたobjectはsuite間の回収では消さず、run末尾の清掃で消す。一部だけを選んだ実行は `partial: true` になり、成功しても全体の完了とは扱わない。
 `npm run test:e2e:terraform` はTF-01/applyだけを実行する構築の診断で、全suite成功後に同じ構築を再実行する目的では使わない。
 
 ## layer Iの判定（2026-10-12のユーザー判断）
