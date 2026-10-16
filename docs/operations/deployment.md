@@ -41,21 +41,24 @@ bootstrap rootを作成した後（[初回の構築](#初回の構築)の手順1
 - bootstrapは、branch/tagのsubject、余分なrole、environmentを1つにまとめた構成を拒否する。bootstrapのexampleのplaceholderはデプロイ用の値ではない。
 - GitHubのenvironmentと保護機能の利用可否はrepositoryのplanによって異なる。配布を有効にする前に、利用できる制御を確認する。operatorに代わってこれらの制御を設定・保証できるworkflowはない。
 
-### repository variable
+### repository variableとaccountを識別する値のsecret
 
-次のvariableを、レビュー済みのbootstrap outputから設定する。
+repository variableは `AWS_REGION` だけである。bootstrapの入力の `region` を設定する。
 
-| variable | 値 |
-| --- | --- |
-| `AWS_REGION` | bootstrapの入力の `region` |
-| `AWS_ACCOUNT_ID` | bootstrapの入力の `account_id` |
-| `STATE_BUCKET` | output `state_bucket` |
-| `ARTIFACT_BUCKET` | output `artifact_bucket` |
-| `ARTIFACT_ROLE_ARN` | output `artifact_role_arn` |
-| `PLAN_ROLE_ARN` | output `plan_role_arn` |
-| `APPLY_ROLE_ARN` | output `apply_role_arn` |
-| `CUSTODY_BUCKET` | output `custody_bucket` |
+accountを識別する値は、repository secretに設定する。public repositoryでは、stepの `with` と `env` の値がrunnerのログに出る。repository variableはmaskされないので、role ARN、account ID、account IDを含むbucket名がログに残る。secretの値はログでmaskされる。次のsecretを、レビュー済みのbootstrapの入力とoutputから設定する。
 
+| secret | 値 | 渡すstep |
+| --- | --- | --- |
+| `AWS_ACCOUNT_ID` | bootstrapの入力の `account_id` | 3つのroleのassume |
+| `ARTIFACT_ROLE_ARN` | output `artifact_role_arn` | register jobのassume |
+| `PLAN_ROLE_ARN` | output `plan_role_arn` | plan jobのassume |
+| `APPLY_ROLE_ARN` | output `apply_role_arn` | apply jobのassume |
+| `ARTIFACT_BUCKET` | output `artifact_bucket` | ZIPの登録 |
+| `STATE_BUCKET` | output `state_bucket` | plan |
+| `CUSTODY_BUCKET` | output `custody_bucket` | custodyを読み書きするstepと診断のstep |
+
+- `deploy.yml` は、これらのsecretをworkflow全体やjob全体の `env` には置かず、必要なstepにだけ渡す。job間のoutputはrun ID、`run_attempt`、SHA-256だけで、secretの値を含まない。
+- 以前の手順でこれらの値をrepository variableに設定していた場合は、「[repository variableからsecretへの移行](#repository-variableからsecretへの移行)」に従う。
 - state bucketの識別名は `<name_prefix>-<account_id>-<region>-state` に固定である。backendのkey、暗号化、S3ネイティブの `use_lockfile` は各rootで固定されている。
 - 各AWS jobはOIDCで指定されたroleだけをassumeし、想定するaccountであることを確認する。長期間有効なkeyはない。
 - workflowはbootstrapのapply用認証情報を扱わず、自身のAPI権限を拡大することもない。
@@ -77,7 +80,7 @@ baselineのschemaは `{root, apiBaseUrl, apiId, cognitoIssuer, cognitoClientId, 
 
 ## release custody
 
-`deploy.yml` のjob間、run間の受け渡しには、bootstrapが作るcustody bucket（`<name_prefix>-<account_id>-<region>-custody`、repository variable `CUSTODY_BUCKET`）を使う。GitHubのartifactは使わない。
+`deploy.yml` のjob間、run間の受け渡しには、bootstrapが作るcustody bucket（`<name_prefix>-<account_id>-<region>-custody`、repository secret `CUSTODY_BUCKET`）を使う。GitHubのartifactは使わない。
 
 ### bucketと権限
 
@@ -174,7 +177,7 @@ prefixは `<種類>/<run_id>/<run_attempt>/` である。`run_attempt` は、そ
       4. `terraform init -migrate-state -backend-config=backend.hcl` を実行する。決して盲目的に強制コピーしない。
       5. 移行を確認してから、ローカルのbackupを安全に保管するか、削除する。
 
-   4. `terraform output` の値から、「[GitHubの設定](#githubの設定)」のenvironmentとvariableを設定する。
+   4. `terraform output` の値から、「[GitHubの設定](#githubの設定)」のenvironment、variable、secretを設定する。
 2. **platformのpreviewとapply（`deploy.yml`）**
    - `target=platform`、`apply=false`、main上の完全なimmutable commit、明示的なnullのplatform baselineでpreviewする。この段階ではZIPのbuildも登録も**行わない**。
    - 「[workflowの実行](#workflowの実行previewとapply)」の2回のrunによるgateでレビューしてapplyする。
@@ -294,9 +297,20 @@ custody bucketを持たない、bootstrap済みの環境を更新する手順で
    terraform apply bootstrap.tfplan
    ```
 
-3. output `custody_bucket` の値を、repository variable `CUSTODY_BUCKET` に設定する。saved planのファイルは、使用後に削除する。
+3. output `custody_bucket` の値を、repository secret `CUSTODY_BUCKET` に設定する。saved planのファイルは、使用後に削除する。
 
 更新の前にGitHubのartifactに置いたレビューは使えない。更新の後は、新しいpreviewを作ってからapplyする。
+
+### repository variableからsecretへの移行
+
+以前の手順では、`AWS_ACCOUNT_ID`、`STATE_BUCKET`、`ARTIFACT_BUCKET`、`ARTIFACT_ROLE_ARN`、`PLAN_ROLE_ARN`、`APPLY_ROLE_ARN` をrepository variableに設定していた。今の `deploy.yml` はこれらをsecretから読むので、次の順に移す。`AWS_REGION` はvariableのままにする。
+
+1. 実行中、または承認待ちのdeployのrunが無いことを確かめる。
+2. 各値を、同じ名前のrepository secretに設定する。値はレビュー済みのbootstrapの入力とoutputから取る。
+3. secretを設定した後で、同じ名前のrepository variableを削除する。variableが残っていても `deploy.yml` は読まないが、設定の二重管理になる。
+4. 次のpreviewで、各jobがroleをassumeできることを確かめる。secretが無いと、値は空になり、assumeで失敗する。
+
+publicのrepositoryで以前の `deploy.yml` を実行していた場合、そのrunのログにrole ARNとaccount IDが残っている。必要なら、そのrunのログを削除する。
 
 ## リポジトリをpublicに切り替えるとき
 
@@ -323,8 +337,8 @@ CIはNode 24.21.0/npm 11.11.1、Python 3.13.16、Terraform 1.16.5と、checked-i
 
 コマンドが失敗した場合、通常のログに出るのはphase、exit status、privateな診断directoryだけである。
 
-- `deploy.yml` のjobが失敗し、roleをassumeできていれば、診断のJSONをcustody bucketの `failure-diagnostics/<run_id>/<run_attempt>/<job>/` に置く（`<job>` は `register`、`plan`、`apply`）。operatorが自分のAWSの権限で、1日以内に読む。GitHubのartifactにはしない。
-- roleをassumeする前に失敗した場合（authorize job、依存関係のinstallなど）は、S3に書けない。通常のログにphaseとexit statusだけが出て、診断は残らない。authorizeの検査の内容は秘密ではないので、失敗の理由はログの短いエラーで分かる。
+- `deploy.yml` のjobが失敗し、roleをassumeできていれば（assumeのstepが成功していれば）、最後のstepが診断のJSONをcustody bucketの `failure-diagnostics/<run_id>/<run_attempt>/<job>/` に置く（`<job>` は `register`、`plan`、`apply`）。operatorが自分のAWSの権限で、1日以内に読む。GitHubのartifactにはしない。
+- roleをassumeする前に失敗した場合（authorize job、依存関係のinstall、register jobのbuildと試験、assumeそのものの失敗など）は、S3に書けないので診断のstepを実行しない。通常のログにphaseとexit statusだけが出て、診断は残らない。authorizeの検査の内容は秘密ではないので、失敗の理由はログの短いエラーで分かる。
 - 診断を書くことに失敗しても、jobの結果は失敗のままである。
 - CIでのprivate repositoryのinfrastructure失敗では、そのrunのActions artifacts panelから `failure-diagnostics-infra-<run_id>` を1日以内にダウンロードする。アクセスはprivate repositoryの閲覧権限で制限され、environment reviewerだけに限定されるわけではない。public repositoryではartifactをアップロードしない。PRのCIはAWSの認証を持たないため、S3には置けない。
 - ダウンロードしたfileは、ローカルで0700のdirectory権限と0600のfile権限で扱い、使用後に削除する。

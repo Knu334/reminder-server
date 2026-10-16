@@ -24,7 +24,9 @@ void test("pr_has_no_aws_permissions",()=>{
 });
 void test("apply_consumes_reviewed_plan_and_never_rebuilds_zip",()=>{
   const d=workflow("deploy");assert.deepEqual(Object.keys(d.on),["workflow_dispatch"]);
-  const dispatch=d.on.workflow_dispatch as {inputs:Record<string,{default?:unknown}>};assert.equal(dispatch.inputs.apply?.default,false);
+  const dispatch=d.on.workflow_dispatch as {inputs:Record<string,{default?:unknown;description?:string}>};assert.equal(dispatch.inputs.apply?.default,false);
+  // 入力の説明は公開設定に依存しない（private の preview を前提にしない）。
+  for(const input of Object.values(dispatch.inputs))assert.doesNotMatch(String(input.description),/private/i);
   const apply=d.jobs.apply!;assert.ok(apply);assert.deepEqual(apply.needs,["authorize","plan"]);assert.ok(apply.if?.includes("inputs.apply"));assert.equal(apply.environment,"production");
   assert.ok(commands(apply).includes("release:workflow -- apply"));assert.ok(!/npm run (build|package|release:register)|terraform .*plan/.test(commands(apply)));
   const registration=d.jobs.register!;assert.ok(registration.if?.includes("!inputs.apply"));assert.ok(registration.if?.includes("inputs.target == 'application'"));assert.ok(registration.if?.includes("inputs.reviewed_run == ''"));assert.equal((commands(registration).match(/release:register/g)??[]).length,1);
@@ -62,10 +64,11 @@ void test("all_actions_pinned_and_apply_not_cancelled",()=>{
   const roleVars:string[]=[];for(const [name,job] of Object.entries(d.jobs)){const aws=job.steps.filter(s=>s.uses?.startsWith("aws-actions/"));assert.equal(job.permissions?.["id-token"]==="write",aws.length>0);if(aws.length){assert.ok(["register","plan","apply"].includes(name));assert.equal(aws.length,1);roleVars.push(String(aws[0]!.with?.["role-to-assume"]));assert.equal(aws[0]!.with?.["aws-access-key-id"],undefined);assert.ok(job.if?.includes("needs.authorize.result == 'success'"));}}
   assert.equal(new Set(roleVars).size,3);
 });
-void test("private_custody_before_oidc_and_one_day_transfer",()=>{
+void test("custody_stays_in_s3_and_ci_diagnostics_stay_one_day_artifacts",()=>{
   // custody は private S3 にだけ置く。deploy.yml の authorize は main だけを条件にし、公開設定は条件にしない。
   const d=workflow("deploy");assert.equal(d.jobs.authorize?.if?.includes("repository.private"),false);assert.ok(d.jobs.authorize?.if?.includes("github.ref == 'refs/heads/main'"));
-  assert.equal(d.env?.CUSTODY_BUCKET,"${{ vars.CUSTODY_BUCKET }}");
+  // bucket 名は account ID を含むので、workflow 全体の env には置かない（必要な step にだけ secret から渡す）。
+  assert.equal(d.env?.CUSTODY_BUCKET,undefined);
   for(const job of Object.values(d.jobs))for(const step of job.steps)if(step.run){assert.ok(!/terraform .*show.*-json/.test(step.run));assert.ok(!/AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY)\s*:/.test(step.run));}
   // PR の CI は AWS の認証を持たないので、診断は今のまま1日の private artifact にする。
   const ci=workflow("ci");let uploads=0;
@@ -78,12 +81,13 @@ void test("maintenance_or_user_admin_workflow_absent",()=>{
   const dep=parseDocument(readFileSync(".github/dependabot.yml","utf8")).toJS() as {updates:Array<{"package-ecosystem":string;directory:string;schedule:{interval:string}}>};assert.deepEqual(dep.updates.map(u=>u["package-ecosystem"]).sort(),["github-actions","npm","terraform","terraform","terraform"]);for(const u of dep.updates){assert.equal(u.schedule.interval,"weekly");assert.ok(!u.directory.includes(".devcontainer"));}
 });
 
-void test("failure diagnostics upload follows commands and cannot become approved preview evidence",()=>{
- // deploy.yml の AWS の job は、最後の step で失敗時だけ diagnostics phase を実行し、S3 の failure-diagnostics に書く。
+void test("aws_jobs_write_failure_diagnostics_only_after_role_assumption",()=>{
+ // deploy.yml の AWS の job は、最後の step で、失敗し、かつ role を assume できていたときだけ diagnostics phase を実行し、S3 の failure-diagnostics に書く。
  const d=workflow("deploy");
  for(const name of ["register","plan","apply"]){
   const job=d.jobs[name]!,last=job.steps.at(-1)!;
-  assert.equal(last.if,"failure()");assert.equal(last.run?.trim(),"npm run release:workflow -- diagnostics");assert.equal(last["continue-on-error"],undefined);
+  const assume=job.steps.filter(s=>s.uses?.startsWith("aws-actions/configure-aws-credentials@"));assert.equal(assume.length,1);assert.equal(assume[0]!.id,"assume");
+  assert.equal(last.if,"failure() && steps.assume.outcome == 'success'");assert.equal(last.run?.trim(),"npm run release:workflow -- diagnostics");assert.equal(last["continue-on-error"],undefined);
   assert.ok(job.steps.slice(0,-1).some(s=>s.run));
   assert.ok(job.steps.slice(0,-1).every(s=>!s.if?.includes("failure()")&&!s.run?.includes("-- diagnostics")));
  }
@@ -160,6 +164,26 @@ void test("custody_location_flows_through_job_outputs",()=>{
   const envs=[d.env,...Object.values(d.jobs).flatMap(j=>[j.env,...j.steps.map(s=>s.env)])];
   for(const env of envs){assert.equal(env?.JOB,undefined);assert.equal(env?.GITHUB_JOB,undefined);}
   assert.equal(JSON.stringify(d).includes("custody_sha256"),false);
+});
+void test("deploy_reads_only_region_from_variables_and_account_identifiers_from_secrets",()=>{
+  // public のリポジトリでは、step の with と env の値が runner のログに出る。repository variable は mask されないので、
+  // account ID を含む値（role の ARN、account ID、bucket 名）は secret から渡す。region だけを variable にする。
+  const text=readFileSync(".github/workflows/deploy.yml","utf8"),d=workflow("deploy");
+  assert.deepEqual([...new Set(Array.from(text.matchAll(/\bvars\.([A-Za-z0-9_]+)/g),m=>m[1]))],["AWS_REGION"]);
+  for(const [name,role] of [["register","ARTIFACT_ROLE_ARN"],["plan","PLAN_ROLE_ARN"],["apply","APPLY_ROLE_ARN"]] as const){
+    const job=d.jobs[name]!,assume=job.steps.find(s=>s.uses?.startsWith("aws-actions/configure-aws-credentials@"))!;
+    assert.equal(assume.with?.["role-to-assume"],`\${{ secrets.${role} }}`);assert.equal(assume.with?.["allowed-account-ids"],"${{ secrets.AWS_ACCOUNT_ID }}");assert.equal(assume.with?.["aws-region"],"${{ vars.AWS_REGION }}");
+    assert.equal(job.env,undefined,`${name} must not expose settings to every step`);
+    // custody bucket は、custody を読み書きする step と診断の step にだけ渡す。
+    const users=job.steps.filter(s=>s.env?.CUSTODY_BUCKET!==undefined).map(s=>s.run?.trim());
+    assert.deepEqual(users,[`npm run release:workflow -- ${name==="register"?"register-custody":name}`,"npm run release:workflow -- diagnostics"]);
+    for(const s of job.steps)if(s.env?.CUSTODY_BUCKET!==undefined)assert.equal(s.env.CUSTODY_BUCKET,"${{ secrets.CUSTODY_BUCKET }}");
+  }
+  assert.equal(d.jobs.register!.steps.find(s=>s.run?.includes("npm run release:register"))!.env?.ARTIFACT_BUCKET,"${{ secrets.ARTIFACT_BUCKET }}");
+  assert.equal(d.jobs.plan!.steps.find(s=>s.run?.trim()==="npm run release:workflow -- plan")!.env?.STATE_BUCKET,"${{ secrets.STATE_BUCKET }}");
+  for(const name of ["ARTIFACT_BUCKET","STATE_BUCKET","CUSTODY_BUCKET","AWS_ACCOUNT_ID"])assert.equal(d.env?.[name],undefined,name);
+  // job の output は run ID、run_attempt、SHA-256 だけで、secret の値を含まない（含むと GitHub が output を落とす）。
+  for(const job of Object.values(d.jobs))for(const value of Object.values(job.outputs??{}))assert.match(value,/^\$\{\{ steps\.[a-z]+\.outputs\.[a-z0-9_]+ \}\}$/);
 });
 void test("ci_diagnostics_remain_private_only",()=>{
   const ci=workflow("ci"),uploads=Object.values(ci.jobs).flatMap(j=>j.steps).filter(s=>s.uses?.startsWith("actions/upload-artifact@"));

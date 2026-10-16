@@ -12,7 +12,7 @@ on:
         type: string
         required: true
       apply:
-        description: Apply only after reviewing a successful private preview
+        description: レビューした成功済みの preview の後でだけ apply する
         type: boolean
         default: false
       reviewed_run:
@@ -50,7 +50,6 @@ env:
   EXPECTED_REVIEW_SHA256: ${{ inputs.expected_review_sha256 }}
   REVIEWED_RUN: ${{ inputs.reviewed_run }}
   AWS_REGION: ${{ vars.AWS_REGION }}
-  CUSTODY_BUCKET: ${{ vars.CUSTODY_BUCKET }}
 jobs:
   authorize:
     if: github.ref == 'refs/heads/main'
@@ -139,11 +138,12 @@ jobs:
           npm run --silent audit:all -- --json > "$RUNNER_TEMP/registered/audit.json"
           npm run --silent sbom > "$RUNNER_TEMP/registered/sbom.json"
       - name: Assume isolated artifact role
+        id: assume
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
         with:
-          role-to-assume: ${{ vars.ARTIFACT_ROLE_ARN }}
+          role-to-assume: ${{ secrets.ARTIFACT_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          allowed-account-ids: ${{ secrets.AWS_ACCOUNT_ID }}
           role-session-name: reminder-${{ github.run_id }}-artifact
           role-duration-seconds: 3600
           unset-current-credentials: true
@@ -160,13 +160,17 @@ jobs:
             --sbom-id "sha256:$(sha256sum "$RUNNER_TEMP/registered/sbom.json" | cut -d ' ' -f 1)" \
             --tests-id "sha256:$(sha256sum "$RUNNER_TEMP/registered/tests.txt" | cut -d ' ' -f 1)" > /dev/null
         env:
-          ARTIFACT_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
+          ARTIFACT_BUCKET: ${{ secrets.ARTIFACT_BUCKET }}
       - name: Keep registration and evidence in private custody for this run
         id: custody
         run: npm run release:workflow -- register-custody
+        env:
+          CUSTODY_BUCKET: ${{ secrets.CUSTODY_BUCKET }}
       - name: Keep failure diagnostics in private custody
-        if: failure()
+        if: failure() && steps.assume.outcome == 'success'
         run: npm run release:workflow -- diagnostics
+        env:
+          CUSTODY_BUCKET: ${{ secrets.CUSTODY_BUCKET }}
   plan:
     needs: [authorize, register]
     if: always() && needs.authorize.result == 'success' && (needs.register.result == 'success' || needs.register.result == 'skipped')
@@ -200,11 +204,12 @@ jobs:
           npm install --global npm@11.11.1
           npm ci
       - name: Assume isolated plan role
+        id: assume
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
         with:
-          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          role-to-assume: ${{ secrets.PLAN_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          allowed-account-ids: ${{ secrets.AWS_ACCOUNT_ID }}
           role-session-name: reminder-${{ github.run_id }}-plan
           role-duration-seconds: 3600
           unset-current-credentials: true
@@ -219,10 +224,13 @@ jobs:
           SOURCE_MANIFEST_SHA256: ${{ inputs.reviewed_run != '' && inputs.expected_review_sha256 || needs.register.outputs.custody_manifest_sha256 }}
           RELEASE_INPUTS_JSON: ${{ inputs.target == 'platform' && secrets.PLATFORM_INPUTS_JSON || secrets.APPLICATION_INPUTS_JSON }}
           RELEASE_BASELINE_JSON: ${{ inputs.target == 'platform' && secrets.PLATFORM_BASELINE_JSON || secrets.APPLICATION_BASELINE_JSON }}
-          STATE_BUCKET: ${{ vars.STATE_BUCKET }}
+          STATE_BUCKET: ${{ secrets.STATE_BUCKET }}
+          CUSTODY_BUCKET: ${{ secrets.CUSTODY_BUCKET }}
       - name: Keep failure diagnostics in private custody
-        if: failure()
+        if: failure() && steps.assume.outcome == 'success'
         run: npm run release:workflow -- diagnostics
+        env:
+          CUSTODY_BUCKET: ${{ secrets.CUSTODY_BUCKET }}
   apply:
     needs: [authorize, plan]
     if: ${{ !cancelled() && needs.authorize.result == 'success' && needs.plan.result == 'success' && inputs.apply }}
@@ -251,11 +259,12 @@ jobs:
           npm install --global npm@11.11.1
           npm ci
       - name: Assume isolated apply role
+        id: assume
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
         with:
-          role-to-assume: ${{ vars.APPLY_ROLE_ARN }}
+          role-to-assume: ${{ secrets.APPLY_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
-          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          allowed-account-ids: ${{ secrets.AWS_ACCOUNT_ID }}
           role-session-name: reminder-${{ github.run_id }}-apply
           role-duration-seconds: 3600
           unset-current-credentials: true
@@ -270,6 +279,9 @@ jobs:
           REVIEWED_RUN: ${{ inputs.reviewed_run }}
           REVIEWED_ATTEMPT: ${{ needs.authorize.outputs.reviewed_attempt }}
           EXPECTED_REVIEW_SHA256: ${{ inputs.expected_review_sha256 }}
+          CUSTODY_BUCKET: ${{ secrets.CUSTODY_BUCKET }}
       - name: Keep failure diagnostics in private custody
-        if: failure()
+        if: failure() && steps.assume.outcome == 'success'
         run: npm run release:workflow -- diagnostics
+        env:
+          CUSTODY_BUCKET: ${{ secrets.CUSTODY_BUCKET }}
