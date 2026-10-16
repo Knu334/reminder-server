@@ -10,12 +10,12 @@ import {z} from "zod";
 import {createRegistrationClient,readRegisteredArtifact,type RegisteredArtifact,type ReleaseManifest} from "./artifact";
 import {createPlanManifest,verifySavedPlan,verifyPostApplyBaseline,validateRegisteredArtifact,type ReleaseBaseline,type ReleaseRoot,type PrivatePlanManifest} from "./plan-guard";
 import {verifyMain} from "./verify-release";
-import {applicationCustodyNames,createS3CustodyStore,custodyNames,readCustody,writeCustody,type CustodyManifest,type CustodyReference,type CustodyStore} from "./custody";
+import {applicationCustodyNames,assertUsable,createS3CustodyStore,custodyNames,custodyPrefix,readCustody,readOriginalManifest,writeCustody,type CustodyLocation,type CustodyManifest,type CustodyReference,type CustodyStore} from "./custody";
 import {smoke} from "./smoke";
 
 export interface WorkflowContext {
   directory:string;root:ReleaseRoot;commit:string;region:string;apply:boolean;
-  expectedReviewSha256:string;expectedCustodySha256?:string;published:boolean;schedulerEnabled:boolean;
+  published:boolean;schedulerEnabled:boolean;
   /** custody の置き場所（private S3）。書く object の prefix は今の job の run ID と run_attempt で決まる。 */
   custodyStore:CustodyStore;runId:string;runAttempt:number;now:()=>Date;
 }
@@ -46,6 +46,7 @@ export function authorizeDispatch(input:{event:string;ref:string;commit:string;h
   if(input.reviewedRun!==""&&!/^[1-9][0-9]*$/.test(input.reviewedRun))throw Error("Invalid reviewed run");
   if(input.apply&&!input.reviewedRun)throw Error("Apply requires a reviewed preview run and digest");
   if(input.reviewedRun&&!sha.safeParse(input.expectedReviewSha256).success)throw Error("Reviewed run requires the reviewed preview digest");
+  if(input.reviewedRun&&!input.apply&&input.root!=="application")throw Error("Reused ZIP preview is for application only");
 }
 /** reviewed_run は、この repository の main で手動実行され成功した deploy.yml の run に限る。公開設定は条件にしない。 */
 export function verifyReviewedRunMetadata(input:unknown,repository:string):void{
@@ -118,6 +119,7 @@ export async function planRelease(c:WorkflowContext,config:WorkflowConfig,source
   if(c.apply&&kind!=="release-review")throw Error("Apply run requires original preview custody");
   if(c.root==="application"&&!source)throw Error("Registered artifact evidence required");
   if(c.root==="platform"&&kind==="registered-release")throw Error("Platform has no registered artifact");
+  if(kind==="release-review"&&!c.apply&&c.root!=="application")throw Error("Reused ZIP preview is for application only");
   await checkedCommit(c,services.run);await secureDirectory(c.directory);
   // 種類ごと・読むたびに新しい空のディレクトリへ取り出し、終わったら消す。
   const sourceDirectory=source?await mkdtemp(join(dirname(resolve(c.directory)),"release-source-")):undefined;
@@ -173,15 +175,36 @@ function initialPlatformBaseline(outputs:unknown,state:unknown,inputs:Record<str
   const known:ReleaseBaseline={root:"platform",apiBaseUrl:null,apiId:null,cognitoIssuer:`https://cognito-idp.${inputs.region}.amazonaws.com/${pool.id}`,cognitoClientId:client.id,cognitoAuthBaseUrl:`https://${domain.domain}.auth.${inputs.region}.amazoncognito.com`};verifyPostApplyBaseline(outputs,known);return known;
 }
 export interface ReleaseLedger {commit:string;root:ReleaseRoot;reviewSha256:string;artifactSha256:string|null;apiVersion:string|null;cleanupVersion:string|null;url:string|null;result:"verified"}
-/** Apply this run's checked saved binary only; never replan, rebuild or register. */
-export async function applyRelease(c:WorkflowContext,services:ReleaseServices):Promise<ReleaseLedger>{
-  checkedContext(c);sha.parse(c.expectedReviewSha256);if(!c.apply||!c.expectedCustodySha256)throw Error("Explicit apply and external plan-job custody digest required");await secureDirectory(c.directory);await checkCustody(c.directory,c.root,c.expectedCustodySha256);await checkedCommit(c,services.run);
+/**
+ * Apply this run's checked saved binary only; never replan, rebuild or register.
+ * original は元の preview（入力の reviewed_run と expected_review_sha256）、current は同じ run の plan job の output。
+ * 元の preview は manifest だけを照合し、同じ run の release-review を c.directory（空の実ディレクトリか、無いこと）へ取り出す。
+ * 結果（ledger.json と、初回の platform では post-baseline.json）は今の job の release-result に書く。
+ */
+export async function applyRelease(c:WorkflowContext,references:{original:CustodyReference;current:CustodyReference},services:ReleaseServices):Promise<ReleaseLedger>{
+  checkedContext(c);if(!c.apply)throw Error("Explicit apply required");
+  const {original,current}=references;
+  for(const r of [original,current]){if(r.location.kind!=="release-review")throw Error("Apply reads release reviews only");custodyPrefix(r.location);sha.parse(r.manifestSha256);}
+  if(current.location.runId!==c.runId)throw Error("Apply reads this run's plan job custody");
+  await checkedCommit(c,services.run);
+  // 入力の digest は元の preview の manifest の bytes と照合する（plan の digest とは比べない）。
+  const reviewed=await readOriginalManifest(c.custodyStore,original.location,original.manifestSha256);
+  if(reviewed.root!==c.root)throw Error("Reviewed preview root mismatch");assertUsable(reviewed,c.now());const inheritedExpiresAt=z.string().parse(reviewed.expiresAt);
+  // 同じ run の plan job の release-review は、元の期限を引き継いでいなければならない。
+  const transferred=await readCustody(c.custodyStore,current.location,current.manifestSha256,c.directory,{root:c.root,now:c.now(),inheritedExpiresAt});
+  if(transferred.sourceManifestSha256!==undefined)throw Error("Apply cannot use a reused preview bundle");
+  if(transferred.planReviewSha256!==reviewed.planReviewSha256)throw Error("Plan job digest differs from reviewed preview");
+  await checkCustody(c.directory,c.root,transferred.custodySha256);
   if(!equal(await parseJson(path(c,"request.json")),request(c)))throw Error("Apply request changed");
+  if(jsonObject.parse(await parseJson(path(c,"preview.json"))).preview!==false)throw Error("Apply requires an apply-run plan");
   const manifest=await parseJson(path(c,"review.json")) as PrivatePlanManifest,baseline=await parseJson(path(c,"baseline.json")) as ReleaseBaseline|null;
   const a=c.root==="application"?(await readManifest(c.directory,c)).artifact:null;
-  if(manifest.reviewSha256!==c.expectedReviewSha256)throw Error("Reviewed digest mismatch");if(a)await services.head(a,c.region);
+  // review.json の plan の digest は、照合済みの manifest の planReviewSha256 と比べる。
+  if(manifest.reviewSha256!==transferred.planReviewSha256)throw Error("Reviewed digest mismatch");if(a)await services.head(a,c.region);
   await init(c,c.root,services.run);const plan=await shownPlan(c,services.run);
   verifySavedPlan(manifest,plan,await readFile(path(c,"saved.tfplan")),await readFile(path(c,"inputs.json")),a,c.commit,baseline,c.root);
+  // 承認を待つ間に期限を過ぎていないことを、apply の直前にもう一度確かめる。
+  assertUsable(transferred,c.now(),inheritedExpiresAt);
   await services.run("terraform",[`-chdir=${rootPath(c.root)}`,"apply","-input=false","-lock=true","-lock-timeout=5m",path(c,"saved.tfplan")]);
   const outputs:unknown=JSON.parse(await services.run("terraform",[`-chdir=${rootPath(c.root)}`,"output","-json"]));await privateJson(path(c,"outputs.json"),outputs);
   const known=baseline??initialPlatformBaseline(outputs,JSON.parse(await services.run("terraform",[`-chdir=${rootPath(c.root)}`,"show","-json"])),jsonObject.parse(await parseJson(path(c,"inputs.json"))));verifyPostApplyBaseline(outputs,known);await privateJson(path(c,"post-baseline.json"),known);
@@ -191,13 +214,17 @@ export async function applyRelease(c:WorkflowContext,services:ReleaseServices):P
     if(!isDeepStrictEqual(jsonObject.parse(jsonObject.parse(outputs).restored_tables).value,selected.restored_tables))throw Error("Post-apply restored map mismatch");
   }
   if(a){verifyRuntimeDataOutputs(jsonObject.parse(outputs),jsonObject.parse(await parseJson(path(c,"inputs.json"))));await services.verify(a,outputs,c.region);await services.smoke(known,c.published);}
-  const ledger:ReleaseLedger={commit:c.commit,root:c.root,reviewSha256:manifest.reviewSha256,artifactSha256:a?.sha256Hex??null,apiVersion:a?output(outputs,"api_version"):null,cleanupVersion:a?output(outputs,"cleanup_version"):null,url:a?output(outputs,"api_base_url"):null,result:"verified"};await privateJson(path(c,"ledger.json"),ledger);return ledger;
+  const ledger:ReleaseLedger={commit:c.commit,root:c.root,reviewSha256:manifest.reviewSha256,artifactSha256:a?.sha256Hex??null,apiVersion:a?output(outputs,"api_version"):null,cleanupVersion:a?output(outputs,"cleanup_version"):null,url:a?output(outputs,"api_base_url"):null,result:"verified"};await privateJson(path(c,"ledger.json"),ledger);
+  // post-baseline.json は常に作るが、release-result に置くのは初回の platform の構築のときだけ。
+  await writeCustody(c.custodyStore,{kind:"release-result",runId:c.runId,runAttempt:c.runAttempt},c.directory,{root:c.root},c.now(),{initialPlatform:c.root==="platform"&&baseline===null});
+  return ledger;
 }
 const localRun:CommandRunner=(command,args)=>{
   const phase=command==="terraform"?(args[1]??"terraform"):command==="git"?"git":"provenance";
   return Promise.resolve(runPrivateCommand(command,args,{directory:join(process.env.RUNNER_TEMP??tmpdir(),"release-diagnostics"),phase,captureStdout:phase==="init"}));
 };
 function required(name:string):string {const value=process.env[name];if(!value)throw Error("Missing workflow configuration");return value;}
+function optional(name:string):string {return process.env[name]??"";}
 function boolean(name:string):boolean {const value=required(name);if(value!=="true"&&value!=="false")throw Error("Invalid workflow boolean");return value==="true";}
 const quietIO={stdout:(_s:string)=>{},stderr:(_s:string)=>{}};
 const defaultServices:ReleaseServices={run:localRun,head:async(a,r)=>{const client=createRegistrationClient(r);try{await readRegisteredArtifact(a,client);}finally{client.destroy();}},verify:async(_a,_o,r)=>{if(await verifyMain(["--artifact",join(required("RUNNER_TEMP"),"release","artifact.json"),"--outputs",join(required("RUNNER_TEMP"),"release","outputs.json"),"--region",r],quietIO)!==0)throw Error("Lambda release proof failed");},smoke:async(b,p)=>{if(!b.apiBaseUrl)throw Error("Known URL required");await smoke(b.apiBaseUrl,p);}};
@@ -209,30 +236,79 @@ const runIdPattern=/^[1-9][0-9]{0,19}$/,runAttemptPattern=/^[1-9][0-9]{0,8}$/;
 function runAttemptValue(value:string):number{if(!runAttemptPattern.test(value))throw Error("Invalid run attempt");return Number(value);}
 /**
  * plan job が読む custody の置き場所を環境変数から決める。種類は入力（reviewed_run と root）で決まり、S3 と Terraform に触れる前に形式を確かめる。
- * reviewed_run があれば release-review（root を問わない）、無い application は同じ run の registered-release、無い platform は source を持たない。
- * 読む job 自身の run_attempt で代用しない。
+ * reviewed_run があれば release-review、無い application は同じ run の registered-release、無い platform は source を持たない。
+ * reviewed_run の経路では、SOURCE_MANIFEST_SHA256 が入力の EXPECTED_REVIEW_SHA256 と一致しなければならない（deploy.yml の配線に頼らない）。
+ * ZIP を再利用した新しい preview（reviewed_run があり apply=false）は application だけ。読む job 自身の run_attempt で代用しない。
  */
-function planSource(root:ReleaseRoot,runId:string):CustodyReference|undefined{
-  const reviewedRun=process.env.REVIEWED_RUN??"",id=process.env.SOURCE_RUN_ID??"",attempt=process.env.SOURCE_ATTEMPT??"",manifest=process.env.SOURCE_MANIFEST_SHA256??"";
+function planSource(root:ReleaseRoot,apply:boolean,runId:string):CustodyReference|undefined{
+  const reviewedRun=optional("REVIEWED_RUN"),id=optional("SOURCE_RUN_ID"),attempt=optional("SOURCE_ATTEMPT"),manifest=optional("SOURCE_MANIFEST_SHA256");
+  if(reviewedRun&&!apply&&root!=="application")throw Error("Reused ZIP preview is for application only");
   if(!reviewedRun&&root==="platform"){if(id!==""||attempt!==""||manifest!=="")throw Error("Platform preview takes no source custody");return undefined;}
   if(!runIdPattern.test(id)||!runAttemptPattern.test(attempt)||!sha.safeParse(manifest).success)throw Error("Missing or malformed source custody outputs");
   if(id!==(reviewedRun||runId))throw Error("Source custody run mismatch");
+  if(reviewedRun&&manifest!==sha.parse(optional("EXPECTED_REVIEW_SHA256")))throw Error("Source manifest differs from the reviewed digest");
   return {location:{kind:reviewedRun?"release-review":"registered-release",runId:id,runAttempt:runAttemptValue(attempt)},manifestSha256:manifest};
+}
+/**
+ * apply job が読む2つの置き場所を環境変数から決め、S3 と Terraform に触れる前に形式を確かめる。
+ * original は元の preview（REVIEWED_RUN、authorize の reviewed_attempt、EXPECTED_REVIEW_SHA256）、current は同じ run の plan job の output（PLAN_CUSTODY_*）。
+ * どちらも、読む job 自身の run_attempt で代用しない。
+ */
+function applyReferences(runId:string):{original:CustodyReference;current:CustodyReference}{
+  const reviewedRun=optional("REVIEWED_RUN"),reviewedAttempt=optional("REVIEWED_ATTEMPT"),expected=optional("EXPECTED_REVIEW_SHA256");
+  if(!runIdPattern.test(reviewedRun)||!runAttemptPattern.test(reviewedAttempt)||!sha.safeParse(expected).success)throw Error("Missing or malformed reviewed preview reference");
+  const planRun=optional("PLAN_CUSTODY_RUN_ID"),planAttempt=optional("PLAN_CUSTODY_ATTEMPT"),planManifest=optional("PLAN_CUSTODY_MANIFEST_SHA256");
+  if(!runIdPattern.test(planRun)||!runAttemptPattern.test(planAttempt)||!sha.safeParse(planManifest).success)throw Error("Missing or malformed plan job custody outputs");
+  if(planRun!==runId)throw Error("Plan job custody run mismatch");
+  return {
+    original:{location:{kind:"release-review",runId:reviewedRun,runAttempt:runAttemptValue(reviewedAttempt)},manifestSha256:expected},
+    current:{location:{kind:"release-review",runId:planRun,runAttempt:runAttemptValue(planAttempt)},manifestSha256:planManifest},
+  };
 }
 function actionCounts(plan:unknown):Record<string,number>{
   const resources=z.array(jsonObject).parse(jsonObject.parse(plan).resource_changes),counts:Record<string,number>={};
   for(const r of resources){const action=z.array(z.string()).parse(jsonObject.parse(r.change).actions).join("+");counts[action]=(counts[action]??0)+1;}
   return counts;
 }
+const MAX_DIAGNOSTICS=8,diagnosticSources=[["release","release-diagnostics"],["infra","infra-diagnostics"]] as const;
+/**
+ * 失敗した job の診断（$RUNNER_TEMP/release-diagnostics/*.json と infra-diagnostics/*.json）を failure-diagnostics/<run_id>/<run_attempt>/<GITHUB_JOB>/ に書く。
+ * 名前の衝突を防ぐため、元のディレクトリに応じて release- か infra- を前に付け、1つの一時ディレクトリにまとめてから書く。
+ * 合計が8個を超えるときは、release-diagnostics の名前順、次に infra-diagnostics の名前順で最初の8個だけを書き、残した数だけを標準エラーに出す。
+ * ファイルが無ければ何もしない。symlink など通常のファイルでないものがあれば、読まずに止まる。
+ */
+async function writeDiagnostics(inject:WorkflowInjection,io:WorkflowIO):Promise<void>{
+  const runId=required("GITHUB_RUN_ID");if(!runIdPattern.test(runId))throw Error("Invalid run ID");
+  const location:CustodyLocation={kind:"failure-diagnostics",runId,runAttempt:runAttemptValue(required("GITHUB_RUN_ATTEMPT")),job:required("GITHUB_JOB")};custodyPrefix(location);
+  const temp=required("RUNNER_TEMP"),found:Array<{name:string;from:string}>=[];
+  for(const [label,name] of diagnosticSources){
+    const directory=join(temp,name),s=await lstat(directory).catch((e:unknown)=>{if((e as NodeJS.ErrnoException).code==="ENOENT")return undefined;throw e;});
+    if(!s)continue;if(!s.isDirectory()||s.isSymbolicLink())throw Error("Invalid diagnostics directory");
+    for(const file of (await readdir(directory)).filter(n=>n.endsWith(".json")).sort()){
+      const from=join(directory,file),f=await lstat(from);if(!f.isFile()||f.isSymbolicLink())throw Error("Invalid diagnostics file");
+      found.push({name:`${label}-${file}`,from});
+    }
+  }
+  if(found.length===0)return;
+  const kept=found.slice(0,MAX_DIAGNOSTICS),staging=await mkdtemp(join(temp,"failure-diagnostics-"));
+  const client=inject.custodyStore?undefined:new S3Client({});
+  try{
+    for(const {name,from} of kept)await writeFile(join(staging,name),await readFile(from),{mode:0o600,flag:"wx"});
+    await writeCustody(inject.custodyStore??createS3CustodyStore(required("CUSTODY_BUCKET"),client!),location,staging,{root:null},(inject.now??(()=>new Date()))());
+    if(kept.length<found.length)io.stderr(`Kept ${kept.length} of ${found.length} diagnostic files\n`);
+  }finally{client?.destroy();await rm(staging,{recursive:true,force:true});}
+}
 export async function workflowMain(argv:string[],inject:WorkflowInjection={}):Promise<void>{
-  if(argv.length!==1||!["authorize","secure","register-custody","plan","apply"].includes(argv[0]!))throw Error("Unknown finite workflow phase");
+  if(argv.length!==1||!["authorize","secure","register-custody","plan","apply","diagnostics"].includes(argv[0]!))throw Error("Unknown finite workflow phase");
   const phase=argv[0]!,services=inject.services??defaultServices,io=inject.io??processIO;
+  // 診断は失敗した job の最後に書く。release の設定には依存しない。
+  if(phase==="diagnostics"){await writeDiagnostics(inject,io);return;}
   const directory=join(required("RUNNER_TEMP"),"release");if(phase==="secure"){await secureDirectory(directory);return;}
-  const base={directory,root:required("RELEASE_ROOT") as ReleaseRoot,commit:required("RELEASE_COMMIT"),region:required("AWS_REGION"),apply:boolean("RELEASE_APPLY"),published:boolean("RELEASE_PUBLISHED"),schedulerEnabled:boolean("RELEASE_SCHEDULER_ENABLED"),expectedReviewSha256:process.env.EXPECTED_REVIEW_SHA256??"",...(process.env.EXPECTED_CUSTODY_SHA256?{expectedCustodySha256:process.env.EXPECTED_CUSTODY_SHA256}:{})};
+  const base={directory,root:required("RELEASE_ROOT") as ReleaseRoot,commit:required("RELEASE_COMMIT"),region:required("AWS_REGION"),apply:boolean("RELEASE_APPLY"),published:boolean("RELEASE_PUBLISHED"),schedulerEnabled:boolean("RELEASE_SCHEDULER_ENABLED")};
   if(phase==="authorize"){
     const c=base;
     const head=(await localRun("git",["rev-parse","HEAD"])).trim();let contains=true;try{await localRun("git",["merge-base","--is-ancestor",c.commit,"origin/main"]);}catch{contains=false;}
-        const reviewedRun=process.env.REVIEWED_RUN??"";authorizeDispatch({event:required("GITHUB_EVENT_NAME"),ref:required("GITHUB_REF"),commit:c.commit,head,mainContainsCommit:contains,apply:c.apply,reviewedRun,expectedReviewSha256:c.expectedReviewSha256,root:c.root});
+    const reviewedRun=optional("REVIEWED_RUN");authorizeDispatch({event:required("GITHUB_EVENT_NAME"),ref:required("GITHUB_REF"),commit:c.commit,head,mainContainsCommit:contains,apply:c.apply,reviewedRun,expectedReviewSha256:optional("EXPECTED_REVIEW_SHA256"),root:c.root});
     if(reviewedRun){
       const repo=required("GITHUB_REPOSITORY");if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))throw Error("Invalid repository");
       const get=async(url:string):Promise<unknown>=>{const response=await fetch(url,{headers:{Authorization:`Bearer ${required("DRIVER_GITHUB_TOKEN")}`,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"}});if(!response.ok)throw Error("Reviewed run inaccessible");return response.json();};
@@ -245,6 +321,9 @@ export async function workflowMain(argv:string[],inject:WorkflowInjection={}):Pr
   // custody を読み書きする phase は、置き場所（今の job の run ID と run_attempt）と bucket を要する。
   const runId=required("GITHUB_RUN_ID");if(!runIdPattern.test(runId))throw Error("Invalid run ID");
   const runAttempt=runAttemptValue(required("GITHUB_RUN_ATTEMPT"));
+  // 読む置き場所の形式は、S3 の client を作る前に確かめる。
+  const source=phase==="plan"?planSource(base.root,base.apply,runId):undefined;
+  const references=phase==="apply"?applyReferences(runId):undefined;
   const client=inject.custodyStore?undefined:new S3Client({});
   try{
     const c:WorkflowContext={...base,custodyStore:inject.custodyStore??createS3CustodyStore(required("CUSTODY_BUCKET"),client!),runId,runAttempt,now:inject.now??(()=>new Date())};
@@ -255,7 +334,6 @@ export async function workflowMain(argv:string[],inject:WorkflowInjection={}):Pr
       await writeFile(required("GITHUB_OUTPUT"),`custody_run_id=${c.runId}\ncustody_attempt=${c.runAttempt}\ncustody_manifest_sha256=${written.manifestSha256}\n`,{flag:"a"});return;
     }
     if(phase==="plan"){
-      const source=planSource(c.root,c.runId);
       const result=await planRelease(c,{inputs:JSON.parse(required("RELEASE_INPUTS_JSON")),baseline:JSON.parse(required("RELEASE_BASELINE_JSON")),stateBucket:required("STATE_BUCKET")},source,services);
       // review_sha256 は release-review の manifest.json の SHA-256 である（plan の digest ではない）。
       await writeFile(required("GITHUB_OUTPUT"),`custody_run_id=${c.runId}\ncustody_attempt=${c.runAttempt}\ncustody_manifest_sha256=${result.manifestSha256}\nreview_sha256=${result.manifestSha256}\n`,{flag:"a"});
@@ -263,8 +341,9 @@ export async function workflowMain(argv:string[],inject:WorkflowInjection={}):Pr
       const counts=actionCounts(await parseJson(path(c,"plan.json")));
       await writeFile(required("GITHUB_STEP_SUMMARY"),`Reviewed ${c.root} commit ${c.commit}\n\nreview_sha256: ${result.manifestSha256}\n\nreview_sha256 (Base64): ${result.manifestSha256Base64}\n\nCustody: run ${c.runId}, run_attempt ${c.runAttempt}\n\nAction counts: ${JSON.stringify(counts)}\n`,{flag:"a"});return;
     }
-    if(!c.expectedCustodySha256)throw Error("Apply requires plan-job custody digest");
-    const ledger=await applyRelease(c,services);io.stdout(JSON.stringify(ledger)+"\n");
+    // ledger は release-result にだけ置き、標準出力には出さない。summary は root、commit、result、release-result の置き場所だけ。
+    const ledger=await applyRelease(c,references!,services);
+    await writeFile(required("GITHUB_STEP_SUMMARY"),`Applied ${c.root} commit ${c.commit}\n\nresult: ${ledger.result}\n\nRelease result: run ${c.runId}, run_attempt ${c.runAttempt}\n`,{flag:"a"});
   }finally{client?.destroy();}
 }
 /** CLI の境界。失敗は PrivateCommandError の定型文か固定の文言だけを標準エラーに出し、終了コードを返す。 */
