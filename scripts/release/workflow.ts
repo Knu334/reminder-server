@@ -291,7 +291,7 @@ const MAX_DIAGNOSTICS=8,diagnosticSources=[["release","release-diagnostics"],["i
 /**
  * 失敗した job の診断（$RUNNER_TEMP/release-diagnostics/*.json と infra-diagnostics/*.json）を failure-diagnostics/<run_id>/<run_attempt>/<GITHUB_JOB>/ に書く。
  * 名前の衝突を防ぐため、元のディレクトリに応じて release- か infra- を前に付け、1つの一時ディレクトリにまとめてから書く。
- * 合計が8個を超えるときは、release-diagnostics の名前順、次に infra-diagnostics の名前順で最初の8個だけを書き、残した数だけを標準エラーに出す。
+ * 合計が8個を超えるときは、release-diagnostics、次に infra-diagnostics の順に、各ディレクトリの中では新しいもの（名前の降順）から8個だけを書き、残した数だけを標準エラーに出す。
  * ファイルが無ければ何もしない。symlink など通常のファイルでないものがあれば、読まずに止まる。
  */
 async function writeDiagnostics(inject:WorkflowInjection,io:WorkflowIO):Promise<void>{
@@ -301,7 +301,8 @@ async function writeDiagnostics(inject:WorkflowInjection,io:WorkflowIO):Promise<
   for(const [label,name] of diagnosticSources){
     const directory=join(temp,name),s=await lstat(directory).catch((e:unknown)=>{if((e as NodeJS.ErrnoException).code==="ENOENT")return undefined;throw e;});
     if(!s)continue;if(!s.isDirectory()||s.isSymbolicLink())throw Error("Invalid diagnostics directory");
-    for(const file of (await readdir(directory)).filter(n=>n.endsWith(".json")).sort()){
+    // 名前（failure-<epoch ms>-<uuid>.json）の降順は新しい順なので、ディレクトリごとに新しいものから並べる。
+    for(const file of (await readdir(directory)).filter(n=>n.endsWith(".json")).sort().reverse()){
       const from=join(directory,file),f=await lstat(from);if(!f.isFile()||f.isSymbolicLink())throw Error("Invalid diagnostics file");
       found.push({name:`${label}-${file}`,from});
     }

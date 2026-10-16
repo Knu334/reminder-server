@@ -495,8 +495,8 @@ void test("diagnostics_phase_writes_only_bounded_json_files",async()=>{
     await diagnostics(f,"infra-diagnostics",{"same.json":'{"from":"infra"}',"failure-9-i.json":"{}","failure-8-i.json":"{}"});
     const r=await cli(f,"diagnostics",{GITHUB_JOB:"plan"});assert.equal(r.code,0,r.stderr);assert.equal(r.stdout,"");assert.match(r.stderr,/^Kept 8 of 10 diagnostic files\n$/);
     const prefix=`failure-diagnostics/${f.context.runId}/1/plan/`,m=JSON.parse(Buffer.from(f.store.objects.get(`${prefix}manifest.json`)!).toString()) as CustodyManifest;
-    // 決まった順（release-diagnostics の名前順、次に infra-diagnostics の名前順）で最初の8個。名前の衝突は接頭辞で防ぐ。
-    assert.deepEqual(Object.keys(m.files).sort(),[...Object.keys(release).map(n=>`release-${n}`),"release-same.json","infra-failure-8-i.json"].sort());
+    // release-diagnostics を先に、各ディレクトリの中では名前の新しい順（名前の降順）に8個。名前の衝突は接頭辞で防ぐ。
+    assert.deepEqual(Object.keys(m.files).sort(),[...Object.keys(release).map(n=>`release-${n}`),"release-same.json","infra-same.json"].sort());
     assert.equal(Buffer.from(f.store.objects.get(`${prefix}release-same.json`)!).toString(),'{"from":"release"}');
     assert.equal(diagnosticKeys(f).some(k=>k.endsWith(".txt")),false);assert.equal(diagnosticKeys(f).length,9);
   }finally{await f.cleanup();}
@@ -510,4 +510,22 @@ void test("workflow_cli_accepts_only_phases_deploy_uses",async()=>{
     for(const phase of ["secure","register","","plan "]){const r=await cli(f,phase,{});assert.equal(r.code,1,phase);assert.equal(r.stdout,"");assert.equal(f.store.order.length,0);}
     await assert.rejects(lstat(join(f.runnerTemp,"release")));
   }finally{await f.cleanup();}
+});
+void test("diagnostics_phase_keeps_the_newest_files_in_each_directory",async()=>{
+  // runPrivateCommand の名前は failure-<epoch ms>-<uuid>.json なので、名前の順が時刻の順になる。8個を超えるときは新しいものを残す。
+  const name=(ms:number,id:string)=>`failure-${1700000000000+ms}-${id.repeat(8)}-0000-4000-8000-000000000000.json`;
+  const f=await fixture();try{
+    const release=Array.from({length:9},(_,i)=>name(i*1000,String(i)));
+    await diagnostics(f,"release-diagnostics",Object.fromEntries(release.map(n=>[n,"{}"])));
+    const r=await cli(f,"diagnostics",{GITHUB_JOB:"apply"});assert.equal(r.code,0,r.stderr);assert.match(r.stderr,/^Kept 8 of 9 diagnostic files\n$/);
+    const m=JSON.parse(Buffer.from(f.store.objects.get(`failure-diagnostics/${f.context.runId}/1/apply/manifest.json`)!).toString()) as CustodyManifest;
+    assert.deepEqual(Object.keys(m.files).sort(),release.slice(1).map(n=>`release-${n}`).sort(),"the oldest release file is the one dropped");
+  }finally{await f.cleanup();}
+  const g=await fixture();try{
+    const release=Array.from({length:6},(_,i)=>name(i*1000,"a")),infra=Array.from({length:4},(_,i)=>name(i*1000+500,"b"));
+    await diagnostics(g,"release-diagnostics",Object.fromEntries(release.map(n=>[n,"{}"])));await diagnostics(g,"infra-diagnostics",Object.fromEntries(infra.map(n=>[n,"{}"])));
+    const r=await cli(g,"diagnostics",{GITHUB_JOB:"plan"});assert.equal(r.code,0,r.stderr);assert.match(r.stderr,/^Kept 8 of 10 diagnostic files\n$/);
+    const m=JSON.parse(Buffer.from(g.store.objects.get(`failure-diagnostics/${g.context.runId}/1/plan/manifest.json`)!).toString()) as CustodyManifest;
+    assert.deepEqual(Object.keys(m.files).sort(),[...release.map(n=>`release-${n}`),...infra.slice(2).map(n=>`infra-${n}`)].sort(),"the newest infra files are kept");
+  }finally{await g.cleanup();}
 });
