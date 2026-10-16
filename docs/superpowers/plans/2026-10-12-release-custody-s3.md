@@ -45,10 +45,11 @@
   - `type CustodyKind = "registered-release" | "release-review" | "release-result" | "failure-diagnostics"`
   - `interface CustodyLocation { kind: CustodyKind; runId: string; runAttempt: number; job?: string }`
   - `interface CustodyManifest { version: 1; kind: CustodyKind; root: ReleaseRoot | null; runId: string; runAttempt: number; createdAt: string; expiresAt?: string; files: Record<string, string>; planReviewSha256?: string; custodySha256?: string; sourceManifestSha256?: string }`（`files` は名前→SHA-256 16進数）
+  - `type CustodyReference = { location: CustodyLocation; manifestSha256: string }`（Task 3 の `planRelease` と Task 4 の `applyRelease` が使う）
   - `interface CustodyStore { put(key: string, body: Uint8Array, sha256Base64: string): Promise<void>; get(key: string): Promise<Uint8Array> }`
   - `custodyPrefix(location: CustodyLocation): string`
   - `requiredFiles(kind: CustodyKind, root: ReleaseRoot | null, options?: { initialPlatform?: boolean }): readonly string[]`（`failure-diagnostics` は空配列を返し、`writeCustody` 側で「`.json` だけ、最大8個」を検査する）
-  - `writeCustody(store: CustodyStore, location: CustodyLocation, directory: string, fields: Pick<CustodyManifest, "root" | "planReviewSha256" | "custodySha256" | "sourceManifestSha256" | "expiresAt">, now: Date, options?: { initialPlatform?: boolean }): Promise<{ manifestSha256: string; manifestSha256Base64: string }>`（`directory` のファイル集合を `requiredFiles(kind, root, options)` と完全一致で検査してから書く）
+  - `writeCustody(store: CustodyStore, location: CustodyLocation, directory: string, fields: Pick<CustodyManifest, "root" | "planReviewSha256" | "custodySha256" | "sourceManifestSha256" | "expiresAt">, now: Date, options?: { initialPlatform?: boolean }): Promise<{ manifestSha256: string; manifestSha256Base64: string }>`（`requiredFiles(kind, root, options)` の名前のファイルだけを `directory` から読んで書く。1つでも無ければ書く前に throw する。`directory` にある他のファイル（`plan.json`、初回でない platform の `post-baseline.json`、`outputs.json` など作業用のファイル）は読まず、manifest にも入れない。`failure-diagnostics` だけは `directory` 直下の `.json` を最大8個書き、9個以上なら throw する）
   - `readCustody(store: CustodyStore, location: CustodyLocation, expectedManifestSha256: string, destination: string, expected: { root: ReleaseRoot | null; now: Date; initialPlatform?: boolean; inheritedExpiresAt?: string }): Promise<CustodyManifest>`
   - `assertUsable(manifest: CustodyManifest, now: Date, inheritedExpiresAt?: string): void`（利用期限の検査。`inheritedExpiresAt` が無ければ `expiresAt === createdAt + 24h` を要求し、あれば `expiresAt === inheritedExpiresAt` を要求する。apply の直前にも呼ぶ）
 
@@ -71,7 +72,7 @@ void test("read_writes_0700_directory_and_0600_files", ...)
 void test("read_rejects_file_hash_mismatch", ...)
 void test("expiry_boundaries", ...)  // createdAt+24h ちょうどで reject、23:59:59 で通る、createdAt=now+4min59s 通る、now+5min ちょうどで reject、不正な日時 reject、expiresAt≠createdAt+24h（引き継ぎ無し）reject
 void test("inherited_expiry_must_match_original", ...)  // inheritedExpiresAt と一致すれば createdAt+24h と違っても通る、1秒でも違えば reject、継承期限を過ぎていれば reject
-void test("write_requires_initial_platform_file_set", ...)  // release-result: initialPlatform なら ledger.json+post-baseline.json が必須、そうでなければ ledger.json だけ（post-baseline.json が余分にあれば reject）
+void test("write_requires_initial_platform_file_set", ...)  // release-result: initialPlatform なら ledger.json+post-baseline.json が必須、そうでなければ ledger.json だけを書く（directory に post-baseline.json や plan.json があっても manifest に入らない）。必須のファイルが無ければ何も put せずに reject。failure-diagnostics は .json 9個で reject
 void test("read_original_manifest_checks_digest_without_extracting", ...)
 void test("recreated_identical_manifest_after_expiry_is_rejected", ...)          // 同じ bytes を新しい store に置き、now を25時間後にして reject
 void test("result_and_diagnostics_have_no_expiry", ...)                          // release-result の manifest に expiresAt が無く、assertUsable を要求しない
@@ -153,10 +154,10 @@ git commit -m "feat(release): verify reviewed runs without relying on repository
 - Produces:
   - `WorkflowContext` に `custodyStore: CustodyStore`、`runId: string`、`runAttempt: number`、`now: () => Date` を加える。
   - 既存の `checkCustody(c)` を `checkCustody(directory: string, root: ReleaseRoot, expectedCustodySha256?: string): Promise<void>` に変え、今の run の directory と、取り出した元の bundle の directory の両方に使う。
-  - `planRelease(c, config, source: { location: CustodyLocation; manifestSha256: string } | undefined, services): Promise<{ manifestSha256: string; manifestSha256Base64: string; planReviewSha256: string }>`
+  - `planRelease(c, config, source: CustodyReference | undefined, services): Promise<{ manifestSha256: string; manifestSha256Base64: string; planReviewSha256: string }>`
   - `workflowMain` の phase に `register-custody`（register job の最後に `$RUNNER_TEMP/registered` を `registered-release` として書き、`GITHUB_OUTPUT` に `custody_run_id`、`custody_attempt`、`custody_manifest_sha256` を出す）を加える。
   - plan phase の `GITHUB_OUTPUT`: `custody_run_id`、`custody_attempt`、`custody_manifest_sha256`、`review_sha256`（= manifest の SHA-256）。
-  - 環境変数: `CUSTODY_BUCKET`、`GITHUB_RUN_ID`、`GITHUB_RUN_ATTEMPT`、`SOURCE_RUN_ID`・`SOURCE_ATTEMPT`・`SOURCE_MANIFEST_SHA256`（同じ run の register の output、または `reviewed_run`・`reviewed_attempt`・`EXPECTED_REVIEW_SHA256`）。`SOURCE_RUN_ID` は10進数、`SOURCE_ATTEMPT` は1以上の整数、`SOURCE_MANIFEST_SHA256` は16進数64桁でなければ、S3 を読む前・Terraform を実行する前に throw する（自分の `GITHUB_RUN_ATTEMPT` で代用しない）。
+  - 環境変数: `CUSTODY_BUCKET`、`GITHUB_RUN_ID`、`GITHUB_RUN_ATTEMPT`、`SOURCE_RUN_ID`・`SOURCE_ATTEMPT`・`SOURCE_MANIFEST_SHA256`（同じ run の register の output、または `reviewed_run`・`reviewed_attempt`・`EXPECTED_REVIEW_SHA256`）。source が要るかどうかは入力で決まる。`reviewed_run` があれば `release-review` が必須（root を問わない）。`reviewed_run` が無い application は `registered-release` が必須。`reviewed_run` が無い platform は source を持たず（`source = undefined`、register の job は skipped）、`SOURCE_*` が3つとも空であることを要求する。source が必須のときに、`SOURCE_RUN_ID` が10進数、`SOURCE_ATTEMPT` が1以上の整数、`SOURCE_MANIFEST_SHA256` が16進数64桁でなければ、S3 を読む前・Terraform を実行する前に throw する（自分の `GITHUB_RUN_ATTEMPT` で代用しない）。環境変数の解析は `workflowMain` が行い、`planRelease` には解析済みの `source` を渡す。
 
 動作（仕様書「reviewed_run を使う2つの経路」と「3つの digest の区別」）:
 - source が `registered-release` なら読み取って今の `readManifest`・`copyEvidence` に渡す。source が `release-review` なら `readCustody` の後に、仕様書「読み取りの手順」8 のとおり、元の bundle に対して今の `checkCustody`（`custody.json` と必須のファイルの集合）と `verifySavedPlan`（元の `saved.tfplan` の `terraform show -json` と元の `review.json`）を独立して行い、続けて今の preview の確認（`preview.json`、root、commit、artifact）を行う。apply 経路と ZIP 再利用 preview の両方で行う。
@@ -175,7 +176,9 @@ void test("reused_preview_records_source_manifest_and_gets_new_expiry", ...)    
 void test("expired_reviewed_bundle_is_rejected_for_apply_and_reuse", ...)
 void test("original_bundle_with_valid_manifest_but_bad_inner_custody_is_rejected", ...)  // manifest と各ファイルの hash は整合、custody.json だけ不正 → apply・ZIP 再利用とも reject
 void test("original_bundle_with_saved_plan_not_matching_review_is_rejected", ...)        // saved.tfplan と review.json の対応が不正 → apply・ZIP 再利用とも reject、terraform plan を呼ばない
-void test("plan_rejects_missing_or_malformed_source_outputs_before_s3_or_terraform", ...) // SOURCE_* の欠落・不正形式で store.get も terraform も呼ばれない。register が attempt 1、plan が attempt 2 のとき SOURCE_ATTEMPT=1 を読む
+void test("plan_rejects_missing_or_malformed_source_outputs_before_s3_or_terraform", ...) // application と reviewed_run ありで、SOURCE_* の欠落・不正形式なら store.get も terraform も呼ばれない。register が attempt 1、plan が attempt 2 のとき SOURCE_ATTEMPT=1 を読む
+void test("new_platform_preview_runs_without_source_at_cli_boundary", ...)               // target=platform、reviewed_run 空、SOURCE_* 空で workflowMain の plan phase が通り、release-review を書く。SOURCE_* が1つでも入っていれば reject
+void test("release_review_contains_only_required_files_not_plan_json", ...)               // 既存の plan の生成から writeCustody まで通し、manifest の files に plan.json が無く、必須の集合と一致する
 void test("register_custody_outputs_location_and_manifest_digest", ...)
 void test("plan_summary_lists_only_allowed_fields", ...)                          // summary に inputs の値・ARN・URL が無い
 void test("plan_failure_leaks_no_fixture_values_at_cli_boundary", ...)            // Review Focus 5：workflowMain の plan phase で合成の terraform 失敗を起こし、stdout・stderr・GITHUB_STEP_SUMMARY のどれにも入力の値・API URL・ARN が無い
@@ -211,7 +214,8 @@ git commit -m "feat(release): keep registration and review custody in S3"
 - Produces:
   - apply phase は `PLAN_CUSTODY_RUN_ID`、`PLAN_CUSTODY_ATTEMPT`、`PLAN_CUSTODY_MANIFEST_SHA256` を必須とし、欠けた・形式が不正なら throw（自分の `GITHUB_RUN_ATTEMPT` で代用しない）。`EXPECTED_CUSTODY_SHA256` は manifest の `custodySha256` から得るので廃止する。
   - apply phase は `REVIEWED_RUN_ID`・`REVIEWED_ATTEMPT`・`EXPECTED_REVIEW_SHA256` も必須とする（`inputs.reviewed_run`、`needs.authorize.outputs.reviewed_attempt`、`inputs.expected_review_sha256`）。
-  - `applyRelease` は `readOriginalManifest`（元の preview）→ `readCustody`（同じ run の `release-review`、`inheritedExpiresAt` = 元の `expiresAt`）→ 同じ run の manifest に `sourceManifestSha256` が無いこと、`planReviewSha256` が元の manifest と一致することを確かめる → `checkCustody(directory, root, manifest.custodySha256)`・`verifySavedPlan` → `assertUsable(manifest, now(), 元の expiresAt)` を apply の直前に呼ぶ → apply → `release-result` 用の別ディレクトリに `ledger.json` と、初回の platform（`root === "platform" && baseline === null`）のときだけ `post-baseline.json` を置き、`writeCustody(..., { initialPlatform })`。
+  - `applyRelease(c: WorkflowContext, references: { original: CustodyReference; current: CustodyReference }, services: ReleaseServices): Promise<ReleaseLedger>`。`original` は元の preview（`REVIEWED_*`・`EXPECTED_REVIEW_SHA256`）、`current` は同じ run の plan job（`PLAN_CUSTODY_*`）。環境変数の解析と形式の検査は `workflowMain` が行い、`applyRelease` は環境変数を読まない。`WorkflowContext` の `expectedReviewSha256`・`expectedCustodySha256` は削除する。
+  - `applyRelease` は `readOriginalManifest`（元の preview）→ `readCustody`（同じ run の `release-review`、`inheritedExpiresAt` = 元の `expiresAt`）→ 同じ run の manifest に `sourceManifestSha256` が無いこと、`planReviewSha256` が元の manifest と一致することを確かめる → `checkCustody(directory, root, manifest.custodySha256)`・`verifySavedPlan` → `assertUsable(manifest, now(), 元の expiresAt)` を apply の直前に呼ぶ → apply → `ledger.json` を書き、`writeCustody(store, release-result の location, c.directory, ..., { initialPlatform: root === "platform" && baseline === null })`（`post-baseline.json` は今のとおり常に作るが、`writeCustody` は初回の platform のときだけ読んで書く）。
   - 今の `workflow.ts:129` の `manifest.reviewSha256 !== c.expectedReviewSha256` は、`review.json` の `reviewSha256` と検証済み manifest の `planReviewSha256` の比較に置き換える（入力の値は manifest の digest なので、plan の digest とは比べない）。
   - `diagnostics` phase の job 名は GHA が自動で設定する `GITHUB_JOB` から読む（`deploy.yml` に `JOB` は足さない）。`GITHUB_JOB` が無ければ throw。
   - `workflowMain` の apply phase は ledger を標準出力に出さない。job summary には root、commit、`result`、`release-result` の run ID と `run_attempt` だけを書く。
@@ -382,6 +386,7 @@ git commit -m "test(e2e): cover the release custody bucket on Floci"
 - Create: `tests/e2e/floci/support/custody-cases.ts`
 - Modify: `tests/e2e/floci/support/evidence.ts`（互換性の理由 `conditional-write-unsupported` の登録）、`tests/e2e/floci/support/cases.ts`（`measurementUnsupportedReasons` の型と値に `conditional-write-unsupported` を足す）、`scripts/e2e/run.ts`（`import '../../tests/e2e/floci/support/custody-cases.ts'` を既存の `storage-cases.ts` の import の隣に足す）
 - Modify: `docs/operations/formal-e2e-coverage.md`（要件の表に新しい行 `REL-01`。release custody の S3 の書き込みと読み取り、条件付き書き込み）、`tests/integration/formal-e2e/coverage.test.ts`（`coverageIds.size` を 69 から 70 に）
+- Modify: `docs/operations/formal-e2e-README.md`（suite 名の一覧に `custody` を足し、実行順を書く。`coverage.test.ts` が登録済みのすべての suite の記載を求めるため）
 - Modify: `docs/operations/formal-e2e-results.md`（2つの case の行を `not-run`、理由 `implementation-pending` で足し、件数を更新する。Task 9 で実測の結果に書き換える）
 - Test: `tests/e2e/floci/custody.test.ts`（harness の試験）
 
@@ -395,6 +400,7 @@ git commit -m "test(e2e): cover the release custody bucket on Floci"
 
 ```ts
 void test("roundtrip_case_fails_on_transport_or_auth_errors_not_unsupported", ...)
+void test("conditional_write_outcomes_are_classified", ...)               // 初回の PutObject が失敗 → fail。2回目が 412 PreconditionFailed（または 409 ConditionalRequestConflict）→ pass。2回目が受理 → unsupported（conditional-write-unsupported）。2回目が認証エラー・通信失敗・その他の status → fail
 void test("conditional_write_case_records_only_registered_reason", ...)   // 理由が conditional-write-unsupported 以外の unsupported は fail、既定の signature-enforcement-unsupported は使わない
 void test("custody_cases_are_registered_with_requirements", ...)          // definitions に2件、caseActions.has(id) が true、requirementId が REL-01
 void test("custody_cases_are_executed_by_the_runner", ...)                // fake の evidence で run.ts の suite 実行を通し、2つの id に not-run 以外の結果が付く（tests/e2e/floci/storage.test.ts の selected の試験と同じ形）
@@ -403,12 +409,12 @@ void test("custody_cases_are_executed_by_the_runner", ...)                // fak
 `coverage.test.ts` の1対1の検査は、この Task の結果の文書の行で通る。
 
 - [ ] **Step 2: 失敗を確かめる** — Run: `npx tsx --test tests/e2e/floci/custody.test.ts` / Expected: FAIL
-- [ ] **Step 3: 実装する**（roundtrip: release-review 相当の合成ファイルを書き、manifest の SHA-256 で読み、hash を照合する。conditional write: 同じ key への2回目の `PutObject`（`IfNoneMatch: "*"`）が拒否されれば pass、Floci が受け入れれば測定結果付きで unsupported）
+- [ ] **Step 3: 実装する**（roundtrip: release-review 相当の合成ファイルを書き、manifest の SHA-256 で読み、hash を照合する。conditional write: 判定は Step 1 の `conditional_write_outcomes_are_classified` のとおり。2回目の `PutObject`（`IfNoneMatch: "*"`）の条件不成立の応答だけを pass にし、受理は測定結果付きで unsupported、それ以外は fail）
 - [ ] **Step 4: 通ることを確かめる** — Run: `npx tsx --test tests/e2e/floci/custody.test.ts && npm run test:e2e:harness && npm run test:integration:e2e` / Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add tests/e2e/floci/support/custody-cases.ts tests/e2e/floci/support/cases.ts tests/e2e/floci/support/evidence.ts scripts/e2e/run.ts tests/e2e/floci/custody.test.ts tests/integration/formal-e2e/coverage.test.ts docs/operations/formal-e2e-coverage.md docs/operations/formal-e2e-results.md
+git add tests/e2e/floci/support/custody-cases.ts tests/e2e/floci/support/cases.ts tests/e2e/floci/support/evidence.ts scripts/e2e/run.ts tests/e2e/floci/custody.test.ts tests/integration/formal-e2e/coverage.test.ts docs/operations/formal-e2e-coverage.md docs/operations/formal-e2e-results.md docs/operations/formal-e2e-README.md
 git commit -m "test(e2e): exercise release custody against Floci S3"
 ```
 
