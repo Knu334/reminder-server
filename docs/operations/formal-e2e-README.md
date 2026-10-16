@@ -2,7 +2,7 @@
 
 パッチ済みFloci上で、本番の3 Terraform rootと現行ZIPを構築し、実PKCEログインから認証済みAPI、DynamoDB、S3、CloudWatch Logsまでを照合するローカル試験の手順である。実AWS、GHA、本番Cognito、本番データには触れない。
 設計は[設計](../superpowers/specs/2026-10-08-reminder-server-formal-e2e-design.md)、要件ごとの対応は[対応表](formal-e2e-coverage.md)、実施結果は[結果](formal-e2e-results.md)、できなかったことは[限界](formal-e2e-limitations.md)に分けて書く。
-ここに書いた値は、2026-10-12の `npm test` の実測（未commitの変更を含まない作業ツリー、HEAD 6daf48bでの run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc`、refresh.7）と、offline試験に基づく。
+ここに書いた値は、HEAD d6fc5c0での `npm test` の実測（run `e2e-1c662e0f-5687-4c77-858f-e39110c24109`、refresh.7）と、offline試験に基づく。以前のrunの値は、そのrunの値と明記したものだけである。
 
 ## 前提
 
@@ -16,10 +16,10 @@
 
 | 目的 | コマンド | 要する時間 |
 | --- | --- | --- |
-| 全体（E、L、Iのすべて。offlineの試験の後にFlociの全suiteを実行する） | `npm test` | Flociが必要。約14〜16分（実測869〜974秒。後述の枠に記す）。Flociが無いとpreflightで終了する（exit 2） |
+| 全体（E、L、Iのすべて。offlineの試験の後にFlociの全suiteを実行する） | `npm test` | Flociが必要。約15〜18分（実測869〜1043秒。release custodyのcaseを加えた後は1043秒。後述の枠に記す）。Flociが無いとpreflightで終了する（exit 2） |
 | Flociを使わないoffline試験（runtime、operations、delivery、結合、`test:e2e:harness`） | `npm run test:offline` | 数十秒〜1分。Flociは不要 |
 | offlineの結合試験（layer I、E2E harness、本書の対応表照合）だけ | `npm run test:integration:e2e` | 約5秒 |
-| Flociの全suite（E、L、I。Floci必須group全て、TF caseを含む） | `npm run test:e2e:floci` | 約12〜15分（refresh.7までの実測751〜833秒。layer Iの実行時間は含まない） |
+| Flociの全suite（E、L、I。Floci必須group全て、TF caseを含む） | `npm run test:e2e:floci` | 約13〜16分（custodyのcaseを加える前の実測751〜833秒。加えた後は、`npm test` 全体の1043秒から、offline試験の `duration_ms` の合計約100秒を除いて約940秒の概算。layer Iの実行時間は含まない） |
 | Terraform構築だけの診断 | `npm run test:e2e:terraform` | 構築は約2分（実測128秒） |
 | 一つのsuiteだけ | `npx tsx scripts/e2e/run.ts --layer floci --suite api` | suiteによる |
 | 一つのcaseだけ | `npx tsx scripts/e2e/run.ts --layer floci --case API-09/id-percent` | 構築と回収を含む。layer IのcaseだけをFlociなしで選んだ場合は、構築も回収も行わない（下記） |
@@ -40,11 +40,11 @@ layer Iの24件は、同じrunの中で、`offlineEvidence`（`tests/e2e/floci/s
 - runの取消または予算切れで始められなかった場合は、not-run（budget-exhausted、phaseはoffline）であり、passにはならない。caseの所要時間（durationMs）は、対応づけた各fileの実行時間の合計である。同じfileを共有するcaseは、同じfileの時間をそれぞれ数える。
 - layer Iだけを選んだ実行（`--case` または `--suite`）は、Floci、Terraform、fixtureに触れず、構築も回収も行わない。
 
-実測値（2026-10-12、HEAD 6daf48b。未commitの変更を含まない）:
+実測値（HEAD d6fc5c0）:
 
-- `npm test` 全体: exit 0、869秒（約14.5分）。offline部分はruntime 188、operations 74、delivery 97、integration 182、harness 107がすべて合格（skip 0）。
-- Flociの全suite: run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc`、268件を選び、265件が合格、失敗0、未実行0、未対応3（OBS-04、AUTH-11のhosted revoke、IMG-09の互換性調査）。`partial` は偽、`complete` は真、終了コード0。回収は18件を試行して18件成功、errors 0、leaks 0。ZIPの `dirtyPaths` は空。layer別はE 228 pass、L 13 pass と 3 unsupported、I 24 pass（phase offline）。
-- 以前のrun: e2e-d5c47097（HEAD 07744fc、974秒）とe2e-ba02c537（HEAD bfe7294、939秒）も同じ件数で、当時は未commitの `src/api/event.ts` を含んでいた。`npm test` 全体の所要時間は、869〜974秒（約14.5〜16分）である。
+- `npm test` 全体: exit 0、1043秒（約17.4分）。offline部分はruntime 188、operations 74、delivery 142、integration 184、harness 115がすべて合格（skip 0）。
+- Flociの全suite: run `e2e-1c662e0f-5687-4c77-858f-e39110c24109`、270件を選び、267件が合格、失敗0、未実行0、未対応3（OBS-04、AUTH-11のhosted revoke、IMG-09の互換性調査）。`partial` は偽、`complete` は真、終了コード0。回収は20件を試行して20件成功、errors 0、leaks 0。layer別はE 228 pass、L 15 pass と 3 unsupported、I 24 pass（phase offline）。release custodyの2件（REL-01）はどちらも合格した。
+- 以前のrun: e2e-da96a6b1（HEAD 6daf48b、869秒）、e2e-d5c47097（HEAD 07744fc、974秒）、e2e-ba02c537（HEAD bfe7294、939秒）は、REL-01を加える前の268件で、265件が合格、未対応3、回収18/18だった。e2e-d5c47097とe2e-ba02c537は、当時は未commitの `src/api/event.ts` を含んでいた。
 - layer Iの24件は、別の監査で全件が有効（VALID）と判定された。この完了は、Floci上のE・Lの実測と、同じrunのoffline試験の実測（layer I）を合わせた、2026-10-12のユーザー判断の基準による。実AWSなどの限界は[限界](formal-e2e-limitations.md)に、判断の経緯は[判断の記録](formal-e2e-decisions.md)にある。
 
 ## 実行の流れ
@@ -78,7 +78,7 @@ layer Iの24件は、同じrunの中で、`offlineEvidence`（`tests/e2e/floci/s
 
 ## 回収と手動の再開
 
-通常は実行の最後に、`manifest.json` に記録した所有リソースだけを回収し、独立した読み取りで不在を確認する（最新のrunでは83件が不在、leak 0）。
+通常は実行の最後に、`manifest.json` に記録した所有リソースだけを回収し、独立した読み取りで不在を確認する（e2e-da96a6b1では83件が不在、leak 0。custody bucketを加えた後のrunでは回収20/20、leaks 0）。
 processが強制終了（SIGKILL）された場合は、finallyが走らない。SIGINTとSIGTERMのhandlerは最初の1回だけ有効なので、2回目のSIGINTも、SIGKILLと同じく回収を飛ばす。次の順で手動回収する。
 
 1. 他にE2Eのprocessが動いていないことを確認し、`.superpowers/locks/` と `artifacts/.formal-e2e-build.lock` に残ったlockを確認する。後者はZIPの作成中に強制終了されると残り、次のrunが開始時に失敗する。動作中のrunがあるときはlockを消さない。
@@ -93,7 +93,7 @@ processが強制終了（SIGKILL）された場合は、finallyが走らない�
 - Flociは `.github/floci/Dockerfile` でbuildする。開発コンテナと同じFloci 2.2.0のcommitとrefresh.7のpatch（`.devcontainer/floci/floci-refresh.patch`）を使い、native-imageではなくJVMで動かす。native buildは数十分と6GBのheapを要し、privateのrunnerに向かないためである。healthのversionは `2.2.0-local-refresh.7-jvm` で、preflightはこれと `-native` だけを受け付ける。
 - Flociは `floci` というhostname、専用のDocker network、`docker.sock` で起動し、runnerの `/etc/hosts` に `floci` のprivate IPv4を書く。
 - 子プロセスはPATHを継承しないため、固定版のnode、npm、Python、Terraformへのsymlinkと、AWS provider 6.67.0を `.superpowers/tools/aws-sdd` に用意する。
-- 2026-10-12の確認run（GHA run 38216808905、E2E run `e2e-8559f77c`）は、268件中265件が合格、失敗0、未実行0、未対応3、`complete` は真、清掃18/18、残存0だった。Flociのbuildは約2分、`npm test` は約17分だった。
+- REL-01を加える前の確認run（GHA run 38216808905、E2E run `e2e-8559f77c`）は、268件中265件が合格、失敗0、未実行0、未対応3、`complete` は真、清掃18/18、残存0だった。Flociのbuildは約2分、`npm test` は約17分だった。
 
 JVM版とnative版はsourceとpatchが同じだが、build方式が違う。native版に固有の問題はCIでは検出できないため、開発コンテナでの実行も引き続き使う。CIのrunもFloci上の観測であり、実AWSでの動作の証拠ではない。
 

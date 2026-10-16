@@ -23,7 +23,7 @@ GitHub Actionsの `deploy.yml` を使って、本番のAWS環境を構築し、Z
 
 - 配布はpublicとprivateのどちらのrepositoryでも同じ手順で動く。repositoryの公開設定には頼らない。Terraformのplanとstateは、`sensitive` の値も平文で含みうるため、秘密の情報として扱う。plan、入力、証拠、apply結果、失敗時の診断は、GitHubのartifactやログには出さず、bootstrapが作るprivateなS3 bucket（custody bucket）にだけ置く。詳細は「[release custody](#release-custody)」にある。
 - authorize jobは、手動のdispatch以外のevent、main以外からのdispatch、mainから到達できないcommitを、build、OIDC、custodyの読み書きより前に拒否する。
-- GitHubに出すのは、job summaryの要約（root、commit、actionの件数、`review_sha256`、custodyの置き場所のrun IDと `run_attempt`）だけである。
+- GitHubに出すのは、job summaryの要約と、job間の受け渡しのoutputだけである。`plan` jobのsummaryにはroot、commit、actionの件数、`review_sha256`、custodyの置き場所のrun IDと `run_attempt` が、`apply` jobのsummaryにはroot、commit、結果、`release-result` の置き場所が出る。outputはcustodyの置き場所とmanifestのSHA-256である。plan、入力、ledgerの中身は出さない。
 - custody bucketを読めるのは、自分のAWSの権限を持つoperatorと、prefixごとに限定した3つのGitHub用roleだけである。operatorのAWSの読み取り権限は、レビューする人に限る。
 - レビューに使えるのは、作成から24時間以内の `release-review` だけである。期限を過ぎたら新しいpreviewが必要である。ローカルにダウンロードしたレビュー用のファイルは使用後に削除する。
 - workflowは任意のローカルJSONやアップロードからapplyできない。
@@ -213,7 +213,7 @@ prefixは `<種類>/<run_id>/<run_attempt>/` である。`run_attempt` は、そ
 | `target` | Terraformの本番root。`platform` または `application` |
 | `commit` | mainから到達可能な、40桁hexの完全なimmutable commit。checkoutはこの正確なcommitを使う |
 | `apply` | previewでは `false` のままにする。applyのrunだけ `true` |
-| `reviewed_run` | 成功した元のpreviewのrun ID。applyと、既存ZIPの再利用に必要 |
+| `reviewed_run` | 成功した元のpreviewのrun ID。applyと、既存ZIPの再利用に必要。既存ZIPを再利用するpreviewはapplicationだけで、platformではauthorize jobが拒否する |
 | `expected_review_sha256` | レビューした元のpreviewの `release-review` の `manifest.json` のSHA-256（16進数）。初回作成を含むすべてのapplyと、既存ZIPを再利用するpreviewに必要 |
 | `published` | applicationのsmokeで期待する公開状態。データは変更しない |
 | `scheduler_enabled` | レビュー済みのapplicationのSchedulerの設定 |

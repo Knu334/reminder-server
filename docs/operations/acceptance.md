@@ -80,4 +80,8 @@ smokeのいずれも実施していない。
 
 ## 2026-10-12 追記（その2）: 未commitの変更を含まないrun
 
-HEAD 6daf48b（ユーザーがnull-body修正をcommit済み）の `npm test`（869秒、exit 0）の run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc` は、268件中265件が合格、失敗0、未実行0、未対応3、cleanup 18/18（errors 0、leaks 0）、`complete` は真、ZIPの `dirtyPaths` は空だった。これが現在の主たる結果で、未commitの変更を含まない。上の追記のrun（e2e-d5c47097）は、未commitの `src/api/event.ts` を含んでいた。実AWS、IAMとTLSの強制、PITR、Chromeは対象外のままで、別途の承認が要る。結果は[結果](formal-e2e-results.md)、判断の経緯は[判断の記録](formal-e2e-decisions.md)にある。
+HEAD 6daf48b（ユーザーがnull-body修正をcommit済み）の `npm test`（869秒、exit 0）の run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc` は、268件中265件が合格、失敗0、未実行0、未対応3、cleanup 18/18（errors 0、leaks 0）、`complete` は真、ZIPの `dirtyPaths` は空だった。これはREL-01を加える前の時点の主たる結果で、未commitの変更を含まない。上の追記のrun（e2e-d5c47097）は、未commitの `src/api/event.ts` を含んでいた。実AWS、IAMとTLSの強制、PITR、Chromeは対象外のままで、別途の承認が要る。結果は[結果](formal-e2e-results.md)、判断の経緯は[判断の記録](formal-e2e-decisions.md)にある。
+
+## 追記: release custodyのcaseを加えたrun
+
+run `e2e-1c662e0f-5687-4c77-858f-e39110c24109`（HEAD d6fc5c0、`npm test`、exit 0、1043秒）は、release custodyのcase（REL-01の2件）を加えたregistry全270件を選び、267件が合格、失敗0、未実行0、未対応3（OBS-04、AUTH-11のhosted revoke、IMG-09）、cleanup 20/20（errors 0、leaks 0）、`complete` は真だった。offline部分はruntime 188、operations 74、delivery 142、integration 184、harness 115がすべて合格した。REL-01の2件（custodyの往復と条件付き書き込み）は合格し、Flociは同じkeyへの2回目の書き込みを `If-None-Match` で拒否した。TF-03/settingsは、custody bucketの設定とlifecycleの読み戻しを含めて合格した。これが現在の主たる結果である。上のe2e-da96a6b1は、REL-01を加える前の記録として残す。bucket policyとIAMの強制、lifecycleによる実際の削除、`deploy.yml` のGHAでの実行、実AWSでのbootstrapの更新とdeployは実行しておらず、別途の承認が要る。限界は[限界](formal-e2e-limitations.md)、結果は[結果](formal-e2e-results.md)にある。

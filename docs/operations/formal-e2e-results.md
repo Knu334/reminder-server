@@ -12,13 +12,13 @@
 
 | 項目 | 値 |
 | --- | --- |
-| 実施日（UTC） | 2026-10-16。`npm test` 全体（offline試験を含む）は1043秒（約17.4分。controllerが測った経過時間） |
+| 実施日（UTC） | 2026-10-16。`npm test` 全体（offline試験を含む）は1043秒（約17.4分。外部で計測した経過時間） |
 | HEAD | d6fc5c0（`test(e2e): exercise release custody against Floci S3`）。作業ツリーには、追跡対象の未commitの変更（この結果を書いた文書の変更と、`.devcontainer/init-firewall.sh`）があった。どれもZIPのbuild入力ではない |
 | Floci | `floci-local:2.2.0-refresh.7-native`（health `2.2.0-local-refresh.7-native`） |
 | ツール | Node 24.21.0、npm 11.11.1、Python 3.13.16、Terraform 1.16.5、provider 6.67.0 |
 | ZIP | `npm run package` と `npm run verify:zip` のsha256（hex）`8e6dcef8710dc82aa266ba065daa5e9749a1c8f22705e9fda35e310a5ab61bb1`、1,388,430 bytes。以前のrun（e2e-da96a6b1）のZIPと同じ値である |
 
-`artifacts/formal-e2e/<run ID>/` の保存物（`results.json`、`artifact-snapshot.json` など）は、この実行の環境では読み取りが禁止されていたため、開いていない。件数は、runの最後に出たJSONから記録した。caseごとの状態は、次の測定から導いた。
+`artifacts/formal-e2e/<run ID>/` の保存物（`results.json`、`artifact-snapshot.json` など）は、この記録には使っていない。件数は、runの最後に出たJSONから記録した。caseごとの状態は、次の測定から導いた。
 
 - behaviorのcaseは、unsupportedにならない（failとして数える）。runは失敗0、未実行0、終了コード0なので、behaviorのcaseはすべて合格である。これには、custody bucketの設定（versioning、暗号化、公開アクセスのブロック、policyの存在、prefixごとのlifecycle、古いversionとdelete markerの削除）の読み戻しを含むTF-03/settingsと、`REL-01/custody-roundtrip` が含まれる。
 - 互換性調査のcaseは5件（OBS-04、AUTH-11のhosted revoke、IMG-09、OPS-06のone-time trigger、`REL-01/custody-conditional-write`）である。同じFlociで各caseを単独で実行し、OBS-04（e2e-4f373f40）、AUTH-11（e2e-0fa06e8d）、IMG-09（e2e-b4b583f8）がunsupported、OPS-06（e2e-9f866f86）が合格、custody suite（e2e-10eba8dc。REL-01の2件）が2件とも合格だった。全suiteのunsupported 3件は、この内訳と一致する。単独の実行は確認のためで、全suiteの結果を差し替えていない。

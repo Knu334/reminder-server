@@ -67,7 +67,7 @@ Floci本体へのパッチ（refresh.2のSourceAccount、refresh.3のListVersion
 
 ## 2026-10-12 追記（その2）: 未commitの変更を含まないrun
 
-run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc`（HEAD 6daf48b、`npm test`、exit 0、869秒）は、268件中265件が合格、失敗0、未実行0、未対応3、`complete` は真で、ZIPの `dirtyPaths` は空だった。このrunには、未commitの変更が含まれない。上の「ユーザーの未commitの `src/api/event.ts` を含む」という限界は、e2e-ba02c537以前のrun（e2e-d5c47097、e2e-4e5b822a）についての記録であり、現在の主たるrunには当てはまらない（null-body修正は、ユーザーが6daf48bでcommitした）。その他の限界（未対応3件、実AWS・IAM・TLSの強制・PITR・Chromeの未実行、上流FlociのDocker依存試験の未実行、Flociがエミュレーターであること、layer Iが合成のfakeによるoffline試験の実測であること）は変わらない。判断の経緯は[判断の記録](formal-e2e-decisions.md)にある。
+run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc`（HEAD 6daf48b、`npm test`、exit 0、869秒）は、268件中265件が合格、失敗0、未実行0、未対応3、`complete` は真で、ZIPの `dirtyPaths` は空だった。このrunには、未commitの変更が含まれない。上の「ユーザーの未commitの `src/api/event.ts` を含む」という限界は、e2e-ba02c537以前のrun（e2e-d5c47097、e2e-4e5b822a）についての記録であり、e2e-da96a6b1には当てはまらない（null-body修正は、ユーザーが6daf48bでcommitした）。その他の限界（未対応3件、実AWS・IAM・TLSの強制・PITR・Chromeの未実行、上流FlociのDocker依存試験の未実行、Flociがエミュレーターであること、layer Iが合成のfakeによるoffline試験の実測であること）は変わらない。判断の経緯は[判断の記録](formal-e2e-decisions.md)にある。
 
 ## 2026-10-12 追記（その3）: GHAでの実行
 
@@ -75,3 +75,14 @@ run `e2e-da96a6b1-9b45-4a5c-beba-12ce628eabbc`（HEAD 6daf48b、`npm test`、exi
 
 - CIのFlociはJVM版（`2.2.0-local-refresh.7-jvm`）である。sourceとpatchはnative版と同じだが、native版に固有の問題は検出できない。
 - CIのrunもFloci上の観測であり、実AWS、IAMの強制、TLSの強制の証拠ではない。未対応3件も変わらない。
+
+## 追記: release custodyのcaseを加えたrun
+
+run `e2e-1c662e0f-5687-4c77-858f-e39110c24109`（HEAD d6fc5c0、`npm test`、exit 0、1043秒）は、release custodyのcase（REL-01の2件）を加えたregistry全270件を選び、267件が合格、失敗0、未実行0、未対応3（OBS-04、AUTH-11のhosted revoke、IMG-09）、cleanup 20/20（errors 0、leaks 0）、`complete` は真だった。offline部分はruntime 188、operations 74、delivery 142、integration 184、harness 115がすべて合格した。REL-01の2件（custodyの往復と条件付き書き込み）は合格し、Flociは同じkeyへの2回目の書き込みを `If-None-Match` で拒否した。TF-03/settingsは、custody bucketの設定とlifecycleの読み戻しを含めて合格した。以前のrun（e2e-da96a6b1など）は、その時点の記録として上に残す。上の限界（未対応3件、実AWS・IAM・TLSの強制・PITR・Chromeの未実行、上流FlociのDocker依存試験の未実行、Flociがエミュレーターであること、layer Iが合成のfakeによるoffline試験の実測であること）は変わらない。
+
+release custodyについては、次の限界が加わる。
+
+- custody bucketのbucket policy（HTTPSの強制、`If-None-Match: *` の無い書き込みの拒否、削除の拒否）は、設定されていること（policy-present）だけを読み戻した。Flociでも実AWSでも、強制は確かめていない。prefixごとのroleの権限の強制も同様である。
+- lifecycleは、規則の読み戻しだけを確かめた。lifecycleによる実際の失効と削除は実行していない。
+- `REL-01/custody-conditional-write` は、2回目の書き込みの拒否（412、または409 ConditionalRequestConflict）で合格したが、どちらのstatusだったかは文書に記録していない。実AWSのS3での動作の証拠でもない。
+- `deploy.yml` のGHAでの実行、実AWSでのbootstrapの更新とcustody bucketの作成、S3コンソールでのレビューの手順は実行していない。
