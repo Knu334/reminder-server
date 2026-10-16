@@ -44,6 +44,109 @@ run "private_versioned_buckets" {
   }
 }
 
+# release custody の bucket: private、versioning、暗号化、新規作成だけの書き込み、
+# 削除の拒否、prefix ごとの失効と古い version・delete marker の削除。
+run "custody_bucket_is_private_versioned_and_expiring" {
+  command = plan
+  assert {
+    condition     = aws_s3_bucket.custody.bucket == "synthetic-reminder-123456789012-us-east-1-custody" && aws_s3_bucket.custody.force_destroy == false
+    error_message = "Custody must be a separate retained bucket named <prefix>-<account>-<region>-custody."
+  }
+  assert {
+    condition     = aws_s3_bucket_versioning.custody.versioning_configuration[0].status == "Enabled"
+    error_message = "Custody must keep versions."
+  }
+  assert {
+    condition     = one(aws_s3_bucket_server_side_encryption_configuration.custody.rule).apply_server_side_encryption_by_default[0].sse_algorithm == "AES256"
+    error_message = "Custody requires SSE-S3."
+  }
+  assert {
+    condition     = aws_s3_bucket_public_access_block.custody.block_public_acls && aws_s3_bucket_public_access_block.custody.block_public_policy && aws_s3_bucket_public_access_block.custody.ignore_public_acls && aws_s3_bucket_public_access_block.custody.restrict_public_buckets
+    error_message = "Custody must block all public access."
+  }
+  assert {
+    condition = anytrue([for s in jsondecode(aws_s3_bucket_policy.custody.policy).Statement : s.Sid == "DenyInsecureTransport" && s.Effect == "Deny" && s.Principal == "*" && s.Action == "s3:*" && try(s.Condition.Bool["aws:SecureTransport"], "") == "false" && toset(s.Resource) == toset([
+      "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody", "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/*"
+    ])])
+    error_message = "Custody must deny insecure transport for the bucket and every object."
+  }
+  assert {
+    condition     = anytrue([for s in jsondecode(aws_s3_bucket_policy.custody.policy).Statement : s.Sid == "RequireCreateOnlyWrite" && s.Effect == "Deny" && s.Principal == "*" && s.Action == "s3:PutObject" && s.Resource == "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/*" && try(s.Condition.StringNotEquals["s3:if-none-match"], "") == "*"])
+    error_message = "Custody writes must require If-None-Match star."
+  }
+  assert {
+    condition     = anytrue([for s in jsondecode(aws_s3_bucket_policy.custody.policy).Statement : s.Sid == "DenyCustodyDeletion" && s.Effect == "Deny" && s.Principal == "*" && toset(s.Action) == toset(["s3:DeleteObject", "s3:DeleteObjectVersion"]) && s.Resource == "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/*" && !can(s.Condition)])
+    error_message = "Only lifecycle may delete custody objects or versions."
+  }
+  assert {
+    condition     = toset([for r in aws_s3_bucket_lifecycle_configuration.custody.rule : r.id]) == toset(["registered-release", "release-review", "failure-diagnostics", "release-result", "expired-delete-markers"]) && alltrue([for r in aws_s3_bucket_lifecycle_configuration.custody.rule : r.status == "Enabled"])
+    error_message = "Custody lifecycle needs one enabled rule per prefix plus a separate delete-marker rule."
+  }
+  assert {
+    condition = alltrue([for r in aws_s3_bucket_lifecycle_configuration.custody.rule : r.id == "expired-delete-markers" || (
+      one(r.filter).prefix == "${r.id}/" &&
+      one(r.expiration).days == (r.id == "release-result" ? 30 : 1) &&
+      one(r.noncurrent_version_expiration).noncurrent_days == 1
+    )])
+    error_message = "Each custody prefix expires current versions after 1 day (release-result: 30) and noncurrent versions after 1 day."
+  }
+  assert {
+    condition     = anytrue([for r in aws_s3_bucket_lifecycle_configuration.custody.rule : r.id == "expired-delete-markers" && one(r.expiration).expired_object_delete_marker == true && length(r.noncurrent_version_expiration) == 0])
+    error_message = "Expired delete markers need their own rule without Days."
+  }
+}
+
+# 3つの GitHub 用 role の custody の権限は、決めた prefix の GetObject・PutObject だけ。
+# 一覧と削除は、どの role にも与えない。
+run "custody_access_is_prefix_scoped_without_list_or_delete" {
+  command = plan
+  assert {
+    condition = alltrue([for role, expected in {
+      artifact = [
+        { Effect = "Allow", Action = ["s3:PutObject"], Resource = ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/registered-release/*"] },
+        { Effect = "Allow", Action = ["s3:PutObject"], Resource = ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/failure-diagnostics/*"] },
+      ]
+      plan = [
+        { Effect = "Allow", Action = ["s3:GetObject"], Resource = ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/registered-release/*", "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/release-review/*"] },
+        { Effect = "Allow", Action = ["s3:PutObject"], Resource = ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/release-review/*"] },
+        { Effect = "Allow", Action = ["s3:PutObject"], Resource = ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/failure-diagnostics/*"] },
+      ]
+      apply = [
+        { Effect = "Allow", Action = ["s3:GetObject"], Resource = ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/release-review/*"] },
+        { Effect = "Allow", Action = ["s3:PutObject"], Resource = ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/release-result/*"] },
+        { Effect = "Allow", Action = ["s3:PutObject"], Resource = ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/failure-diagnostics/*"] },
+      ]
+      } : toset([for s in jsondecode(aws_iam_role_policy.github[role].policy).Statement : jsonencode({ Effect = s.Effect, Action = sort(s.Action), Resource = sort(s.Resource) }) if anytrue([for r in s.Resource : startswith(r, "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody")])]) == toset([for s in expected : jsonencode({ Effect = s.Effect, Action = sort(s.Action), Resource = sort(s.Resource) })])
+    ])
+    error_message = "Custody statements must match the per-role prefix table exactly."
+  }
+  assert {
+    condition     = alltrue([for policy in concat([for p in aws_iam_role_policy.github : p.policy], [aws_iam_policy.production_read.policy]) : alltrue([for s in jsondecode(policy).Statement : s.Effect != "Allow" || !anytrue([for r in s.Resource : startswith(r, "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody")]) || alltrue([for a in s.Action : contains(["s3:GetObject", "s3:PutObject"], a)])])])
+    error_message = "No delivery principal may list, delete or otherwise act on custody."
+  }
+  assert {
+    condition     = !strcontains(aws_iam_policy.production_read.policy, "-custody")
+    error_message = "The shared production read policy must not reach custody."
+  }
+}
+
+# custody は追加だけ。既存の bucket とその設定の address、role と policy の key を保つ。
+run "existing_bootstrap_addresses_are_unchanged" {
+  command = plan
+  assert {
+    condition     = aws_s3_bucket.state.bucket == "synthetic-reminder-123456789012-us-east-1-state" && aws_s3_bucket.artifacts.bucket == "synthetic-reminder-123456789012-us-east-1-artifacts"
+    error_message = "Existing state and artifact buckets must keep their addresses and names."
+  }
+  assert {
+    condition     = toset(keys(aws_s3_bucket_versioning.private)) == toset(["state", "artifacts"]) && toset(keys(aws_s3_bucket_server_side_encryption_configuration.private)) == toset(["state", "artifacts"]) && toset(keys(aws_s3_bucket_public_access_block.private)) == toset(["state", "artifacts"]) && toset(keys(aws_s3_bucket_policy.private)) == toset(["state", "artifacts"])
+    error_message = "Existing per-bucket settings must keep their state/artifacts for_each keys."
+  }
+  assert {
+    condition     = toset(keys(aws_iam_role.github)) == toset(["artifact", "plan", "apply"]) && toset(keys(aws_iam_role_policy.github)) == toset(["artifact", "plan", "apply"]) && toset([for p in aws_iam_role_policy.github : p.name]) == toset(["production-artifact", "production-plan", "production-apply"])
+    error_message = "Existing delivery roles and inline policies must keep their addresses and names."
+  }
+}
+
 run "trust_is_exact_oidc_subject" {
   command = plan
   assert {
@@ -77,12 +180,12 @@ run "roles_cannot_delete_artifacts_or_manage_cognito_users" {
     error_message = "Only state lockfiles can be deleted."
   }
   assert {
-    condition     = alltrue([for s in jsondecode(aws_iam_role_policy.github["artifact"].policy).Statement : s.Effect != "Allow" || s.Resource == ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-artifacts/releases/*/reminder-server.zip"] && alltrue([for a in s.Action : contains(["s3:PutObject", "s3:GetObject", "s3:GetObjectVersion"], a)])])
-    error_message = "Registration only reads/writes the release ZIP prefix."
+    condition     = alltrue([for s in jsondecode(aws_iam_role_policy.github["artifact"].policy).Statement : s.Effect != "Allow" || s.Resource == ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-artifacts/releases/*/reminder-server.zip"] && alltrue([for a in s.Action : contains(["s3:PutObject", "s3:GetObject", "s3:GetObjectVersion"], a)]) || s.Action == ["s3:PutObject"] && length(s.Resource) == 1 && alltrue([for r in s.Resource : contains(["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/registered-release/*", "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/failure-diagnostics/*"], r)])])
+    error_message = "Registration only reads/writes the release ZIP prefix and creates registered-release/failure-diagnostics custody."
   }
   assert {
-    condition     = alltrue([for s in jsondecode(aws_iam_role_policy.github["plan"].policy).Statement : s.Effect != "Allow" || !contains(s.Action, "s3:PutObject") || alltrue([for r in s.Resource : endswith(r, ".tflock")])]) && anytrue([for s in jsondecode(aws_iam_role_policy.github["plan"].policy).Statement : contains(s.Action, "s3:PutObject") && length(s.Resource) == 2])
-    error_message = "Plan may write only the two production state lockfiles."
+    condition     = alltrue([for s in jsondecode(aws_iam_role_policy.github["plan"].policy).Statement : s.Effect != "Allow" || !contains(s.Action, "s3:PutObject") || alltrue([for r in s.Resource : endswith(r, ".tflock")]) || s.Action == ["s3:PutObject"] && alltrue([for r in s.Resource : contains(["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/release-review/*", "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/failure-diagnostics/*"], r)])]) && anytrue([for s in jsondecode(aws_iam_role_policy.github["plan"].policy).Statement : contains(s.Action, "s3:PutObject") && length(s.Resource) == 2 && alltrue([for r in s.Resource : endswith(r, ".tflock")])])
+    error_message = "Plan may write only the two production state lockfiles and release-review/failure-diagnostics custody."
   }
   assert {
     condition     = alltrue([for s in jsondecode(aws_iam_role_policy.github["apply"].policy).Statement : !contains(s.Action, "iam:PassRole") || length(s.Resource) <= 2 && alltrue([for r in s.Resource : contains(["arn:aws:iam::123456789012:role/synthetic-reminder-production-api", "arn:aws:iam::123456789012:role/synthetic-reminder-production-cleanup", "arn:aws:iam::123456789012:role/synthetic-reminder-production-scheduler"], r)]) && contains(["lambda.amazonaws.com", "scheduler.amazonaws.com"], s.Condition.StringEquals["iam:PassedToService"])])
@@ -94,9 +197,13 @@ run "roles_cannot_delete_artifacts_or_manage_cognito_users" {
       "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-state/production/platform/terraform.tfstate",
       "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-state/production/application/terraform.tfstate",
       "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-state/production/platform/terraform.tfstate.tflock",
-      "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-state/production/application/terraform.tfstate.tflock"
+      "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-state/production/application/terraform.tfstate.tflock",
+      "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/registered-release/*",
+      "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/release-review/*",
+      "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/release-result/*",
+      "arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-custody/failure-diagnostics/*"
     ], resource)])])])
-    error_message = "S3 object access is restricted to release ZIPs and exact production state/locks."
+    error_message = "S3 object access is restricted to release ZIPs, exact production state/locks and the four custody prefixes."
   }
   assert {
     condition     = alltrue([for p in aws_iam_role_policy.github : alltrue([for statement in jsondecode(p.policy).Statement : !contains(statement.Action, "s3:ListBucket") || statement.Resource == ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-state"] && toset(statement.Condition.StringEquals["s3:prefix"]) == toset(["production/platform/terraform.tfstate", "production/application/terraform.tfstate"])])])
@@ -176,7 +283,7 @@ run "maximum_bucket_name_keeps_policies_in_aws_limits" {
     region      = "ap-southeast-1"
   }
   assert {
-    condition     = length(aws_s3_bucket.artifacts.bucket) == 63 && alltrue([for p in aws_iam_role_policy.github : length(p.policy) <= 10240]) && length(aws_iam_policy.production_read.policy) <= 6144 && alltrue([for p in aws_iam_policy.runtime_ceiling : length(p.policy) <= 6144])
+    condition     = length(aws_s3_bucket.artifacts.bucket) == 63 && length(aws_s3_bucket.custody.bucket) <= 63 && alltrue([for p in aws_iam_role_policy.github : length(p.policy) <= 10240]) && length(aws_iam_policy.production_read.policy) <= 6144 && alltrue([for p in aws_iam_policy.runtime_ceiling : length(p.policy) <= 6144])
     error_message = "Longest permitted bucket names must retain precise policy scopes within AWS quotas."
   }
 }

@@ -8,3 +8,4 @@ output "cleanup_role_arn" { value = aws_iam_role.runtime["cleanup"].arn }
 output "scheduler_role_arn" { value = aws_iam_role.runtime["scheduler"].arn }
 output "runtime_permissions_boundary_arns" { value = local.runtime_ceiling_arns }
 output "production_api_id" { value = var.production_api_id }
+output "custody_bucket" { value = aws_s3_bucket.custody.bucket }

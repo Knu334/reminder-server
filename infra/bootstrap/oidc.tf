@@ -386,10 +386,29 @@ locals {
   state_list    = { Sid = "StateKeyListing", Effect = "Allow", Action = ["s3:ListBucket"], Resource = [local.bucket_arns.state], Condition = { StringEquals = { "s3:prefix" = local.state_keys } } }
   state_lock    = { Sid = "ProductionStateLocks", Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource = local.lock_objects }
   artifact_read = { Sid = "ReadReleaseZip", Effect = "Allow", Action = ["s3:GetObject", "s3:GetObjectVersion"], Resource = [local.artifact_objects] }
+  # release custody への権限は、prefix ごとの GetObject・PutObject だけとする。
+  # 一覧（ListBucket）と削除は、どの role にも与えない。
+  custody_diagnostics = { Sid = "WriteFailureDiagnostics", Effect = "Allow", Action = ["s3:PutObject"], Resource = [local.custody_objects["failure-diagnostics"]] }
+  custody = {
+    artifact = [
+      { Sid = "WriteRegisteredCustody", Effect = "Allow", Action = ["s3:PutObject"], Resource = [local.custody_objects["registered-release"]] },
+      local.custody_diagnostics,
+    ]
+    plan = [
+      { Sid = "ReadReleaseCustody", Effect = "Allow", Action = ["s3:GetObject"], Resource = [local.custody_objects["registered-release"], local.custody_objects["release-review"]] },
+      { Sid = "WriteReviewCustody", Effect = "Allow", Action = ["s3:PutObject"], Resource = [local.custody_objects["release-review"]] },
+      local.custody_diagnostics,
+    ]
+    apply = [
+      { Sid = "ReadReviewCustody", Effect = "Allow", Action = ["s3:GetObject"], Resource = [local.custody_objects["release-review"]] },
+      { Sid = "WriteResultCustody", Effect = "Allow", Action = ["s3:PutObject"], Resource = [local.custody_objects["release-result"]] },
+      local.custody_diagnostics,
+    ]
+  }
   policies = {
-    artifact = concat(local.runtime_ownership_denials, [{ Sid = "RegisterReleaseZip", Effect = "Allow", Action = ["s3:PutObject", "s3:GetObject", "s3:GetObjectVersion"], Resource = [local.artifact_objects] }])
-    plan     = concat(local.runtime_ownership_denials, [local.state_list, local.state_lock, local.artifact_read, { Sid = "ReadProductionState", Effect = "Allow", Action = ["s3:GetObject"], Resource = local.state_objects }])
-    apply    = concat(local.runtime_ownership_denials, [local.state_list, local.state_lock, local.artifact_read, { Sid = "WriteProductionState", Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject"], Resource = local.state_objects }], local.production_write)
+    artifact = concat(local.runtime_ownership_denials, [{ Sid = "RegisterReleaseZip", Effect = "Allow", Action = ["s3:PutObject", "s3:GetObject", "s3:GetObjectVersion"], Resource = [local.artifact_objects] }], local.custody.artifact)
+    plan     = concat(local.runtime_ownership_denials, [local.state_list, local.state_lock, local.artifact_read, { Sid = "ReadProductionState", Effect = "Allow", Action = ["s3:GetObject"], Resource = local.state_objects }], local.custody.plan)
+    apply    = concat(local.runtime_ownership_denials, [local.state_list, local.state_lock, local.artifact_read, { Sid = "WriteProductionState", Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject"], Resource = local.state_objects }], local.custody.apply, local.production_write)
   }
 }
 resource "aws_iam_openid_connect_provider" "github" {
