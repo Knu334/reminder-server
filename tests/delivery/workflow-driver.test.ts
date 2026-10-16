@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {mkdtemp,readFile,writeFile,rm,stat} from "node:fs/promises";
+import {mkdir,mkdtemp,readFile,readdir,writeFile,rm,stat} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {createHash} from "node:crypto";
@@ -7,25 +7,71 @@ import {test} from "node:test";
 import {artifact,baseline,applicationPlan,platformPlan,runtimeData} from "../fixtures/synthetic/plans/fixtures";
 import type {ReleaseManifest} from "../../scripts/release/artifact";
 import type {WorkflowContext,CommandRunner,ReleaseServices,WorkflowConfig} from "../../scripts/release/workflow";
+import {custodyPrefix,requiredFiles,writeCustody,type CustodyManifest,type CustodyReference,type CustodyStore} from "../../scripts/release/custody";
 async function driver(){let module:typeof import("../../scripts/release/workflow")|undefined;try{module=await import("../../scripts/release/workflow");}catch{ /* missing implementation is an assertion below */ }assert.ok(module,"protected release driver must exist");return module;}
-const digest=(s:string)=>createHash("sha256").update(s).digest("hex");
+const digest=(s:string|Uint8Array)=>createHash("sha256").update(s).digest("hex");
+const b64=(s:string|Uint8Array)=>createHash("sha256").update(s).digest("base64");
 const outputs={runtime_data:{value:runtimeData},api_id:{value:baseline.apiId},api_base_url:{value:baseline.apiBaseUrl},api_alias_arn:{value:"arn:aws:lambda:us-east-1:123456789012:function:synthetic-api:production"},cleanup_alias_arn:{value:"arn:aws:lambda:us-east-1:123456789012:function:synthetic-cleanup:production"},api_version:{value:"2"},cleanup_version:{value:"3"},release_sha256_base64:{value:artifact.sha256Base64}};
 const platformOutputs=Object.fromEntries(Object.entries({reminders_table:"synthetic-production-reminders",owner_state_table:"synthetic-production-owner-state",image_jobs_table:"synthetic-production-image-jobs",images_bucket:"synthetic-123456789012-us-east-1-images",api_role_arn:"arn:aws:iam::123456789012:role/synthetic-production-api",cleanup_role_arn:"arn:aws:iam::123456789012:role/synthetic-production-cleanup",api_log_group:"/aws/lambda/synthetic-production-api",cleanup_log_group:"/aws/lambda/synthetic-production-cleanup",gateway_log_group:"/aws/apigateway/synthetic-production-api",cognito_issuer:baseline.cognitoIssuer,cognito_client_id:baseline.cognitoClientId,cognito_auth_base_url:baseline.cognitoAuthBaseUrl,restored_tables:{},reminders_table_arn:"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-production-reminders",owner_state_table_arn:"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-production-owner-state",image_jobs_table_arn:"arn:aws:dynamodb:us-east-1:123456789012:table/synthetic-production-image-jobs",unused_secret:"never copy"}).map(([k,v])=>[k,{value:v}]));
-async function fixture(root:"platform"|"application"="application") {
-  const d=await driver(),directory=await mkdtemp(join(tmpdir(),"workflow-synthetic-"));
-  const context:WorkflowContext={directory,root,commit:artifact.commit,region:"us-east-1",apply:false,expectedReviewSha256:"",published:false,schedulerEnabled:false};
+
+// S3 の代わりの fake。既存 key への put は拒否し、get した key を記録する。
+class FakeStore implements CustodyStore {
+  readonly objects=new Map<string,Uint8Array>();readonly order:string[]=[];readonly gets:string[]=[];
+  put(key:string,body:Uint8Array):Promise<void>{if(this.objects.has(key))return Promise.reject(Error("PreconditionFailed"));this.objects.set(key,Uint8Array.from(body));this.order.push(key);return Promise.resolve();}
+  get(key:string):Promise<Uint8Array>{this.gets.push(key);const v=this.objects.get(key);return v?Promise.resolve(Uint8Array.from(v)):Promise.reject(Error("NoSuchKey"));}
+}
+// terraform の fake：plan ごとに別の binary を作り、show -json は binary の中身から plan の JSON を引く。
+const shownPlans=new Map<string,string>();let binaries=0,runs=1000;
+const start=new Date("2026-10-12T00:00:00.000Z"),H=3600_000;
+const at=(ms:number)=>new Date(start.getTime()+ms);
+async function fixture(root:"platform"|"application"="application",options:{store?:FakeStore}={}) {
+  const d=await driver(),runnerTemp=await mkdtemp(join(tmpdir(),"workflow-synthetic-")),directory=join(runnerTemp,"release");
+  const store=options.store??new FakeStore();let clock=start;const runId=String(++runs);
+  const context:WorkflowContext={directory,root,commit:artifact.commit,region:"us-east-1",apply:false,expectedReviewSha256:"",published:false,schedulerEnabled:false,custodyStore:store,runId,runAttempt:1,now:()=>clock};
   const inputs={account_id:"123456789012",region:"us-east-1",name_prefix:"synthetic",chrome_origin:"https://synthetic.example",production_api_id:baseline.apiId,cognito_domain_prefix:"synthetic",scheduler_role_arn:"arn:aws:iam::123456789012:role/synthetic-production-scheduler"};
   const config={inputs,baseline:root==="application"?baseline:{...baseline,root:"platform" as const,apiBaseUrl:null,apiId:null},stateBucket:"synthetic-123456789012-us-east-1-state"};
-  const source=await mkdtemp(join(tmpdir(),"workflow-source-"));const evidence={audit:'{"metadata":{"vulnerabilities":{"high":0,"critical":0}}}',sbom:'{"bomFormat":"CycloneDX"}',tests:"synthetic passing validation"};
+  const source=join(runnerTemp,"registered");await mkdir(source,{mode:0o700});const evidence={audit:'{"metadata":{"vulnerabilities":{"high":0,"critical":0}}}',sbom:'{"bomFormat":"CycloneDX"}',tests:"synthetic passing validation"};
   const registered:ReleaseManifest={commit:artifact.commit,region:context.region,zip:"artifacts/reminder-server.zip",tools:{node:"24.21.0",npm:"11.11.1",esbuild:"0.28.2"},artifact,evidence:{audit:`sha256:${digest(evidence.audit)}`,sbom:`sha256:${digest(evidence.sbom)}`,tests:`sha256:${digest(evidence.tests)}`}};
-  for(const [name,text] of Object.entries(evidence))await writeFile(join(source,`${name}.${name==="tests"?"txt":"json"}`),text);await writeFile(join(source,"registered.json"),JSON.stringify(registered));
+  for(const [name,text] of Object.entries(evidence))await writeFile(join(source,`${name}.${name==="tests"?"txt":"json"}`),text);await writeFile(join(source,"registered.json"),JSON.stringify(registered));await writeFile(join(source,"audit-runtime.json"),'{"metadata":{"vulnerabilities":{}}}');
   const plan=root==="application"?applicationPlan():platformPlan();const commands:string[][]=[];let headCount=0,verifyCount=0,smokeCount=0;
-  const run:CommandRunner=async(command,args)=>{commands.push([command,...args]);if(command==="git")return artifact.commit+"\n";const mode=args[1];if(mode==="plan"){const path=args.find(a=>a.startsWith("-out="))!.slice(5);await writeFile(path,"saved immutable binary");const vars=JSON.parse(await readFile(join(directory,"inputs.json"),"utf8"));for(const [key,value] of Object.entries(vars))if(!(key in plan.variables))(plan.variables as Record<string,{value:unknown}>)[key]={value};return "private stdout must not leak";}if(mode==="show"){assert.equal(args[2],"-json");assert.equal(args[3],join(directory,"saved.tfplan"));assert.equal(await readFile(args[3],"utf8"),"saved immutable binary");return JSON.stringify(plan);}if(mode==="output")return JSON.stringify(args[0]?.includes("platform")?platformOutputs:outputs);return "";};
+  const run:CommandRunner=async(command,args)=>{commands.push([command,...args]);if(command==="git")return artifact.commit+"\n";const mode=args[1];
+    if(mode==="plan"){const out=args.find(a=>a.startsWith("-out="))!.slice(5);const vars=JSON.parse(await readFile(join(directory,"inputs.json"),"utf8"));for(const [key,value] of Object.entries(vars))if(!(key in plan.variables))(plan.variables as Record<string,{value:unknown}>)[key]={value};const binary=`saved binary ${++binaries}`;shownPlans.set(binary,JSON.stringify(plan));await writeFile(out,binary);return "private stdout must not leak";}
+    if(mode==="show"&&args[2]==="-no-color"){await readFile(args[3]!);return "synthetic human-readable plan\n";}
+    if(mode==="show"&&args[2]==="-json"&&args[3]){const text=shownPlans.get(await readFile(args[3],"utf8"));if(text===undefined)throw Error("unknown saved plan");return text;}
+    if(mode==="output")return JSON.stringify(args[0]?.includes("platform")?platformOutputs:outputs);return "";};
   const services:ReleaseServices={run,head:async(a,region)=>{assert.deepEqual(a,artifact);assert.equal(region,"us-east-1");headCount++;},verify:async(a,o,region)=>{assert.deepEqual(a,artifact);assert.deepEqual(o,outputs);assert.equal(region,"us-east-1");verifyCount++;},smoke:async(b,p)=>{assert.deepEqual(b,baseline);assert.equal(p,false);smokeCount++;}};
+  // 同じ run の register job が registered-release を書いたものとして扱う（初回の呼び出しで書く）。
+  let reference:CustodyReference|undefined;
+  const src=async()=>{if(!reference){const location={kind:"registered-release" as const,runId,runAttempt:1};reference={location,manifestSha256:(await writeCustody(store,location,source,{root:"application"},clock)).manifestSha256};}return reference;};
   // Record the outbound plan-job digest independently at the transfer boundary.
-  const transferredDriver={...d,planRelease:async(c:WorkflowContext,cfg:WorkflowConfig,src:string|undefined,svc:ReleaseServices)=>{const review=await d.planRelease(c,cfg,src,svc);c.expectedCustodySha256=digest(await readFile(join(c.directory,"custody.json"),"utf8"));return review;}};
-  return {d:transferredDriver,directory,context,config,source,registered,plan,commands,services,counts:()=>({headCount,verifyCount,smokeCount}),cleanup:async()=>{await rm(directory,{recursive:true,force:true});await rm(source,{recursive:true,force:true});}};
+  const transferredDriver={...d,planRelease:async(c:WorkflowContext,cfg:WorkflowConfig,s:CustodyReference|undefined,svc:ReleaseServices)=>{const review=await d.planRelease(c,cfg,s,svc);c.expectedCustodySha256=digest(await readFile(join(c.directory,"custody.json"),"utf8"));return review;}};
+  return {d:transferredDriver,raw:d,runnerTemp,directory,context,config,source,registered,plan,commands,services,store,src,setNow:(t:Date)=>{clock=t;},counts:()=>({headCount,verifyCount,smokeCount}),cleanup:async()=>{await rm(runnerTemp,{recursive:true,force:true});}};
 }
+type Fixture=Awaited<ReturnType<typeof fixture>>;
+const reviewRef=(f:Fixture,r:{manifestSha256:string},runAttempt=f.context.runAttempt):CustodyReference=>({location:{kind:"release-review",runId:f.context.runId,runAttempt},manifestSha256:r.manifestSha256});
+function manifestAt(store:FakeStore,ref:CustodyReference):CustodyManifest{return JSON.parse(Buffer.from(store.objects.get(`${custodyPrefix(ref.location)}manifest.json`)!).toString()) as CustodyManifest;}
+const planned=(f:Fixture)=>f.commands.filter(c=>c[0]==="terraform"&&c[2]==="plan").length;
+/** 取り出した bundle を書き換え、manifest と各ファイルの hash を整合させたまま別の run ID に置く。 */
+async function forge(store:FakeStore,from:CustodyReference,runId:string,mutate:(files:Map<string,Buffer>)=>void):Promise<CustodyReference>{
+  const prefix=custodyPrefix(from.location),m=manifestAt(store,from);const files=new Map(Object.keys(m.files).map(n=>[n,Buffer.from(store.objects.get(prefix+n)!)]));mutate(files);
+  const location={...from.location,runId},to=custodyPrefix(location),hashes:Record<string,string>={};for(const [n,b] of files){store.objects.set(to+n,b);hashes[n]=digest(b);}
+  const bytes=Buffer.from(JSON.stringify({...m,runId,files:hashes,custodySha256:hashes["custody.json"]},null,2)+"\n");store.objects.set(to+"manifest.json",bytes);return {location,manifestSha256:digest(bytes)};
+}
+/** CLI 境界：環境変数を与えて workflowCli を呼び、標準出力・標準エラー・GITHUB_OUTPUT・summary を集める。 */
+async function cli(f:Fixture,phase:string,env:Record<string,string>,services:ReleaseServices=f.services){
+  const values:Record<string,string>={RUNNER_TEMP:f.runnerTemp,RELEASE_ROOT:f.context.root,RELEASE_COMMIT:artifact.commit,AWS_REGION:"us-east-1",RELEASE_APPLY:"false",RELEASE_PUBLISHED:"false",RELEASE_SCHEDULER_ENABLED:"false",RELEASE_INPUTS_JSON:JSON.stringify(f.config.inputs),RELEASE_BASELINE_JSON:JSON.stringify(f.config.baseline),STATE_BUCKET:f.config.stateBucket,GITHUB_OUTPUT:join(f.runnerTemp,"github-output"),GITHUB_STEP_SUMMARY:join(f.runnerTemp,"github-summary"),GITHUB_RUN_ID:f.context.runId,GITHUB_RUN_ATTEMPT:"1",CUSTODY_BUCKET:"synthetic-custody",REVIEWED_RUN:"",EXPECTED_REVIEW_SHA256:"",SOURCE_RUN_ID:"",SOURCE_ATTEMPT:"",SOURCE_MANIFEST_SHA256:"",...env};
+  const previous=Object.fromEntries(Object.keys(values).map(k=>[k,process.env[k]]));let stdout="",stderr="";
+  await rm(values.GITHUB_OUTPUT!,{force:true});await rm(values.GITHUB_STEP_SUMMARY!,{force:true});
+  Object.assign(process.env,values);
+  try{
+    const code=await f.raw.workflowCli([phase],{custodyStore:f.store,now:f.context.now,services,io:{stdout:s=>{stdout+=s;},stderr:s=>{stderr+=s;}}});
+    const read=async(p:string)=>readFile(p,"utf8").catch(()=>"");
+    return {code,stdout,stderr,output:await read(values.GITHUB_OUTPUT!),summary:await read(values.GITHUB_STEP_SUMMARY!)};
+  }finally{for(const [k,v] of Object.entries(previous)){if(v===undefined)delete process.env[k];else process.env[k]=v;}}
+}
+function leaves(value:unknown):string[]{if(typeof value==="string")return [value];if(value&&typeof value==="object")return Object.values(value).flatMap(leaves);return [];}
+const fixtureSecrets=(f:Fixture)=>[...leaves(f.config.inputs),...leaves(f.config.baseline),...leaves(platformOutputs),...leaves(outputs),"private stdout must not leak"].filter(v=>v.length>=8&&v!==artifact.commit&&v!=="application"&&v!=="platform");
+
 void test("dispatch_accepts_public_or_private_main_dispatch",async()=>{
   const d=await driver();const good={event:"workflow_dispatch",ref:"refs/heads/main",commit:artifact.commit,head:artifact.commit,mainContainsCommit:true,apply:false,reviewedRun:"",expectedReviewSha256:"",root:"platform"};
   d.authorizeDispatch(good);d.authorizeDispatch({...good,privateRepository:false} as typeof good);for(const bad of [{event:"pull_request"},{ref:"refs/heads/topic"},{head:"b".repeat(40)},{mainContainsCommit:false},{commit:"main"},{apply:true},{apply:true,reviewedRun:"12",expectedReviewSha256:"bad"},{root:"bootstrap"}])assert.throws(()=>d.authorizeDispatch({...good,...bad}));
@@ -35,34 +81,184 @@ void test("reused_preview_requires_reviewed_digest",async()=>{
   d.authorizeDispatch(good);for(const bad of ["","bad"])assert.throws(()=>d.authorizeDispatch({...good,expectedReviewSha256:bad}));
 });
 void test("application_plan_derives_json_from_saved_binary_and_transfers_only_allowed_outputs",async()=>{
-  const f=await fixture();try{const sha=await f.d.planRelease(f.context,f.config,f.source,f.services);assert.match(sha,/^[0-9a-f]{64}$/);assert.equal(f.counts().headCount,1);assert.equal(f.commands.filter(c=>c[2]==="plan").length,1);const input=JSON.parse(await readFile(join(f.directory,"inputs.json"),"utf8"));assert.equal(input.operator_api_seed,false);assert.equal(input.production_api_id,baseline.apiId);assert.equal(input.cognito_client_id,baseline.cognitoClientId);assert.equal(input.unused_secret,undefined);assert.equal(input.artifact.version_id,artifact.versionId);for(const p of [f.directory,join(f.directory,"inputs.json"),join(f.directory,"saved.tfplan"),join(f.directory,"review.json")])assert.equal((await stat(p)).mode&0o777,p===f.directory?0o700:0o600);}finally{await f.cleanup();}
+  const f=await fixture();try{const r=await f.d.planRelease(f.context,f.config,await f.src(),f.services);assert.match(r.planReviewSha256,/^[0-9a-f]{64}$/);assert.equal(f.counts().headCount,1);assert.equal(planned(f),1);const input=JSON.parse(await readFile(join(f.directory,"inputs.json"),"utf8"));assert.equal(input.operator_api_seed,false);assert.equal(input.production_api_id,baseline.apiId);assert.equal(input.cognito_client_id,baseline.cognitoClientId);assert.equal(input.unused_secret,undefined);assert.equal(input.artifact.version_id,artifact.versionId);for(const p of [f.directory,join(f.directory,"inputs.json"),join(f.directory,"saved.tfplan"),join(f.directory,"review.json"),join(f.directory,"plan.txt")])assert.equal((await stat(p)).mode&0o777,p===f.directory?0o700:0o600);}finally{await f.cleanup();}
+});
+void test("preview_writes_release_review_with_plan_text_and_returns_manifest_digest",async()=>{
+  const f=await fixture();try{
+    const r=await f.d.planRelease(f.context,f.config,await f.src(),f.services);const ref=reviewRef(f,r),prefix=custodyPrefix(ref.location),bytes=f.store.objects.get(`${prefix}manifest.json`)!;
+    assert.equal(prefix,`release-review/${f.context.runId}/1/`);assert.equal(f.store.order.at(-1),`${prefix}manifest.json`);
+    assert.equal(r.manifestSha256,digest(bytes));assert.equal(r.manifestSha256Base64,b64(bytes));assert.notEqual(r.manifestSha256,r.planReviewSha256);
+    const m=manifestAt(f.store,ref);assert.equal(m.kind,"release-review");assert.equal(m.root,"application");assert.equal(m.planReviewSha256,r.planReviewSha256);
+    assert.equal(JSON.parse(await readFile(join(f.directory,"review.json"),"utf8")).reviewSha256,r.planReviewSha256);
+    assert.equal(m.custodySha256,digest(await readFile(join(f.directory,"custody.json"))));assert.equal(m.sourceManifestSha256,undefined);
+    assert.equal(m.createdAt,start.toISOString());assert.equal(m.expiresAt,at(24*H).toISOString());
+    const text=await readFile(join(f.directory,"plan.txt"),"utf8");assert.equal(text,"synthetic human-readable plan\n");assert.equal(Buffer.from(f.store.objects.get(`${prefix}plan.txt`)!).toString(),text);
+    assert.ok(f.commands.some(c=>c[2]==="show"&&c[3]==="-no-color"&&c[4]===join(f.directory,"saved.tfplan")));
+    assert.ok(f.store.gets.includes(`registered-release/${f.context.runId}/1/manifest.json`));
+  }finally{await f.cleanup();}
+});
+void test("release_review_contains_only_required_files_not_plan_json",async()=>{
+  for(const root of ["application","platform"] as const){const f=await fixture(root);try{
+    const r=await f.d.planRelease(f.context,f.config,root==="application"?await f.src():undefined,f.services);const ref=reviewRef(f,r),prefix=custodyPrefix(ref.location);
+    assert.deepEqual(Object.keys(manifestAt(f.store,ref).files).sort(),[...requiredFiles("release-review",root)].sort());
+    assert.ok((await readdir(f.directory)).includes("plan.json"));assert.equal([...f.store.objects.keys()].some(k=>k.startsWith(prefix)&&k.endsWith("plan.json")),false);
+  }finally{await f.cleanup();}}
 });
 void test("apply_consumes_same_saved_binary_then_checks_aliases_smoke_and_safe_ledger",async()=>{
-  const f=await fixture();try{const sha=await f.d.planRelease(f.context,f.config,f.source,f.services);const ledger=await f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha},f.services);assert.deepEqual(f.counts(),{headCount:2,verifyCount:1,smokeCount:1});assert.equal(f.commands.filter(c=>c[2]==="plan").length,1);const apply=f.commands.find(c=>c[2]==="apply")!;assert.ok(apply.includes(join(f.directory,"saved.tfplan")));assert.ok(apply.includes("-lock-timeout=5m"));assert.equal(ledger.commit,artifact.commit);assert.equal(ledger.result,"verified");assert.ok(!JSON.stringify(ledger).includes(baseline.cognitoIssuer));}finally{await f.cleanup();}
+  const f=await fixture();try{const {planReviewSha256:sha}=await f.d.planRelease(f.context,f.config,await f.src(),f.services);const ledger=await f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha},f.services);assert.deepEqual(f.counts(),{headCount:2,verifyCount:1,smokeCount:1});assert.equal(planned(f),1);const apply=f.commands.find(c=>c[2]==="apply")!;assert.ok(apply.includes(join(f.directory,"saved.tfplan")));assert.ok(apply.includes("-lock-timeout=5m"));assert.equal(ledger.commit,artifact.commit);assert.equal(ledger.result,"verified");assert.ok(!JSON.stringify(ledger).includes(baseline.cognitoIssuer));}finally{await f.cleanup();}
 });
 void test("apply_rejects_changed_binary_inputs_commit_baseline_artifact_and_forged_plan_json",async()=>{
-  for(const file of ["saved.tfplan","inputs.json","baseline.json","artifact.json"]){const f=await fixture();try{const sha=await f.d.planRelease(f.context,f.config,f.source,f.services);await writeFile(join(f.directory,file),file==="saved.tfplan"?"tampered":"{}");await assert.rejects(f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha},f.services));assert.equal(f.commands.some(c=>c[2]==="apply"),false);}finally{await f.cleanup();}}
-  const f=await fixture();try{const sha=await f.d.planRelease(f.context,f.config,f.source,f.services);await writeFile(join(f.directory,"plan.json"),JSON.stringify({forged:true}));await assert.rejects(f.d.applyRelease({...f.context,commit:"b".repeat(40),apply:true,expectedReviewSha256:sha},f.services));assert.equal(f.commands.some(c=>c[2]==="apply"),false);await f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha},f.services);assert.equal(JSON.parse(await readFile(join(f.directory,"plan.json"),"utf8")).format_version,"1.2");}finally{await f.cleanup();}
+  for(const file of ["saved.tfplan","inputs.json","baseline.json","artifact.json"]){const f=await fixture();try{const {planReviewSha256:sha}=await f.d.planRelease(f.context,f.config,await f.src(),f.services);await writeFile(join(f.directory,file),file==="saved.tfplan"?"tampered":"{}");await assert.rejects(f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha},f.services));assert.equal(f.commands.some(c=>c[2]==="apply"),false);}finally{await f.cleanup();}}
+  const f=await fixture();try{const {planReviewSha256:sha}=await f.d.planRelease(f.context,f.config,await f.src(),f.services);await writeFile(join(f.directory,"plan.json"),JSON.stringify({forged:true}));await assert.rejects(f.d.applyRelease({...f.context,commit:"b".repeat(40),apply:true,expectedReviewSha256:sha},f.services));assert.equal(f.commands.some(c=>c[2]==="apply"),false);await f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha},f.services);assert.equal(JSON.parse(await readFile(join(f.directory,"plan.json"),"utf8")).format_version,"1.2");}finally{await f.cleanup();}
 });
 void test("reviewed_hash_mismatch_and_head_failure_stop_before_apply",async()=>{
-  for(const failHead of [false,true]){const f=await fixture();try{const sha=await f.d.planRelease(f.context,f.config,f.source,f.services);await assert.rejects(f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:failHead?sha:"f".repeat(64)},{...f.services,head:async()=>{throw Error("server artifact mismatch");}}));assert.equal(f.commands.some(c=>c[2]==="apply"),false);}finally{await f.cleanup();}}
+  for(const failHead of [false,true]){const f=await fixture();try{const {planReviewSha256:sha}=await f.d.planRelease(f.context,f.config,await f.src(),f.services);await assert.rejects(f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:failHead?sha:"f".repeat(64)},{...f.services,head:async()=>{throw Error("server artifact mismatch");}}));assert.equal(f.commands.some(c=>c[2]==="apply"),false);}finally{await f.cleanup();}}
 });
 void test("normal_application_rejects_seed_missing_baseline_and_artifact_evidence_changes",async()=>{
-  for(const bad of ["seed","baseline","evidence","version"]){const f=await fixture();try{if(bad==="evidence")await writeFile(join(f.source,"tests.txt"),"tampered");if(bad==="version")await writeFile(join(f.source,"registered.json"),JSON.stringify({...f.registered,artifact:{...artifact,commit:"b".repeat(40)}}));await assert.rejects(f.d.planRelease(f.context,{...f.config,inputs:{...f.config.inputs,...(bad==="seed"?{operator_api_seed:true}:{})},baseline:bad==="baseline"?null:f.config.baseline},f.source,f.services));assert.equal(f.commands.some(c=>c[2]==="plan"),false);}finally{await f.cleanup();}}
+  for(const bad of ["seed","baseline","evidence","version","source"]){const f=await fixture();try{if(bad==="evidence")await writeFile(join(f.source,"tests.txt"),"tampered");if(bad==="version")await writeFile(join(f.source,"registered.json"),JSON.stringify({...f.registered,artifact:{...artifact,commit:"b".repeat(40)}}));await assert.rejects(f.d.planRelease(f.context,{...f.config,inputs:{...f.config.inputs,...(bad==="seed"?{operator_api_seed:true}:{})},baseline:bad==="baseline"?null:f.config.baseline},bad==="source"?undefined:await f.src(),f.services));assert.equal(planned(f),0);}finally{await f.cleanup();}}
 });
 void test("apply_run_requires_identical_preview_inputs_and_selected_version_without_registration",async()=>{
-  const f=await fixture();const next=await mkdtemp(join(tmpdir(),"workflow-next-"));try{const sha=await f.d.planRelease(f.context,f.config,f.source,f.services);const nextContext={...f.context,directory:next,apply:true,expectedReviewSha256:sha};await assert.rejects(f.d.planRelease(nextContext,{...f.config,inputs:{...f.config.inputs,chrome_origin:"https://changed.example"}},f.directory,f.services));assert.equal(f.commands.filter(c=>c[2]==="plan").length,1);}finally{await rm(next,{recursive:true,force:true});await f.cleanup();}
+  const f=await fixture(),next=await fixture("application",{store:f.store});try{const r=await f.d.planRelease(f.context,f.config,await f.src(),f.services);await assert.rejects(next.d.planRelease({...next.context,apply:true},{...next.config,inputs:{...next.config.inputs,chrome_origin:"https://changed.example"}},reviewRef(f,r),next.services));assert.equal(planned(next),0);
+    // apply の run は release-review を必須とし、registered-release や source 無しでは plan しない。
+    for(const source of [undefined,await next.src()])await assert.rejects(next.d.planRelease({...next.context,apply:true},next.config,source,next.services));assert.equal(planned(next),0);
+  }finally{await next.cleanup();await f.cleanup();}
+});
+void test("apply_run_compares_inner_plan_digest_and_inherits_expiry",async()=>{
+  const first=await fixture(),next=await fixture("application",{store:first.store});try{
+    const preview=await first.d.planRelease(first.context,first.config,await first.src(),first.services);next.setNow(at(H));
+    const c={...next.context,apply:true};const applied=await next.d.planRelease(c,next.config,reviewRef(first,preview),next.services);
+    assert.equal(applied.planReviewSha256,preview.planReviewSha256);assert.notEqual(applied.manifestSha256,preview.manifestSha256);
+    const original=manifestAt(first.store,reviewRef(first,preview)),m=manifestAt(next.store,reviewRef(next,applied));
+    assert.equal(m.expiresAt,original.expiresAt);assert.equal(m.createdAt,at(H).toISOString());assert.equal(m.sourceManifestSha256,undefined);assert.equal(m.planReviewSha256,original.planReviewSha256);
+    assert.equal(JSON.parse(await readFile(join(next.directory,"preview.json"),"utf8")).preview,false);
+    assert.equal(next.store.objects.has(`registered-release/${next.context.runId}/1/manifest.json`),false);assert.equal(next.commands.some(x=>/build|package|register/.test(x.join(" "))),false);
+    await next.d.applyRelease({...c,expectedReviewSha256:applied.planReviewSha256},next.services);assert.equal(next.counts().headCount,2);
+  }finally{await first.cleanup();await next.cleanup();}
+});
+void test("apply_run_rejects_reviewed_manifest_digest_mismatch",async()=>{
+  const first=await fixture(),next=await fixture("application",{store:first.store});try{
+    const preview=await first.d.planRelease(first.context,first.config,await first.src(),first.services);
+    const wrong={...reviewRef(first,preview),manifestSha256:"f".repeat(64)};const reads=next.store.gets.length;
+    await assert.rejects(next.d.planRelease({...next.context,apply:true},next.config,wrong,next.services),/manifest digest/);assert.equal(planned(next),0);
+    assert.deepEqual(next.store.gets.slice(reads),[`release-review/${first.context.runId}/1/manifest.json`]);
+    // manifest は一致しても、作り直した plan の digest が manifest の planReviewSha256 と違えば止まり、何も書かない。
+    (next.plan as Record<string,unknown>).terraform_version="synthetic-changed";
+    await assert.rejects(next.d.planRelease({...next.context,apply:true},next.config,reviewRef(first,preview),next.services),/differs from reviewed preview/);
+    assert.equal([...next.store.objects.keys()].some(k=>k.startsWith(`release-review/${next.context.runId}/`)),false);
+  }finally{await first.cleanup();await next.cleanup();}
+});
+void test("reused_preview_records_source_manifest_and_gets_new_expiry",async()=>{
+  const first=await fixture(),next=await fixture("application",{store:first.store});try{
+    const preview=await first.d.planRelease(first.context,first.config,await first.src(),first.services);next.setNow(at(2*H));
+    const reused=await next.d.planRelease({...next.context,schedulerEnabled:true},next.config,reviewRef(first,preview),next.services);
+    assert.notEqual(reused.planReviewSha256,preview.planReviewSha256);assert.equal(JSON.parse(await readFile(join(next.directory,"inputs.json"),"utf8")).scheduler_enabled,true);
+    const m=manifestAt(next.store,reviewRef(next,reused));assert.equal(m.sourceManifestSha256,preview.manifestSha256);assert.equal(m.createdAt,at(2*H).toISOString());assert.equal(m.expiresAt,at(26*H).toISOString());
+    assert.equal(next.counts().headCount,1);assert.equal(next.commands.some(x=>/build|package|register/.test(x.join(" "))),false);assert.equal(next.store.objects.has(`registered-release/${next.context.runId}/1/manifest.json`),false);
+  }finally{await first.cleanup();await next.cleanup();}
+});
+void test("reused_preview_can_plan_and_apply_without_build_and_refuses_apply_run_as_preview",async()=>{
+  const first=await fixture(),next=await fixture("application",{store:first.store}),third=await fixture("application",{store:first.store});try{
+    const preview=await first.d.planRelease(first.context,first.config,await first.src(),first.services);const c={...next.context,apply:true};const applied=await next.d.planRelease(c,next.config,reviewRef(first,preview),next.services);assert.equal(applied.planReviewSha256,preview.planReviewSha256);await next.d.applyRelease({...c,expectedReviewSha256:applied.planReviewSha256},next.services);assert.equal(planned(next),1);assert.equal(next.commands.some(x=>/build|package|register/.test(x.join(" "))),false);
+    for(const apply of [true,false])await assert.rejects(third.d.planRelease({...third.context,apply},third.config,reviewRef(next,applied),third.services),/Original preview/);assert.equal(planned(third),0);
+  }finally{await first.cleanup();await next.cleanup();await third.cleanup();}
+});
+void test("expired_reviewed_bundle_is_rejected_for_apply_and_reuse",async()=>{
+  const first=await fixture();const preview=await first.d.planRelease(first.context,first.config,await first.src(),first.services);
+  try{for(const apply of [true,false]){const next=await fixture("application",{store:first.store});try{next.setNow(at(24*H));
+    await assert.rejects(next.d.planRelease({...next.context,apply,schedulerEnabled:!apply},next.config,reviewRef(first,preview),next.services),/expired/);assert.equal(planned(next),0);
+    next.setNow(at(24*H-1));await next.d.planRelease({...next.context,apply,schedulerEnabled:!apply},next.config,reviewRef(first,preview),next.services);
+  }finally{await next.cleanup();}}}finally{await first.cleanup();}
+});
+void test("original_bundle_with_valid_manifest_but_bad_inner_custody_is_rejected",async()=>{
+  const first=await fixture();const preview=await first.d.planRelease(first.context,first.config,await first.src(),first.services);const original=reviewRef(first,preview);
+  try{
+    // 対照：書き換えずに置き直した bundle は通る（拒否の理由が inner custody であることを示す）。
+    const control=await fixture("application",{store:first.store});try{await control.d.planRelease({...control.context,apply:true},control.config,await forge(first.store,original,String(++runs),()=>{}),control.services);}finally{await control.cleanup();}
+    const mutations:Array<(files:Map<string,Buffer>)=>void>=[
+      files=>{const c=JSON.parse(files.get("custody.json")!.toString());c["inputs.json"]="0".repeat(64);files.set("custody.json",Buffer.from(JSON.stringify(c)));},
+      files=>{const c=JSON.parse(files.get("custody.json")!.toString());delete c["platform-outputs.json"];files.set("custody.json",Buffer.from(JSON.stringify(c)));},
+    ];
+    for(const mutate of mutations)for(const apply of [true,false]){const next=await fixture("application",{store:first.store});try{
+      const forged=await forge(first.store,original,String(++runs),mutate);
+      await assert.rejects(next.d.planRelease({...next.context,apply,schedulerEnabled:!apply},next.config,forged,next.services),/custody|Private release bytes/);assert.equal(planned(next),0);
+    }finally{await next.cleanup();}}
+  }finally{await first.cleanup();}
+});
+void test("original_bundle_with_saved_plan_not_matching_review_is_rejected",async()=>{
+  const first=await fixture();const preview=await first.d.planRelease(first.context,first.config,await first.src(),first.services);const original=reviewRef(first,preview);
+  try{
+    const savedJson=JSON.parse(shownPlans.get(await readFile(join(first.directory,"saved.tfplan"),"utf8"))!) as Record<string,unknown>;
+    shownPlans.set("forged saved binary",JSON.stringify({...savedJson,terraform_version:"synthetic-forged"}));
+    for(const apply of [true,false]){const next=await fixture("application",{store:first.store});try{
+      const forged=await forge(first.store,original,String(++runs),files=>{files.set("saved.tfplan",Buffer.from("forged saved binary"));const c=JSON.parse(files.get("custody.json")!.toString());c["saved.tfplan"]=digest("forged saved binary");files.set("custody.json",Buffer.from(JSON.stringify(c)));});
+      await assert.rejects(next.d.planRelease({...next.context,apply,schedulerEnabled:!apply},next.config,forged,next.services),/Saved release review mismatch/);assert.equal(planned(next),0);
+    }finally{await next.cleanup();}}
+  }finally{await first.cleanup();}
+});
+void test("plan_rejects_missing_or_malformed_source_outputs_before_s3_or_terraform",async()=>{
+  const f=await fixture();try{
+    const ref=await f.src(),good={SOURCE_RUN_ID:ref.location.runId,SOURCE_ATTEMPT:"1",SOURCE_MANIFEST_SHA256:ref.manifestSha256};
+    const bad:Array<Record<string,string>>=[{SOURCE_RUN_ID:"",SOURCE_ATTEMPT:"",SOURCE_MANIFEST_SHA256:""},{SOURCE_RUN_ID:""},{SOURCE_ATTEMPT:""},{SOURCE_MANIFEST_SHA256:""},{SOURCE_RUN_ID:"run-1"},{SOURCE_RUN_ID:"0"},{SOURCE_RUN_ID:String(Number(ref.location.runId)+1)},{SOURCE_ATTEMPT:"0"},{SOURCE_ATTEMPT:"1.5"},{SOURCE_ATTEMPT:"-1"},{SOURCE_ATTEMPT:"01"},{SOURCE_MANIFEST_SHA256:"bad"},{SOURCE_MANIFEST_SHA256:ref.manifestSha256.toUpperCase()}];
+    for(const reviewed of [false,true])for(const env of bad){
+      const gets=f.store.gets.length;const result=await cli(f,"plan",{...good,...(reviewed?{REVIEWED_RUN:"12",EXPECTED_REVIEW_SHA256:"a".repeat(64),SOURCE_RUN_ID:"12"}:{}),...env});
+      assert.equal(result.code,1,JSON.stringify(env));assert.equal(f.store.gets.length,gets);assert.equal(f.commands.some(c=>c[0]==="terraform"),false);assert.equal(result.output,"");
+    }
+    // register が attempt 1、plan が attempt 2（一部の job の再実行）。自分の attempt では読まない。
+    const result=await cli(f,"plan",{...good,GITHUB_RUN_ATTEMPT:"2"});assert.equal(result.code,0,result.stderr);
+    assert.ok(f.store.gets.includes(`registered-release/${f.context.runId}/1/manifest.json`));assert.equal(f.store.gets.some(k=>k.startsWith(`registered-release/${f.context.runId}/2/`)),false);
+    assert.match(result.output,new RegExp(`^custody_run_id=${f.context.runId}$`,"m"));assert.match(result.output,/^custody_attempt=2$/m);assert.ok(f.store.objects.has(`release-review/${f.context.runId}/2/manifest.json`));
+  }finally{await f.cleanup();}
+});
+void test("new_platform_preview_runs_without_source_at_cli_boundary",async()=>{
+  const f=await fixture("platform");try{
+    for(const env of [{SOURCE_RUN_ID:f.context.runId},{SOURCE_ATTEMPT:"1"},{SOURCE_MANIFEST_SHA256:"a".repeat(64)}]){const result=await cli(f,"plan",env);assert.equal(result.code,1);assert.equal(f.store.gets.length,0);assert.equal(f.commands.some(c=>c[0]==="terraform"),false);}
+    const result=await cli(f,"plan",{});assert.equal(result.code,0,result.stderr);assert.equal(f.store.gets.length,0);
+    const sha=/^custody_manifest_sha256=([0-9a-f]{64})$/m.exec(result.output)![1]!;const m=manifestAt(f.store,{location:{kind:"release-review",runId:f.context.runId,runAttempt:1},manifestSha256:sha});
+    assert.equal(m.root,"platform");assert.equal(digest(f.store.objects.get(`release-review/${f.context.runId}/1/manifest.json`)!),sha);
+  }finally{await f.cleanup();}
+});
+void test("register_custody_outputs_location_and_manifest_digest",async()=>{
+  const f=await fixture();try{
+    const result=await cli(f,"register-custody",{GITHUB_RUN_ATTEMPT:"3"});assert.equal(result.code,0,result.stderr);assert.equal(result.stdout,"");
+    const key=`registered-release/${f.context.runId}/3/manifest.json`,bytes=f.store.objects.get(key)!;assert.equal(f.store.order.at(-1),key);
+    assert.equal(result.output,`custody_run_id=${f.context.runId}\ncustody_attempt=3\ncustody_manifest_sha256=${digest(bytes)}\n`);
+    const m=JSON.parse(Buffer.from(bytes).toString()) as CustodyManifest;assert.equal(m.kind,"registered-release");assert.equal(m.root,"application");assert.deepEqual(Object.keys(m.files).sort(),[...requiredFiles("registered-release","application")].sort());
+    // 登録した run の plan job がそのまま読める。
+    const planResult=await cli(f,"plan",{SOURCE_RUN_ID:f.context.runId,SOURCE_ATTEMPT:"3",SOURCE_MANIFEST_SHA256:digest(bytes)});assert.equal(planResult.code,0,planResult.stderr);
+  }finally{await f.cleanup();}
+  const p=await fixture("platform");try{await mkdir(join(p.runnerTemp,"registered"),{recursive:true});const result=await cli(p,"register-custody",{});assert.equal(result.code,1);assert.equal(p.store.order.length,0);}finally{await p.cleanup();}
+});
+void test("plan_summary_lists_only_allowed_fields",async()=>{
+  const f=await fixture();try{
+    const ref=await f.src();const result=await cli(f,"plan",{SOURCE_RUN_ID:ref.location.runId,SOURCE_ATTEMPT:"1",SOURCE_MANIFEST_SHA256:ref.manifestSha256});assert.equal(result.code,0,result.stderr);
+    const sha=/^custody_manifest_sha256=([0-9a-f]{64})$/m.exec(result.output)![1]!;assert.match(result.output,new RegExp(`^review_sha256=${sha}$`,"m"));
+    const bytes=f.store.objects.get(`release-review/${f.context.runId}/1/manifest.json`)!;assert.equal(digest(bytes),sha);
+    for(const expected of ["application",artifact.commit,sha,b64(bytes),`run ${f.context.runId}`,"run_attempt 1"])assert.ok(result.summary.includes(expected),expected);
+    assert.match(result.summary,/Action counts: \{.*\}/);assert.doesNotMatch(result.summary,/download|artifact|https?:|arn:/i);
+    for(const secret of fixtureSecrets(f))assert.equal(result.summary.includes(secret),false,secret);
+    const planReview=JSON.parse(await readFile(join(f.directory,"review.json"),"utf8")).reviewSha256 as string;assert.equal(result.summary.includes(planReview),false);
+    assert.equal(result.stdout,"");assert.equal(result.stderr,"");
+  }finally{await f.cleanup();}
+});
+void test("plan_failure_leaks_no_fixture_values_at_cli_boundary",async()=>{
+  const f=await fixture();try{
+    const ref=await f.src(),secrets=fixtureSecrets(f);const failing:ReleaseServices={...f.services,run:async(c,a)=>{if(a[1]==="plan")throw Error(`terraform failed for ${secrets.join(" ")}`);return f.services.run(c,a);}};
+    const result=await cli(f,"plan",{SOURCE_RUN_ID:ref.location.runId,SOURCE_ATTEMPT:"1",SOURCE_MANIFEST_SHA256:ref.manifestSha256},failing);
+    assert.equal(result.code,1);assert.equal(result.stdout,"");assert.ok(result.stderr.length>0);
+    for(const text of [result.stdout,result.stderr,result.summary,result.output])for(const secret of secrets)assert.equal(text.includes(secret),false,secret);
+    assert.equal([...f.store.objects.keys()].some(k=>k.startsWith("release-review/")),false);
+  }finally{await f.cleanup();}
 });
 void test("platform_needs_no_zip_and_checks_known_identity_after_initial_creation",async()=>{
   const f=await fixture("platform");try{for(const r of f.plan.resource_changes){r.change.actions=["create"];r.change.before=null as unknown as Record<string,unknown>;r.change.after_unknown={id:true};}for(const o of Object.values(f.plan.output_changes))o.after_unknown=true;
-    const sha=await f.d.planRelease(f.context,{...f.config,baseline:null},undefined,f.services);assert.equal(f.counts().headCount,0);
+    const {planReviewSha256:sha}=await f.d.planRelease(f.context,{...f.config,baseline:null},undefined,f.services);assert.equal(f.counts().headCount,0);
     const state={values:{root_module:{resources:[{type:"aws_cognito_user_pool",name:"production",values:{id:"us-east-1_Synthetic"}},{type:"aws_cognito_user_pool_client",name:"chrome",values:{id:baseline.cognitoClientId,user_pool_id:"us-east-1_Synthetic"}},{type:"aws_cognito_user_pool_domain",name:"production",values:{domain:"synthetic",user_pool_id:"us-east-1_Synthetic"}}]}}};
     const services={...f.services,run:async(c:string,a:string[])=>a[1]==="show"&&a.length===3?JSON.stringify(state):f.services.run(c,a)};
     await f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha},services);assert.equal(f.counts().verifyCount,0);const known=JSON.parse(await readFile(join(f.directory,"post-baseline.json"),"utf8"));assert.equal(known.root,"platform");assert.equal(known.cognitoClientId,baseline.cognitoClientId);
   }finally{await f.cleanup();}
 });
 void test("post_apply_identity_alias_or_smoke_failure_never_produces_success_ledger",async()=>{
-  for(const failure of ["identity","alias","smoke"]){const f=await fixture();try{const sha=await f.d.planRelease(f.context,f.config,f.source,f.services);const services={...f.services,...(failure==="identity"?{run:async(c:string,a:string[])=>a[1]==="output"?JSON.stringify({...outputs,api_id:{value:"wrong"}}):f.services.run(c,a)}:failure==="alias"?{verify:async()=>{throw Error("alias mismatch");}}:{smoke:async()=>{throw Error("unavailable");}})};await assert.rejects(f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha},services));await assert.rejects(readFile(join(f.directory,"ledger.json")));}finally{await f.cleanup();}}
+  for(const failure of ["identity","alias","smoke"]){const f=await fixture();try{const {planReviewSha256:sha}=await f.d.planRelease(f.context,f.config,await f.src(),f.services);const services={...f.services,...(failure==="identity"?{run:async(c:string,a:string[])=>a[1]==="output"?JSON.stringify({...outputs,api_id:{value:"wrong"}}):f.services.run(c,a)}:failure==="alias"?{verify:async()=>{throw Error("alias mismatch");}}:{smoke:async()=>{throw Error("unavailable");}})};await assert.rejects(f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha},services));await assert.rejects(readFile(join(f.directory,"ledger.json")));}finally{await f.cleanup();}}
 });
 
 void test("reviewed_run_metadata_accepts_public_repository",async()=>{
@@ -77,24 +273,15 @@ void test("reviewed_plan_attempt_uses_successful_plan_job_attempt",async()=>{
   assert.throws(()=>d.selectReviewedPlanAttempt({jobs:[job("plan","failure",1),job("register","success",2)]}));
   assert.throws(()=>d.selectReviewedPlanAttempt({jobs:[]}));assert.throws(()=>d.selectReviewedPlanAttempt({}));assert.throws(()=>d.selectReviewedPlanAttempt({jobs:[{name:"plan",conclusion:"success",run_attempt:0}]}));
 });
-void test("reused_preview_can_plan_and_apply_without_build_and_refuses_apply_run_as_preview",async()=>{
-  const first=await fixture(),next=await fixture();try{const sha=await first.d.planRelease(first.context,first.config,first.source,first.services);const c={...next.context,apply:true,expectedReviewSha256:sha};const digest=await next.d.planRelease(c,next.config,first.directory,next.services);assert.equal(digest,sha);await next.d.applyRelease(c,next.services);assert.equal(next.commands.filter(c=>c[2]==="plan").length,1);assert.equal(next.commands.some(c=>/build|package|register/.test(c.join(" "))),false);
-    const third=await fixture();try{await assert.rejects(third.d.planRelease({...third.context,apply:true,expectedReviewSha256:sha},third.config,next.directory,third.services));assert.equal(third.commands.some(c=>c[2]==="plan"),false);}finally{await third.cleanup();}
-  }finally{await first.cleanup();await next.cleanup();}
-});
 void test("changed_transfer_digest_derived_show_and_initial_platform_output_mismatch_stop_success",async()=>{
-  const f=await fixture();try{const sha=await f.d.planRelease(f.context,f.config,f.source,f.services);await assert.rejects(f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha,expectedCustodySha256:"f".repeat(64)},f.services));assert.equal(f.commands.some(c=>c[2]==="apply"),false);
+  const f=await fixture();try{const {planReviewSha256:sha}=await f.d.planRelease(f.context,f.config,await f.src(),f.services);await assert.rejects(f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha,expectedCustodySha256:"f".repeat(64)},f.services));assert.equal(f.commands.some(c=>c[2]==="apply"),false);
     const changed=applicationPlan();changed.output_changes.api_id.after="bad";await assert.rejects(f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha},{...f.services,run:async(c,a)=>a[1]==="show"?JSON.stringify(changed):f.services.run(c,a)}));assert.equal(f.commands.some(c=>c[2]==="apply"),false);
   }finally{await f.cleanup();}
-  const p=await fixture("platform");try{for(const r of p.plan.resource_changes){r.change.actions=["create"];r.change.before=null as unknown as Record<string,unknown>;r.change.after_unknown={id:true};}for(const o of Object.values(p.plan.output_changes))o.after_unknown=true;const sha=await p.d.planRelease(p.context,{...p.config,baseline:null},undefined,p.services);await assert.rejects(p.d.applyRelease({...p.context,apply:true,expectedReviewSha256:sha},{...p.services,run:async(c,a)=>a[1]==="show"&&a.length===3?JSON.stringify({values:{root_module:{resources:[]}}}):p.services.run(c,a)}));await assert.rejects(readFile(join(p.directory,"ledger.json")));}finally{await p.cleanup();}
-});
-
-void test("existing_zip_preview_can_review_new_scheduler_settings_without_registration",async()=>{
-  const original=await fixture(),next=await fixture();try{const before=await original.d.planRelease(original.context,original.config,original.source,original.services);const after=await next.d.planRelease({...next.context,schedulerEnabled:true},next.config,original.directory,next.services);assert.notEqual(after,before);assert.equal(JSON.parse(await readFile(join(next.directory,"inputs.json"),"utf8")).scheduler_enabled,true);assert.equal(next.counts().headCount,1);assert.equal(next.commands.some(c=>/build|package|register/.test(c.join(" "))),false);}finally{await original.cleanup();await next.cleanup();}
+  const p=await fixture("platform");try{for(const r of p.plan.resource_changes){r.change.actions=["create"];r.change.before=null as unknown as Record<string,unknown>;r.change.after_unknown={id:true};}for(const o of Object.values(p.plan.output_changes))o.after_unknown=true;const {planReviewSha256:sha}=await p.d.planRelease(p.context,{...p.config,baseline:null},undefined,p.services);await assert.rejects(p.d.applyRelease({...p.context,apply:true,expectedReviewSha256:sha},{...p.services,run:async(c,a)=>a[1]==="show"&&a.length===3?JSON.stringify({values:{root_module:{resources:[]}}}):p.services.run(c,a)}));await assert.rejects(readFile(join(p.directory,"ledger.json")));}finally{await p.cleanup();}
 });
 
 void test("apply_requires_the_external_plan_job_custody_digest",async()=>{
-  const f=await fixture();try{const sha=await f.d.planRelease(f.context,f.config,f.source,f.services);const c={...f.context,apply:true,expectedReviewSha256:sha};delete c.expectedCustodySha256;await assert.rejects(f.d.applyRelease(c,f.services));assert.equal(f.commands.some(c=>c[2]==="apply"),false);}finally{await f.cleanup();}
+  const f=await fixture();try{const {planReviewSha256:sha}=await f.d.planRelease(f.context,f.config,await f.src(),f.services);const c={...f.context,apply:true,expectedReviewSha256:sha};delete c.expectedCustodySha256;await assert.rejects(f.d.applyRelease(c,f.services));assert.equal(f.commands.some(c=>c[2]==="apply"),false);}finally{await f.cleanup();}
 });
 
 void test("restored platform handoff survives complete preview/apply custody and rejects ARN disagreement",async()=>{
@@ -112,8 +299,8 @@ void test("restored platform handoff survives complete preview/apply custody and
    for(const fn of f.plan.resource_changes.filter(r=>r.type==="aws_lambda_function"))Object.assign((fn.change.after.environment as Array<{variables:Record<string,string>}>)[0]!.variables,{REMINDERS_TABLE:selected.reminders,OWNER_STATE_TABLE:selected.owner_state,IMAGE_JOBS_TABLE:selected.image_jobs});
    const applied={...outputs,runtime_data:{value:data}};
    const services={...f.services,run:async(c:string,a:string[])=>a[1]==="output"?JSON.stringify(a[0]?.includes("platform")?platform:applied):f.services.run(c,a),verify:async(a:unknown,o:unknown)=>{assert.deepEqual(a,artifact);assert.deepEqual(o,applied);}};
-   if(badArn){await assert.rejects(f.d.planRelease(f.context,f.config,f.source,services));assert.equal(f.commands.some(c=>c[2]==="plan"),false);continue;}
-   const sha=await f.d.planRelease(f.context,f.config,f.source,services);
+   if(badArn){await assert.rejects(f.d.planRelease(f.context,f.config,await f.src(),services));assert.equal(planned(f),0);continue;}
+   const {planReviewSha256:sha}=await f.d.planRelease(f.context,f.config,await f.src(),services);
    const input=JSON.parse(await readFile(join(f.directory,"inputs.json"),"utf8"));assert.deepEqual(input.restored_tables,selected);assert.equal(input.owner_state_table,"recovered-owners");
    const handoff=JSON.parse(await readFile(join(f.directory,"platform-outputs.json"),"utf8"));assert.deepEqual(handoff.restored_tables,selected);
    const result=await f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha},services);assert.equal(result.result,"verified");

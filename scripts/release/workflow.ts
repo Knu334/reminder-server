@@ -3,19 +3,23 @@ import {requireRuntimeData, selectedRuntimeData, verifyRuntimeDataOutputs} from 
 import {runPrivateCommand,PrivateCommandError} from "./private-command";
 import {tmpdir} from "node:os";
 import {createHash} from "node:crypto";
-import {chmod,copyFile,lstat,mkdir,readFile,readdir,writeFile} from "node:fs/promises";
-import {join,resolve} from "node:path";
+import {chmod,copyFile,lstat,mkdir,mkdtemp,readFile,readdir,rm,writeFile} from "node:fs/promises";
+import {dirname,join,resolve} from "node:path";
+import {S3Client} from "@aws-sdk/client-s3";
 import {z} from "zod";
 import {createRegistrationClient,readRegisteredArtifact,type RegisteredArtifact,type ReleaseManifest} from "./artifact";
 import {createPlanManifest,verifySavedPlan,verifyPostApplyBaseline,validateRegisteredArtifact,type ReleaseBaseline,type ReleaseRoot,type PrivatePlanManifest} from "./plan-guard";
 import {verifyMain} from "./verify-release";
-import {applicationCustodyNames,custodyNames} from "./custody";
+import {applicationCustodyNames,createS3CustodyStore,custodyNames,readCustody,writeCustody,type CustodyManifest,type CustodyReference,type CustodyStore} from "./custody";
 import {smoke} from "./smoke";
 
 export interface WorkflowContext {
   directory:string;root:ReleaseRoot;commit:string;region:string;apply:boolean;
   expectedReviewSha256:string;expectedCustodySha256?:string;published:boolean;schedulerEnabled:boolean;
+  /** custody の置き場所（private S3）。書く object の prefix は今の job の run ID と run_attempt で決まる。 */
+  custodyStore:CustodyStore;runId:string;runAttempt:number;now:()=>Date;
 }
+export interface PlannedRelease {manifestSha256:string;manifestSha256Base64:string;planReviewSha256:string}
 export interface WorkflowConfig {inputs:unknown;baseline:ReleaseBaseline|null;stateBucket:string}
 export type CommandRunner=(command:string,args:string[])=>Promise<string>;
 export interface ReleaseServices {
@@ -58,7 +62,6 @@ const request=(c:WorkflowContext)=>({root:c.root,commit:c.commit,region:c.region
 function equal(a:unknown,b:unknown):boolean{return JSON.stringify(a)===JSON.stringify(b);}
 function checkedContext(c:WorkflowContext):void{
   commit.parse(c.commit);z.enum(["platform","application"]).parse(c.root);z.string().regex(/^[a-z]{2}-[a-z]+-[1-9][0-9]*$/).parse(c.region);
-  if(c.apply)sha.parse(c.expectedReviewSha256);
 }
 async function checkedCommit(c:WorkflowContext,run:CommandRunner):Promise<void>{if((await run("git",["rev-parse","HEAD"])).trim()!==c.commit)throw Error("Checkout commit changed");}
 function output(o:unknown,name:string):string {const values=jsonObject.parse(o),entry=jsonObject.parse(values[name]);return z.string().min(1).parse(entry.value);}
@@ -81,20 +84,58 @@ async function shownPlan(c:WorkflowContext,run:CommandRunner):Promise<unknown>{
   const text=await run("terraform",[`-chdir=${rootPath(c.root)}`,"show","-json",path(c,"saved.tfplan")]);const plan:unknown=JSON.parse(text);await privateFile(path(c,"plan.json"),text);return plan;
 }
 async function saveCustody(c:WorkflowContext):Promise<void>{const files:Record<string,string>={};for(const name of custodyNames)files[name]=hash(await readFile(path(c,name)));if(c.root==="application")for(const name of applicationCustodyNames)files[name]=hash(await readFile(path(c,name)));await privateJson(path(c,"custody.json"),files);}
-async function checkCustody(c:WorkflowContext):Promise<void>{
-  const bytes=await readFile(path(c,"custody.json"));if(c.expectedCustodySha256!==undefined&&hash(bytes)!==sha.parse(c.expectedCustodySha256))throw Error("Transferred custody digest changed");
-  const files=jsonObject.parse(JSON.parse(bytes.toString()));const expected=c.root==="application"?[...custodyNames,...applicationCustodyNames]:custodyNames;
-  if(!equal(Object.keys(files).sort(),[...expected].sort()))throw Error("Incomplete custody manifest");for(const name of expected)if(files[name]!==hash(await readFile(path(c,name))))throw Error("Private release bytes changed");
+/** custody.json（root ごとの必須のファイルの集合と hash）を directory のファイルと照合する。今の run と、取り出した元の bundle の両方に使う。 */
+async function checkCustody(directory:string,root:ReleaseRoot,expectedCustodySha256?:string):Promise<void>{
+  const at=(name:string)=>join(resolve(directory),name);
+  const bytes=await readFile(at("custody.json"));if(expectedCustodySha256!==undefined&&hash(bytes)!==sha.parse(expectedCustodySha256))throw Error("Transferred custody digest changed");
+  const files=jsonObject.parse(JSON.parse(bytes.toString()));const expected=root==="application"?[...custodyNames,...applicationCustodyNames]:[...custodyNames];
+  if(!equal(Object.keys(files).sort(),[...expected].sort()))throw Error("Incomplete custody manifest");for(const name of expected)if(files[name]!==hash(await readFile(at(name))))throw Error("Private release bytes changed");
 }
-/** Finite production plan phase. No build, registration, state dump or caller-supplied plan JSON. */
-export async function planRelease(c:WorkflowContext,config:WorkflowConfig,source:string|undefined,services:ReleaseServices):Promise<string>{
-  checkedContext(c);await checkedCommit(c,services.run);await secureDirectory(c.directory);
+/**
+ * 取り出した元の preview の bundle を確かめる（custody.json の照合は呼び出し側で済ませておく）。
+ * 元の saved.tfplan から導いた plan と元の review.json の対応を元の bundle の値だけで確かめ（verifySavedPlan）、
+ * 続けて preview であること、root、commit、artifact を今の run と比べる。
+ */
+async function checkOriginalPreview(c:WorkflowContext,config:WorkflowConfig,source:string,original:CustodyManifest,artifact:RegisteredArtifact|null,run:CommandRunner):Promise<void>{
+  const at=(name:string)=>join(source,name);
+  const review=jsonObject.parse(await parseJson(at("review.json")));
+  const plan:unknown=JSON.parse(await run("terraform",[`-chdir=${rootPath(c.root)}`,"show","-json",at("saved.tfplan")]));
+  verifySavedPlan(review,plan,await readFile(at("saved.tfplan")),await readFile(at("inputs.json")),await parseJson(at("artifact.json")) as RegisteredArtifact|null,commit.parse(review.commit),await parseJson(at("baseline.json")) as ReleaseBaseline|null,c.root);
+  if(review.reviewSha256!==original.planReviewSha256)throw Error("Reviewed manifest and saved review differ");
+  // Reused previews pin root/commit/artifact; apply runs also pin every reviewed input and expectation.
+  if(jsonObject.parse(await parseJson(at("preview.json"))).preview!==true||review.root!==c.root||review.commit!==c.commit||!equal(await parseJson(at("artifact.json")),artifact))throw Error("Original preview and selected artifact required");
+  if(c.apply&&(review.inputSha256!==hash(await readFile(path(c,"inputs.json")))||!equal(await parseJson(at("baseline.json")),config.baseline)||!equal(await parseJson(at("request.json")),request(c))))throw Error("Preview inputs or selected artifact changed");
+}
+/**
+ * Finite production plan phase. No build, registration, state dump or caller-supplied plan JSON.
+ * source は custody の置き場所で、同じ run の registered-release か、reviewed_run の release-review（新しい platform の preview では無し）。
+ * 結果は今の job の release-review に書き、manifest の SHA-256（レビューの digest）と plan の digest を返す。
+ */
+export async function planRelease(c:WorkflowContext,config:WorkflowConfig,source:CustodyReference|undefined,services:ReleaseServices):Promise<PlannedRelease>{
+  checkedContext(c);
+  const kind=source?.location.kind;
+  if(kind!==undefined&&kind!=="release-review"&&kind!=="registered-release")throw Error("Unsupported source custody");
+  if(c.apply&&kind!=="release-review")throw Error("Apply run requires original preview custody");
+  if(c.root==="application"&&!source)throw Error("Registered artifact evidence required");
+  if(c.root==="platform"&&kind==="registered-release")throw Error("Platform has no registered artifact");
+  await checkedCommit(c,services.run);await secureDirectory(c.directory);
+  // 種類ごと・読むたびに新しい空のディレクトリへ取り出し、終わったら消す。
+  const sourceDirectory=source?await mkdtemp(join(dirname(resolve(c.directory)),"release-source-")):undefined;
+  try{return await planFromSource(c,config,source,sourceDirectory,services);}
+  finally{if(sourceDirectory)await rm(sourceDirectory,{recursive:true,force:true});}
+}
+async function planFromSource(c:WorkflowContext,config:WorkflowConfig,source:CustodyReference|undefined,sourceDirectory:string|undefined,services:ReleaseServices):Promise<PlannedRelease>{
   const inputs=jsonObject.parse(config.inputs);if(inputs.region!==c.region||!/^[0-9]{12}$/.test(String(inputs.account_id))||!/^([a-z][a-z0-9-]{1,24}[a-z0-9])$/.test(String(inputs.name_prefix)))throw Error("Explicit account, region and prefix required");
   if(config.stateBucket!==`${inputs.name_prefix}-${inputs.account_id}-${c.region}-state`)throw Error("State bucket identity mismatch");
   if(c.root==="application"&&(config.baseline===null||config.baseline.root!=="application"||!config.baseline.apiId||inputs.production_api_id!==config.baseline.apiId||inputs.operator_api_seed===true))throw Error("Normal application needs known seeded API baseline and seed=false");
   if(c.root==="platform"&&c.schedulerEnabled)throw Error("Scheduler belongs to application");
-  let registered:ReleaseManifest|undefined;
-  if(c.root==="application"){if(!source)throw Error("Registered artifact evidence required");registered=await readManifest(source,c);await services.head(registered.artifact,c.region);await copyEvidence(source,c);}
+  const reviewed=source?.location.kind==="release-review";let original:CustodyManifest|undefined,registered:ReleaseManifest|undefined;
+  if(source&&sourceDirectory){
+    original=await readCustody(c.custodyStore,source.location,source.manifestSha256,sourceDirectory,{root:c.root,now:c.now()});
+    // manifest の照合とは独立に、元の bundle の custody.json と必須のファイルの集合を照合する。
+    if(reviewed)await checkCustody(sourceDirectory,c.root,original.custodySha256);
+  }
+  if(c.root==="application"){registered=await readManifest(sourceDirectory!,c);await services.head(registered.artifact,c.region);await copyEvidence(sourceDirectory!,c);}
   await privateFile(path(c,"backend.hcl"),`bucket = ${JSON.stringify(config.stateBucket)}\nregion = ${JSON.stringify(c.region)}\nallowed_account_ids = [${JSON.stringify(inputs.account_id)}]\n`);
   if(c.root==="application"){
     await init(c,"platform",services.run);const values=JSON.parse(await services.run("terraform",[`-chdir=${rootPath("platform")}`,"output","-json"]));const selected=Object.fromEntries(handoffFields.map(name=>[name,output(values,name)]));
@@ -109,16 +150,21 @@ export async function planRelease(c:WorkflowContext,config:WorkflowConfig,source
     inputs.operator_api_seed=false;inputs.scheduler_enabled=c.schedulerEnabled;const a=registered!.artifact;inputs.artifact={bucket:a.bucket,key:a.key,version_id:a.versionId,sha256_base64:a.sha256Base64};
   }
   await privateJson(path(c,"inputs.json"),inputs);await privateJson(path(c,"baseline.json"),config.baseline);await privateJson(path(c,"artifact.json"),registered?.artifact??null);await privateJson(path(c,"request.json"),request(c));await privateJson(path(c,"preview.json"),{preview:!c.apply});
-  // Reused previews pin root/commit/artifact; apply runs also pin every reviewed input and expectation.
-  if(source&&await exists(join(source,"review.json"))){await secureDirectory(source);const previous=jsonObject.parse(await parseJson(join(source,"review.json")));if(jsonObject.parse(await parseJson(join(source,"preview.json"))).preview!==true||previous.root!==c.root||previous.commit!==c.commit||!equal(await parseJson(join(source,"artifact.json")),registered?.artifact??null))throw Error("Original preview and selected artifact required");if(c.apply&&(previous.inputSha256!==hash(await readFile(path(c,"inputs.json")))||!equal(await parseJson(join(source,"baseline.json")),config.baseline)||!equal(await parseJson(join(source,"request.json")),request(c))))throw Error("Preview inputs or selected artifact changed");}
-  else if(c.apply)throw Error("Apply run requires original preview custody");
-  await init(c,c.root,services.run);await services.run("terraform",[`-chdir=${rootPath(c.root)}`,"plan","-input=false","-lock=true","-lock-timeout=5m",`-var-file=${path(c,"inputs.json")}`,`-out=${path(c,"saved.tfplan")}`]);await chmod(path(c,"saved.tfplan"),0o600);
+  await init(c,c.root,services.run);
+  if(reviewed)await checkOriginalPreview(c,config,sourceDirectory!,original!,registered?.artifact??null,services.run);
+  await services.run("terraform",[`-chdir=${rootPath(c.root)}`,"plan","-input=false","-lock=true","-lock-timeout=5m",`-var-file=${path(c,"inputs.json")}`,`-out=${path(c,"saved.tfplan")}`]);await chmod(path(c,"saved.tfplan"),0o600);
   const plan=await shownPlan(c,services.run),manifest=createPlanManifest(plan,await readFile(path(c,"saved.tfplan")),await readFile(path(c,"inputs.json")),registered?.artifact??null,c.commit,config.baseline,c.root);
-  if(c.apply&&manifest.reviewSha256!==c.expectedReviewSha256)throw Error("New plan differs from reviewed preview");
+  // apply の run は、入力の digest ではなく、照合済みの元の manifest の中の plan の digest と比べる。
+  if(c.apply&&manifest.reviewSha256!==original!.planReviewSha256)throw Error("New plan differs from reviewed preview");
   await writeFile(path(c,"review.json"),JSON.stringify(manifest,null,2)+"\n",{flag:"wx",mode:0o600});await saveCustody(c);
-  return manifest.reviewSha256;
+  await privateFile(path(c,"plan.txt"),await services.run("terraform",[`-chdir=${rootPath(c.root)}`,"show","-no-color",path(c,"saved.tfplan")]));
+  // apply の run は元のレビューの期限を引き継ぐ。ZIP を再利用した preview は元の manifest を記録し、新しい作成時刻から24時間とする。
+  const written=await writeCustody(c.custodyStore,{kind:"release-review",runId:c.runId,runAttempt:c.runAttempt},c.directory,{
+    root:c.root,planReviewSha256:manifest.reviewSha256,custodySha256:hash(await readFile(path(c,"custody.json"))),
+    ...(reviewed&&c.apply?{expiresAt:original!.expiresAt}:{}),...(reviewed&&!c.apply?{sourceManifestSha256:source!.manifestSha256}:{}),
+  },c.now());
+  return {...written,planReviewSha256:manifest.reviewSha256};
 }
-async function exists(p:string):Promise<boolean>{try{await lstat(p);return true;}catch(e){if((e as NodeJS.ErrnoException).code==="ENOENT")return false;throw e;}}
 function initialPlatformBaseline(outputs:unknown,state:unknown,inputs:Record<string,unknown>):ReleaseBaseline{
   const resources=z.array(z.looseObject({type:z.string(),name:z.string(),values:jsonObject})).parse(jsonObject.parse(jsonObject.parse(jsonObject.parse(state).values).root_module).resources);
   const pick=(type:string,name:string)=>{const matches=resources.filter(r=>r.type===type&&r.name===name);if(matches.length!==1)throw Error("Unknown initial platform identity");return matches[0]!.values;};
@@ -129,7 +175,7 @@ function initialPlatformBaseline(outputs:unknown,state:unknown,inputs:Record<str
 export interface ReleaseLedger {commit:string;root:ReleaseRoot;reviewSha256:string;artifactSha256:string|null;apiVersion:string|null;cleanupVersion:string|null;url:string|null;result:"verified"}
 /** Apply this run's checked saved binary only; never replan, rebuild or register. */
 export async function applyRelease(c:WorkflowContext,services:ReleaseServices):Promise<ReleaseLedger>{
-  checkedContext(c);if(!c.apply||!c.expectedCustodySha256)throw Error("Explicit apply and external plan-job custody digest required");await secureDirectory(c.directory);await checkCustody(c);await checkedCommit(c,services.run);
+  checkedContext(c);sha.parse(c.expectedReviewSha256);if(!c.apply||!c.expectedCustodySha256)throw Error("Explicit apply and external plan-job custody digest required");await secureDirectory(c.directory);await checkCustody(c.directory,c.root,c.expectedCustodySha256);await checkedCommit(c,services.run);
   if(!equal(await parseJson(path(c,"request.json")),request(c)))throw Error("Apply request changed");
   const manifest=await parseJson(path(c,"review.json")) as PrivatePlanManifest,baseline=await parseJson(path(c,"baseline.json")) as ReleaseBaseline|null;
   const a=c.root==="application"?(await readManifest(c.directory,c)).artifact:null;
@@ -155,11 +201,36 @@ function required(name:string):string {const value=process.env[name];if(!value)t
 function boolean(name:string):boolean {const value=required(name);if(value!=="true"&&value!=="false")throw Error("Invalid workflow boolean");return value==="true";}
 const quietIO={stdout:(_s:string)=>{},stderr:(_s:string)=>{}};
 const defaultServices:ReleaseServices={run:localRun,head:async(a,r)=>{const client=createRegistrationClient(r);try{await readRegisteredArtifact(a,client);}finally{client.destroy();}},verify:async(_a,_o,r)=>{if(await verifyMain(["--artifact",join(required("RUNNER_TEMP"),"release","artifact.json"),"--outputs",join(required("RUNNER_TEMP"),"release","outputs.json"),"--region",r],quietIO)!==0)throw Error("Lambda release proof failed");},smoke:async(b,p)=>{if(!b.apiBaseUrl)throw Error("Known URL required");await smoke(b.apiBaseUrl,p);}};
-export async function workflowMain(argv:string[]):Promise<void>{
-  if(argv.length!==1||!["authorize","secure","plan","apply"].includes(argv[0]!))throw Error("Unknown finite workflow phase");
-  const directory=join(required("RUNNER_TEMP"),"release");if(argv[0]==="secure"){await secureDirectory(directory);return;}
-  const c:WorkflowContext={directory,root:required("RELEASE_ROOT") as ReleaseRoot,commit:required("RELEASE_COMMIT"),region:required("AWS_REGION"),apply:boolean("RELEASE_APPLY"),published:boolean("RELEASE_PUBLISHED"),schedulerEnabled:boolean("RELEASE_SCHEDULER_ENABLED"),expectedReviewSha256:process.env.EXPECTED_REVIEW_SHA256??"",...(process.env.EXPECTED_CUSTODY_SHA256?{expectedCustodySha256:process.env.EXPECTED_CUSTODY_SHA256}:{})};
-  if(argv[0]==="authorize"){
+export interface WorkflowIO {stdout(text:string):void;stderr(text:string):void}
+/** 試験が差し替える依存。省略時は S3（CUSTODY_BUCKET、region は環境の既定）、実時刻、実コマンド、process の標準出力を使う。 */
+export interface WorkflowInjection {custodyStore?:CustodyStore;now?:()=>Date;services?:ReleaseServices;io?:WorkflowIO}
+const processIO:WorkflowIO={stdout:s=>{process.stdout.write(s);},stderr:s=>{process.stderr.write(s);}};
+const runIdPattern=/^[1-9][0-9]{0,19}$/,runAttemptPattern=/^[1-9][0-9]{0,8}$/;
+function runAttemptValue(value:string):number{if(!runAttemptPattern.test(value))throw Error("Invalid run attempt");return Number(value);}
+/**
+ * plan job が読む custody の置き場所を環境変数から決める。種類は入力（reviewed_run と root）で決まり、S3 と Terraform に触れる前に形式を確かめる。
+ * reviewed_run があれば release-review（root を問わない）、無い application は同じ run の registered-release、無い platform は source を持たない。
+ * 読む job 自身の run_attempt で代用しない。
+ */
+function planSource(root:ReleaseRoot,runId:string):CustodyReference|undefined{
+  const reviewedRun=process.env.REVIEWED_RUN??"",id=process.env.SOURCE_RUN_ID??"",attempt=process.env.SOURCE_ATTEMPT??"",manifest=process.env.SOURCE_MANIFEST_SHA256??"";
+  if(!reviewedRun&&root==="platform"){if(id!==""||attempt!==""||manifest!=="")throw Error("Platform preview takes no source custody");return undefined;}
+  if(!runIdPattern.test(id)||!runAttemptPattern.test(attempt)||!sha.safeParse(manifest).success)throw Error("Missing or malformed source custody outputs");
+  if(id!==(reviewedRun||runId))throw Error("Source custody run mismatch");
+  return {location:{kind:reviewedRun?"release-review":"registered-release",runId:id,runAttempt:runAttemptValue(attempt)},manifestSha256:manifest};
+}
+function actionCounts(plan:unknown):Record<string,number>{
+  const resources=z.array(jsonObject).parse(jsonObject.parse(plan).resource_changes),counts:Record<string,number>={};
+  for(const r of resources){const action=z.array(z.string()).parse(jsonObject.parse(r.change).actions).join("+");counts[action]=(counts[action]??0)+1;}
+  return counts;
+}
+export async function workflowMain(argv:string[],inject:WorkflowInjection={}):Promise<void>{
+  if(argv.length!==1||!["authorize","secure","register-custody","plan","apply"].includes(argv[0]!))throw Error("Unknown finite workflow phase");
+  const phase=argv[0]!,services=inject.services??defaultServices,io=inject.io??processIO;
+  const directory=join(required("RUNNER_TEMP"),"release");if(phase==="secure"){await secureDirectory(directory);return;}
+  const base={directory,root:required("RELEASE_ROOT") as ReleaseRoot,commit:required("RELEASE_COMMIT"),region:required("AWS_REGION"),apply:boolean("RELEASE_APPLY"),published:boolean("RELEASE_PUBLISHED"),schedulerEnabled:boolean("RELEASE_SCHEDULER_ENABLED"),expectedReviewSha256:process.env.EXPECTED_REVIEW_SHA256??"",...(process.env.EXPECTED_CUSTODY_SHA256?{expectedCustodySha256:process.env.EXPECTED_CUSTODY_SHA256}:{})};
+  if(phase==="authorize"){
+    const c=base;
     const head=(await localRun("git",["rev-parse","HEAD"])).trim();let contains=true;try{await localRun("git",["merge-base","--is-ancestor",c.commit,"origin/main"]);}catch{contains=false;}
         const reviewedRun=process.env.REVIEWED_RUN??"";authorizeDispatch({event:required("GITHUB_EVENT_NAME"),ref:required("GITHUB_REF"),commit:c.commit,head,mainContainsCommit:contains,apply:c.apply,reviewedRun,expectedReviewSha256:c.expectedReviewSha256,root:c.root});
     if(reviewedRun){
@@ -171,15 +242,35 @@ export async function workflowMain(argv:string[]):Promise<void>{
     }
     return;
   }
-  if(argv[0]==="plan"){
-    const source=process.env.RELEASE_SOURCE==="true"?join(required("RUNNER_TEMP"),"selected"):undefined;
-    const review=await planRelease(c,{inputs:JSON.parse(required("RELEASE_INPUTS_JSON")),baseline:JSON.parse(required("RELEASE_BASELINE_JSON")),stateBucket:required("STATE_BUCKET")},source,defaultServices);
-    const custody=hash(await readFile(path(c,"custody.json")));await writeFile(required("GITHUB_OUTPUT"),`review_sha256=${review}\ncustody_sha256=${custody}\n`,{flag:"a"});
-    // Only a digest and counts are public in the run log; private JSON stays off stdout.
-    const p=jsonObject.parse(await parseJson(path(c,"plan.json"))),resources=z.array(jsonObject).parse(p.resource_changes);const counts:Record<string,number>={};for(const r of resources){const action=z.array(z.string()).parse(jsonObject.parse(r.change).actions).join("+");counts[action]=(counts[action]??0)+1;}
-    await writeFile(required("GITHUB_STEP_SUMMARY"),`Reviewed ${c.root} commit ${c.commit}\n\nreview_sha256: ${review}\n\nAction counts: ${JSON.stringify(counts)}\n\nDownload the private release-review artifact for the complete plan.\n`,{flag:"a"});return;
-  }
-  if(!c.expectedCustodySha256)throw Error("Apply requires plan-job custody digest");
-  const ledger=await applyRelease(c,defaultServices);process.stdout.write(JSON.stringify(ledger)+"\n");
+  // custody を読み書きする phase は、置き場所（今の job の run ID と run_attempt）と bucket を要する。
+  const runId=required("GITHUB_RUN_ID");if(!runIdPattern.test(runId))throw Error("Invalid run ID");
+  const runAttempt=runAttemptValue(required("GITHUB_RUN_ATTEMPT"));
+  const client=inject.custodyStore?undefined:new S3Client({});
+  try{
+    const c:WorkflowContext={...base,custodyStore:inject.custodyStore??createS3CustodyStore(required("CUSTODY_BUCKET"),client!),runId,runAttempt,now:inject.now??(()=>new Date())};
+    if(phase==="register-custody"){
+      // register job の最後に、登録した ZIP の manifest と証拠を同じ run の plan job へ渡す。
+      if(c.root!=="application")throw Error("Only an application release registers a ZIP");
+      const written=await writeCustody(c.custodyStore,{kind:"registered-release",runId:c.runId,runAttempt:c.runAttempt},join(required("RUNNER_TEMP"),"registered"),{root:"application"},c.now());
+      await writeFile(required("GITHUB_OUTPUT"),`custody_run_id=${c.runId}\ncustody_attempt=${c.runAttempt}\ncustody_manifest_sha256=${written.manifestSha256}\n`,{flag:"a"});return;
+    }
+    if(phase==="plan"){
+      const source=planSource(c.root,c.runId);
+      const result=await planRelease(c,{inputs:JSON.parse(required("RELEASE_INPUTS_JSON")),baseline:JSON.parse(required("RELEASE_BASELINE_JSON")),stateBucket:required("STATE_BUCKET")},source,services);
+      // review_sha256 は release-review の manifest.json の SHA-256 である（plan の digest ではない）。
+      await writeFile(required("GITHUB_OUTPUT"),`custody_run_id=${c.runId}\ncustody_attempt=${c.runAttempt}\ncustody_manifest_sha256=${result.manifestSha256}\nreview_sha256=${result.manifestSha256}\n`,{flag:"a"});
+      // job summary は root、commit、action の件数、review_sha256、custody の置き場所だけ。plan や入力は S3 にだけ置く。
+      const counts=actionCounts(await parseJson(path(c,"plan.json")));
+      await writeFile(required("GITHUB_STEP_SUMMARY"),`Reviewed ${c.root} commit ${c.commit}\n\nreview_sha256: ${result.manifestSha256}\n\nreview_sha256 (Base64): ${result.manifestSha256Base64}\n\nCustody: run ${c.runId}, run_attempt ${c.runAttempt}\n\nAction counts: ${JSON.stringify(counts)}\n`,{flag:"a"});return;
+    }
+    if(!c.expectedCustodySha256)throw Error("Apply requires plan-job custody digest");
+    const ledger=await applyRelease(c,services);io.stdout(JSON.stringify(ledger)+"\n");
+  }finally{client?.destroy();}
 }
-if(require.main===module)void workflowMain(process.argv.slice(2)).catch((error:unknown)=>{process.stderr.write(error instanceof PrivateCommandError?`${error.message}\n`:"Protected release denied; no success claim. Review private inputs, evidence and plan.\n");process.exitCode=1;});
+/** CLI の境界。失敗は PrivateCommandError の定型文か固定の文言だけを標準エラーに出し、終了コードを返す。 */
+export async function workflowCli(argv:string[],inject:WorkflowInjection={}):Promise<number>{
+  const io=inject.io??processIO;
+  try{await workflowMain(argv,{...inject,io});return 0;}
+  catch(error:unknown){io.stderr(error instanceof PrivateCommandError?`${error.message}\n`:"Protected release denied; no success claim. Review private inputs, evidence and plan.\n");return 1;}
+}
+if(require.main===module)void workflowCli(process.argv.slice(2)).then(code=>{process.exitCode=code;});
