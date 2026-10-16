@@ -106,7 +106,7 @@ npm sbom --sbom-format cyclonedx > artifacts/sbom.json
 | --- | --- | --- |
 | `ci.yml` | PR、`main` への push | 型検査、lint、試験、ZIP の作成と検証、`infra:check`、audit |
 | `floci-e2e.yml` | `main` への push | JVM 版の Floci を起動し、`npm test` を実行する |
-| `deploy.yml` | 手動 | 実 AWS への ZIP 登録、Terraform の plan と apply。private repository の `main` だけで動く |
+| `deploy.yml` | 手動 | 実 AWS への ZIP 登録、Terraform の plan と apply。`main` だけで動く。plan などは private な S3 に置く |
 
 ## API
 

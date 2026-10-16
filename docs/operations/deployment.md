@@ -17,14 +17,15 @@ GitHub Actionsの `deploy.yml` を使って、本番のAWS環境を構築し、Z
 | 5 | applicationをpreviewし、ZIPを登録する | `deploy.yml` |
 | 6 | applicationをレビューしてapplyする | `deploy.yml` |
 
-`deploy.yml` の実行は、毎回previewとapplyの2回のrunで行う。手順は「[workflowの実行](#workflowの実行previewとapply)」にある。cleanupの有効化とrollbackは「[cleanupの有効化](#cleanupの有効化)」と「[rollback](#rollback)」にある。
+`deploy.yml` の実行は、毎回previewとapplyの2回のrunで行う。手順は「[workflowの実行](#workflowの実行previewとapply)」にある。cleanupの有効化とrollbackは「[cleanupの有効化](#cleanupの有効化)」と「[rollback](#rollback)」にある。既存のbootstrapの更新は「[bootstrapの更新](#bootstrapの更新)」にある。
 
 ## 前提と制約
 
-- 配布は **private repositoryのみ**に対応する。authorize jobは、public repository、main以外からのdispatch、main外のcommitを、build、OIDC、private artifactの転送より前に拒否する。この制限はrepositoryの公開設定を変更しない。現在のrepositoryの公開設定について何かを主張するものでもない。
-- private Actions artifactには、承認されたrepositoryの閲覧者がアクセスできる。environmentのreviewerだけに限定されるわけではない。repositoryの閲覧・collaborator権限をそれに応じて制限する。
-- artifactの保持は1日とし、ローカルにダウンロードしたレビュー用のファイルは使用後に削除する。期限切れのレビューartifactには新しいpreviewが必要である。
-- privateなplanやartifactにアクセスできる間は、決してrepositoryをpublicにしない。
+- 配布はpublicとprivateのどちらのrepositoryでも同じ手順で動く。repositoryの公開設定には頼らない。Terraformのplanとstateは、`sensitive` の値も平文で含みうるため、秘密の情報として扱う。plan、入力、証拠、apply結果、失敗時の診断は、GitHubのartifactやログには出さず、bootstrapが作るprivateなS3 bucket（custody bucket）にだけ置く。詳細は「[release custody](#release-custody)」にある。
+- authorize jobは、手動のdispatch以外のevent、main以外からのdispatch、mainから到達できないcommitを、build、OIDC、custodyの読み書きより前に拒否する。
+- GitHubに出すのは、job summaryの要約（root、commit、actionの件数、`review_sha256`、custodyの置き場所のrun IDと `run_attempt`）だけである。
+- custody bucketを読めるのは、自分のAWSの権限を持つoperatorと、prefixごとに限定した3つのGitHub用roleだけである。operatorのAWSの読み取り権限は、レビューする人に限る。
+- レビューに使えるのは、作成から24時間以内の `release-review` だけである。期限を過ぎたら新しいpreviewが必要である。ローカルにダウンロードしたレビュー用のファイルは使用後に削除する。
 - workflowは任意のローカルJSONやアップロードからapplyできない。
 - PRでのOIDC、`pull_request_target`、pushによる自動デプロイ、maintenance workflow、user管理workflowはいずれも存在しない。
 
@@ -53,6 +54,7 @@ bootstrap rootを作成した後（[初回の構築](#初回の構築)の手順1
 | `ARTIFACT_ROLE_ARN` | output `artifact_role_arn` |
 | `PLAN_ROLE_ARN` | output `plan_role_arn` |
 | `APPLY_ROLE_ARN` | output `apply_role_arn` |
+| `CUSTODY_BUCKET` | output `custody_bucket` |
 
 - state bucketの識別名は `<name_prefix>-<account_id>-<region>-state` に固定である。backendのkey、暗号化、S3ネイティブの `use_lockfile` は各rootで固定されている。
 - 各AWS jobはOIDCで指定されたroleだけをassumeし、想定するaccountであることを確認する。長期間有効なkeyはない。
@@ -72,6 +74,59 @@ baselineのschemaは `{root, apiBaseUrl, apiId, cognitoIssuer, cognitoClientId, 
 - platformではAPIの項目がnullでもよいが、作成後はCognitoのidentity/domainが既知でなければならない。
 - applicationでは、すべてのidentity/URLが既知であり、API IDがbootstrapのhandoffおよび既存のapplication stateと一致しなければならない。
 - account、region、origin、redirectの値は明示する。secretやoutputを別のaccountから推測することはない。
+
+## release custody
+
+`deploy.yml` のjob間、run間の受け渡しには、bootstrapが作るcustody bucket（`<name_prefix>-<account_id>-<region>-custody`、repository variable `CUSTODY_BUCKET`）を使う。GitHubのartifactは使わない。
+
+### bucketと権限
+
+- versioning、SSE-S3の暗号化、公開アクセスのブロックを有効にする。bucketは `prevent_destroy` で保護する。
+- bucket policyは、HTTPS以外の通信、`If-None-Match: *` の無い `PutObject`（既存のobjectの上書き）、`DeleteObject` と `DeleteObjectVersion` を拒否する。objectを消すのはlifecycleだけである。
+- 3つのGitHub用roleの権限は、prefixごとの `GetObject` と新規作成の `PutObject` だけである。削除と一覧（`ListBucket`）の権限はどのroleにも無く、読む側は `manifest.json` からファイル名を知る。
+
+| role | 読める | 書ける |
+| --- | --- | --- |
+| artifact（ZIPの登録用） | なし | `registered-release/`、`failure-diagnostics/` |
+| plan | `registered-release/`、`release-review/` | `release-review/`、`failure-diagnostics/` |
+| apply | `release-review/` | `release-result/`、`failure-diagnostics/` |
+
+`release-result/` と `failure-diagnostics/` を読めるroleは無い。operatorが自分のAWSの権限で読む。roleの名前のartifactはリリースするZIPの意味で、GitHubのartifactとは別のものである。
+
+### objectの置き方
+
+prefixは `<種類>/<run_id>/<run_attempt>/` である。`run_attempt` は、そのobjectを**書いたjob** の `github.run_attempt` である。一部のjobだけを再実行すると、run IDは変わらず `run_attempt` だけが増える。
+
+| prefix | 中身 | 書くjob |
+| --- | --- | --- |
+| `registered-release/<run_id>/<run_attempt>/` | `registered.json`、`audit-runtime.json`、`audit.json`、`sbom.json`、`tests.txt` | `register` |
+| `release-review/<run_id>/<run_attempt>/` | `inputs.json`、`baseline.json`、`artifact.json`、`request.json`、`backend.hcl`、`review.json`、`saved.tfplan`、`preview.json`、`custody.json`、`plan.txt`。applicationでは、さらに `registered.json`、`audit.json`、`sbom.json`、`tests.txt`、`platform-outputs.json` | `plan` |
+| `release-result/<run_id>/<run_attempt>/` | `ledger.json`。初回のplatformの構築では `post-baseline.json` も置く | `apply` |
+| `failure-diagnostics/<run_id>/<run_attempt>/<job>/` | 失敗したjobの診断のJSON（最大8個） | 失敗したjob |
+
+- 各ファイルは `If-None-Match: *` とSHA-256のchecksumを付けて書き、最後に `manifest.json` を書く。manifestには、種類、root、run ID、`run_attempt`、`createdAt`、ファイル名とSHA-256の一覧を入れる。`registered-release` と `release-review` には利用期限 `expiresAt` も入れる。`release-review` には、さらにplanのdigest（`review.json` の `reviewSha256`）と `custody.json` のSHA-256を入れ、ZIPを再利用したpreviewでは元のpreviewのmanifestのSHA-256も入れる。
+- 読む側は、期待する `manifest.json` のSHA-256を先に決めてから読む。manifestが無い、SHA-256が違う、種類・root・run ID・`run_attempt` が読もうとした場所と違う、ファイルの集合が種類ごとの集合と完全に一致しない、各ファイルのSHA-256が違う、のいずれでも止まる。manifestに載っていないobjectは読まない。取り出したファイルはdirectory 0700、file 0600で書き、パスの区切り、`..`、symlinkを拒否する。`release-review` では続けて `custody.json` の照合と `verifySavedPlan` を独立に行う。
+- 同じrunの中では、読むjobは書いたjobのoutput（run ID、`run_attempt`、manifestのSHA-256）を使う。outputが欠けている、または形式が不正なら止まる。読むjob自身の `run_attempt` で推測しない。
+- 別のrun（`reviewed_run`）を読むときは、authorize jobがGitHubのAPIで、そのrunがこのrepositoryのmainで `deploy.yml` を手動で実行して成功したpreviewであることを確かめ、そのrunの `plan` jobの最後の成功した試行の `run_attempt` を取得する。`release-review/<reviewed_run>/<run_attempt>/manifest.json` のSHA-256が入力の `expected_review_sha256` と一致しなければ止まる。
+- S3、権限、照合のどこで失敗しても、GitHubのartifactに切り替えることはしない。
+
+### lifecycleと利用期限
+
+| prefix | 現行のversionの失効 | 古いversionの完全な削除 |
+| --- | --- | --- |
+| `registered-release/`、`release-review/`、`failure-diagnostics/` | 作成から1日 | 古いversionになってから1日 |
+| `release-result/` | 作成から30日 | 古いversionになってから1日 |
+
+失効した後に残るdelete markerは、別の規則で削除する。lifecycleの日数はUTCの翌0時に切り上げて評価され、処理の遅れもあるため、bytesが実際に消えるのは上の期間より遅くなりうる。
+
+利用の期限はlifecycleではなく、manifestの `expiresAt` で守る。
+
+- 期限は、元のレビュー（previewのrunの `release-review`）の作成時刻から24時間である。現在時刻が `expiresAt` 以上なら止まる。`createdAt` が5分以上未来のもの、日時の形式が不正なもの、`expiresAt` が `createdAt` の24時間後でないものも止まる。
+- applyのrunが作る `release-review` は、元のレビューの `expiresAt` を引き継ぐ。新しい作成時刻で期限を延ばさない。
+- ZIPを再利用した新しいpreviewは新しいレビューなので、新しい作成時刻から24時間である。
+- 期限は、別のrunの `release-review` を読むとき、同じrunのapply jobが `release-review` を読むとき、applyを実行する直前に確かめる。`production` の承認を待つ間に期限を過ぎた場合は、新しいpreviewが必要である。
+- `registered-release` は同じrunの中だけで読み、同じ規則で24時間である。`release-result` と `failure-diagnostics` は人が読む保管用で、`expiresAt` を持たず、保持はlifecycleだけで決まる。
+- `If-None-Match` は現行のversionだけを検査するので、lifecycleで失効した後なら同じkeyにobjectを作り直せる。作り直したmanifestは、中身や時刻が違えばSHA-256が変わって止まり、同じ内容なら `expiresAt` を過ぎているので止まる。
 
 ## 初回の構築
 
@@ -107,7 +162,7 @@ baselineのschemaは `{root, apiBaseUrl, apiId, cognitoIssuer, cognitoClientId, 
       ```
 
       applyの前に、planをbootstrapとしてレビューする。planに含まれるのは次のものである。
-      - 2つのS3 bucket（`<name_prefix>-<account_id>-<region>-state` と `<name_prefix>-<account_id>-<region>-artifacts`）。versioning、暗号化、公開アクセスのブロック、HTTPS必須のpolicyを付ける。画像のbucketはplatformが作る。
+      - 3つのS3 bucket（`<name_prefix>-<account_id>-<region>-state`、`<name_prefix>-<account_id>-<region>-artifacts`、`<name_prefix>-<account_id>-<region>-custody`）。versioning、暗号化、公開アクセスのブロック、HTTPS必須のpolicyを付ける。custody bucketには、上書きと削除を拒否するpolicyとprefixごとのlifecycleも付ける（「[release custody](#release-custody)」）。画像のbucketはplatformが作る。
       - GitHubのOIDC providerと、範囲を限定した3つのOIDC role（artifact、plan、apply）。
       - 3つのruntime role（api、cleanup、scheduler）と、各roleの権限の上限（boundary）。
       - API IDがnullの間、GitHubにはHTTP APIの作成・管理の権限が一切与えられない。
@@ -124,7 +179,12 @@ baselineのschemaは `{root, apiBaseUrl, apiId, cognitoIssuer, cognitoClientId, 
    - `target=platform`、`apply=false`、main上の完全なimmutable commit、明示的なnullのplatform baselineでpreviewする。この段階ではZIPのbuildも登録も**行わない**。
    - 「[workflowの実行](#workflowの実行previewとapply)」の2回のrunによるgateでレビューしてapplyする。
    - 既存のpool/client/domainがある場合、null baselineは拒否される。null baselineはリセットやadoptionの抜け道ではない。
-   - 初回のapply後、driverは実際のstate上のリソースidentityを、保存したregion/domainの入力と照合し、既知のoutputを検証して `post-baseline.json` を書き出す。以後のplanの前に、その既知のplatform baselineを設定する。
+   - 初回のapply後、driverは実際のstate上のリソースidentityを、保存したregion/domainの入力と照合し、既知のoutputを検証して、`post-baseline.json` をcustody bucketの `release-result/<run_id>/<run_attempt>/` に置く。置き場所はapplyのrunのjob summaryに出る。
+   - operatorは、自分のAWSの権限で `post-baseline.json` を私的な場所に取り出し、その内容で `production-plan` のsecret `PLATFORM_BASELINE_JSON` を更新する。以後のplanの前に必ず更新する。取り出したファイルは更新後に削除する。
+
+     ```sh
+     aws s3 cp s3://<custody bucket>/release-result/<run_id>/<run_attempt>/post-baseline.json /private/post-baseline.json
+     ```
    - platformは、Lambdaのデプロイより前にAPI/cleanupのpolicyとlog groupを用意する。
 3. **HTTP APIのseed（operator）**
    - 別途承認を得たoperatorが、application所有の `aws_apigatewayv2_api.production` **だけ**を、正確な[API-only seed手順](../../infra/application/production/README.md)でseedする。rootの変数はすべて引き続き必須である。
@@ -137,7 +197,7 @@ baselineのschemaは `{root, apiBaseUrl, apiId, cognitoIssuer, cognitoClientId, 
    - 通常の配布には `operator_api_seed=false` と実際のimmutable ZIPが必要である。
 5. **applicationのpreview（`deploy.yml`）**
    - `target=application`、`apply=false`、`reviewed_run` を空、`scheduler_enabled=false` でpreviewする。
-   - このrunはbuild/packageを一度だけ行い、生成したZIPを検証し、ローカル試験と静的なTerraform検査を実行し、監査を行い、CycloneDXのSBOMを生成する。検証が済んだ後でのみ、登録roleがZIPを登録し、その完全なmanifest/evidenceのhashを永続化する。
+   - このrunはbuild/packageを一度だけ行い、生成したZIPを検証し、ローカル試験と静的なTerraform検査を実行し、監査を行い、CycloneDXのSBOMを生成する。検証が済んだ後でのみ、登録roleがZIPを登録し、RegisteredArtifactと証拠を `registered-release/` に置く。`plan` jobはそれを `register` jobのoutputのmanifestのSHA-256で照合して読む。
    - planはその選択したS3のkey/version/checksumを使い、seed済みのAPIを必須とし、最初の `$default` stageを作成できる。通常のplanはAPIを作成・置換・削除できない。
 6. **applicationのapply（`deploy.yml`）**
    - 「[workflowの実行](#workflowの実行previewとapply)」の手順でレビューしてapplyする。既定の `published=false` では `/readyz=503` を期待する。
@@ -154,43 +214,50 @@ baselineのschemaは `{root, apiBaseUrl, apiId, cognitoIssuer, cognitoClientId, 
 | `commit` | mainから到達可能な、40桁hexの完全なimmutable commit。checkoutはこの正確なcommitを使う |
 | `apply` | previewでは `false` のままにする。applyのrunだけ `true` |
 | `reviewed_run` | 成功した元のpreviewのrun ID。applyと、既存ZIPの再利用に必要 |
-| `expected_review_sha256` | レビューしたpreviewのdigest。初回作成を含むすべてのapplyに必要 |
+| `expected_review_sha256` | レビューした元のpreviewの `release-review` の `manifest.json` のSHA-256（16進数）。初回作成を含むすべてのapplyと、既存ZIPを再利用するpreviewに必要 |
 | `published` | applicationのsmokeで期待する公開状態。データは変更しない |
 | `scheduler_enabled` | レビュー済みのapplicationのSchedulerの設定 |
 
 1. **previewを実行する**
    - `apply=false` でdispatchする。
 2. **previewの結果をレビューする**
-   - 成功したpreviewの **private** な `release-review` artifactを、期限切れになる前にレビューする。
-   - 保存されたbinaryを対応するTerraform versionで確認し、そのbinaryから導出した `plan.json`、正確な `inputs.json`、baseline、root、登録済みartifact/evidence（applicationのみ）、schedulerと公開の期待値を含む `request.json` を確認する。
-   - 公開summaryに出るのはroot、commit、actionの件数、`review_sha256` だけであり、plan・state・inputの生の内容は出ない。
+   - previewの `plan` jobのjob summaryに、root、commit、actionの件数、`review_sha256`（16進数とBase64）、custodyの置き場所（run IDと `run_attempt`）が出る。plan・state・inputの生の内容はGitHubには出ない。
+   - AWSコンソールのS3の画面で、custody bucketの `release-review/<run_id>/<run_attempt>/` を開き、期限（作成から24時間）が切れる前にレビューする。すべてのファイルを、同じrun IDと `run_attempt` の場所から読む。
+     - plan（`plan.txt`）。`plan.txt` は `saved.tfplan` から `terraform show -no-color` で作った、読むための補助である。必要なら `saved.tfplan` を対応するTerraformのversionで確かめる。
+     - 正確な入力（`inputs.json`）とbaseline（`baseline.json`）。
+     - root、schedulerと公開の期待値を含む `request.json`。
+     - applicationでは、登録したZIP（`registered.json`）と、audit（`audit.json`）、SBOM（`sbom.json`）、試験（`tests.txt`）の証拠。
+   - `manifest.json` のSHA-256がjob summaryの `review_sha256` と一致することを、自分で確かめる。たとえば `aws s3 cp s3://<custody bucket>/release-review/<run_id>/<run_attempt>/manifest.json - | sha256sum` で16進数を、S3コンソールのobjectのchecksum（SHA-256）でBase64を確かめられる。一致した16進数の値を、applyのrunの `expected_review_sha256` に入れる。
+   - hashの照合は内容が変わっていないことを確かめるだけで、人による内容の承認の代わりにはならない。
 3. **applyを実行する**
    - applyは毎回2回目のdispatchを使う。environment reviewerを利用できる場合も同じである。
-   - 同じtarget/commit/inputとflag、`apply=true`、`reviewed_run=<successful original preview run ID>`、`expected_review_sha256=<reviewed digest>` を設定する。
-   - 参照元は、このprivate repositoryの、完了して成功したmainでの手動deployment workflowでなければならず、apply runではなくpreviewとして記録されていなければならない。
-   - applicationのapplyはbuild/登録をskipし、元のRegisteredArtifactと、hashを検査した監査・SBOM・試験のfileを再利用する。HEADで、固定したS3のversion/size/checksumを再確認する。
+   - 同じtarget/commit/inputとflag、`apply=true`、`reviewed_run=<成功した元のpreviewのrun ID>`、`expected_review_sha256=<レビューしたmanifestのSHA-256>` を設定する。
+   - 参照元は、このrepositoryの、完了して成功したmainでの手動の `deploy.yml` のrunでなければならず、applyのrunではなくpreviewとして記録されていなければならない。repositoryの公開設定は条件にしない。
+   - applicationのapplyはbuild/登録をskipし、元のpreviewの `release-review` から、RegisteredArtifactと、hashを検査した監査・SBOM・試験のfileを再利用する。HEADで、固定したS3のversion/size/checksumを再確認する。
 4. **planを確認して `production` を承認する**
-   - そのrunは、レビュー済みの入力bytesとbaselineを正確に使って新しいsaved planを1つ作成し、保護する。review digestから除外するのは、Terraformのroot timestampだけである。
-   - driftその他のレビューとの差異があれば配布を停止する。初回作成の場合も同じである。実際の初回作成のpreviewどうしでは、unknownのIDが異なることがある。review digestが変わった場合は、比較を緩めるのではなく新しいpreviewをレビューする。
-   - `production` environmentは、**現在のrun** のplanをレビューした後でのみ承認する。
+   - そのrunは、元のpreviewの `manifest.json` を `expected_review_sha256` で照合し、期限内であることを確かめてから、レビュー済みの入力bytesとbaselineを正確に使って新しいsaved planを1つ作成する。新しいplanのdigestは、照合したmanifestの中のplanのdigestと一致しなければならない。planのdigestから除外するのは、Terraformのroot timestampだけである。
+   - 新しいsaved planは、このrunの `release-review/<run_id>/<run_attempt>/` に、元のレビューの `expiresAt` を引き継いで置かれる。job summaryに、その置き場所と新しい `review_sha256` が出る。
+   - driftその他のレビューとの差異があれば配布を停止する。初回作成の場合も同じである。実際の初回作成のpreviewどうしでは、unknownのIDが異なることがある。planのdigestが変わった場合は、比較を緩めるのではなく新しいpreviewをレビューする。
+   - `production` environmentは、**現在のrun** の `release-review` のplanをレビューした後でのみ承認する。承認を待つ間に元のレビューの期限を過ぎると、apply jobは止まる。
    - required reviewerの制御を利用できない場合は、必須のdigestと成功した元のpreviewが、operatorの手動gateとして残る。workflowのdispatchと、repository/environmentの設定権限をそれに応じて制限する。
 5. **apply jobの動作を確認する**
-   - apply jobは、`needs` 依存関係により**このrun** のsaved binaryを使う。artifactのダウンロード権限をprivate directory 0700/file 0600に戻し、plan jobのcustody SHAと、private fileの正確なhash、現在のcheckout、root、入力bytes、baseline、artifactを検査する。
-   - まったく同じbinaryからJSONを再生成してD06の `verifySavedPlan` にかけ、その後、そのbinaryをネイティブのstate lockと5分のlock timeoutでapplyする。再plan、再build、登録は決して行わない。
+   - apply jobは、apply roleをassumeした後で、`plan` jobのoutput（run ID、`run_attempt`、manifestのSHA-256）が指す**このrun** の `release-review` を読み、private directory 0700/file 0600に取り出す。元のpreviewのmanifestも `expected_review_sha256` で照合し、引き継いだ期限、planのdigest、`custody.json` と各fileの正確なhash、現在のcheckout、root、入力bytes、baseline、artifactを検査する。
+   - まったく同じbinaryからJSONを再生成してD06の `verifySavedPlan` にかけ、apply直前にもう一度期限を確かめてから、そのbinaryをネイティブのstate lockと5分のlock timeoutでapplyする。再plan、再build、登録は決して行わない。
    - privateなbackendのデータは束縛されたaccount/region/prefixから導出され、両rootの固定keyは別々である。
    - productionのconcurrencyは、rootとjobをまたいで `cancel-in-progress=false` である。新しいrunが、実行中または承認待ちのapplyをcancelすることはできない。保留中のrunはGitHubのconcurrency queueによって置き換えられることがある。run statusを確認し、必要なら新しいレビューをdispatchする。applyを手動でcancelしてはならない。
 6. **apply後の検証を確認する**
    - apply後、rootが所有するidentityのoutputを検証する。初回のplatform作成で既知になったbaselineも含む。
    - applicationではさらに、2つのproduction aliasが選択したpublished versionを指し、AWS CodeSha256が登録済みZIPのdigestと等しいことを検証し、その後statusだけを見るGETを確認する。`/healthz=200`、`/readyz=200`（公開時。未公開時は503）、認証なしの `/v2/reminders=401/403` である。smokeでの書き込みや、tokenやbodyのログ出力は行わない。
-   - 成功ledgerはすべての検査が済んだ後でのみ書き込まれ、commit/root/review/artifact digest、2つのversion、API URL、結果を含む。userデータは含まない。`release-result` は1日間privateのまま保持する。
+   - 成功ledger（`ledger.json`）はすべての検査が済んだ後でのみ、custody bucketの `release-result/<run_id>/<run_attempt>/` に書き込まれ、commit/root/planのdigest/artifact digest、2つのversion、API URL、結果を含む。userデータは含まない。ledgerは標準出力とjob summaryには出さない。job summaryに出るのは、root、commit、結果、`release-result` の置き場所だけである。`release-result` は30日間保持する。
    - 部分的なapply、または証明・smokeの失敗は成功ではない。次のreleaseの前に、operatorの承認済み復旧手順に従ってprivateなoutput/stateを確認する。
 
 ## cleanupの有効化
 
 公開後にcleanupを有効にする手順である。
 
-1. 既存のRegisteredArtifactの元のpreview runを `reviewed_run` で選び、`scheduler_enabled=true` と正しい `published` の期待値を指定してapplicationをpreviewする。既存のartifactを使うpreviewはbuild/登録をskipするが、変更した設定について新たにレビューするplanを生成する。
-2. その新しいpreviewを、正確なdigest/flagでapplyする。
+1. 既存のRegisteredArtifactの元のpreview runを `reviewed_run` で選び、その元のpreviewの `manifest.json` のSHA-256を `expected_review_sha256` に入れ、`apply=false`、`scheduler_enabled=true` と正しい `published` の期待値を指定してapplicationをpreviewする。ZIPを再利用するpreviewにも `expected_review_sha256` が必要で、無ければauthorize jobが止める。元のpreviewは期限内でなければならない。
+2. 既存のartifactを使うpreviewはbuild/登録をskipするが、変更した設定について新たにレビューするplanを生成する。新しい `release-review` のmanifestには元のpreviewのmanifestのSHA-256が入り、期限は新しい作成時刻から24時間である。
+3. その新しいpreviewを「[workflowの実行](#workflowの実行previewとapply)」の手順でレビューし、新しいpreviewのrun IDとmanifestのSHA-256、同じflagでapplyする。
 
 cronは毎日03:00 UTC、window OFFである。有効にすると、heartbeat欠落のalarm actionも有効になる。公開状態の切り替えやuserデータの編集を行うmaintenance workflowはない。
 
@@ -200,7 +267,7 @@ codeをrollbackする手順である。
 
 1. まず現在の検証済みartifactを使って `scheduler_enabled=false` をpreview・レビュー・applyする。
 2. operatorの復旧手順に従い、実行中のcleanupや呼び出しが落ち着くまで待つ。
-3. 古いimmutable ZIPと、その元の検証evidence/commit（mainから到達可能なままでなければならない）を、期限切れでない元のpreviewから選ぶ。custodyが期限切れなら、任意のmanifestをアップロードするのではなく、新しいpreviewを用意する。
+3. 古いimmutable ZIPと、その元の検証evidence/commit（mainから到達可能なままでなければならない）を、期限切れでない元のpreviewから選ぶ。ZIPを再利用するpreviewには、その元のpreviewのmanifestのSHA-256が必要である。custodyが期限切れなら、任意のmanifestをアップロードするのではなく、新しいpreviewを用意する。
 4. API/Cognitoのidentity、origin/設定、未公開/公開の期待値は変えず、planをレビューする。
 5. レビュー済みの選択したversionをapplyし、両方のalias、hash、smokeを検証する。
 
@@ -208,11 +275,45 @@ TerraformはAPIとcleanupのproduction aliasを**非原子的に**更新する�
 
 Schedulerを無効にしても、既存の呼び出しはcancelされない。codeのrollbackは、table、画像、公開状態を復元しない。データ/PITRの復旧は別途承認が必要な操作であり、決して配布workflowではない。
 
+## bootstrapの更新
+
+custody bucketを持たない、bootstrap済みの環境を更新する手順である。別途承認を得たoperatorが、手元の短期の認証情報で `infra/bootstrap` において実行する。GitHub Actionsは使わない。
+
+この更新は追加だけである。custody bucketとその設定（versioning、暗号化、公開アクセスのブロック、bucket policy、lifecycle）、3つのGitHub用roleのpolicyへのcustodyの権限、output `custody_bucket` を加える。既存のリソースのaddressは変えず、作り直しや削除は起こさない。
+
+1. 更新後の `infra/bootstrap` で、既存のbackendの設定を使ってinitする。
+
+   ```sh
+   terraform init -backend-config=backend.hcl
+   ```
+
+2. saved planを作り、追加とroleのpolicyの変更だけであることをレビューしてからapplyする。既存のbucket、role、OIDC providerの作り直し（replace）や削除が含まれていれば、applyしない。
+
+   ```sh
+   terraform plan -out=bootstrap.tfplan
+   terraform apply bootstrap.tfplan
+   ```
+
+3. output `custody_bucket` の値を、repository variable `CUSTODY_BUCKET` に設定する。saved planのファイルは、使用後に削除する。
+
+更新の前にGitHubのartifactに置いたレビューは使えない。更新の後は、新しいpreviewを作ってからapplyする。
+
+## リポジトリをpublicに切り替えるとき
+
+privateのrepositoryをpublicに切り替える場合は、切り替える前に次を確かめる。custody bucketを使う `deploy.yml` は、artifactとログに秘密の情報を出さないが、以前の仕組みで作ったartifactとログは残りうる。
+
+1. 機密を含むGitHubのartifact（custody bucketへの移行前の `release-review`、`registered-release`、`release-result`、`failure-diagnostics-*`、`ci.yml` の `failure-diagnostics-infra-*`）が残っていないこと。残っていれば削除するか、保持期間が過ぎて取得できなくなったことを確かめる。
+2. 移行前のworkflowを再実行して、artifactを作り直していないこと。
+3. 移行前のworkflowのrunのログに、非公開にする情報（applyの結果のledgerなど）が残っていないこと。残っていれば、そのrunのログを削除するか、保持期間が過ぎて取得できなくなったことを確かめる。
+4. 実行中、または承認待ちのdeployのrunが無いこと。
+
+`ci.yml` の失敗時の診断は、privateのrepositoryのときだけartifactにする。publicのrepositoryではartifactをアップロードしない。
+
 ## 依存関係のevidence
 
 CIはNode 24.21.0/npm 11.11.1、Python 3.13.16、Terraform 1.16.5と、checked-inのprovider 6.67.0のlockを使う。runtimeと開発依存全体の監査はすべてのseverityを報告し、未解決のHigh/Criticalで失敗する。`continue-on-error` でそれを隠すことはない。現在のD07監査では、開発用の推移的依存関係の指摘6件を修正した。検証したローカルのruntimeと全依存関係のreportは、いずれも脆弱性0件である。Dependabotは毎週、npm、Actions、3つのTerraform rootを検査する。Dockerと `.devcontainer` は対象外である。SHAの更新には、公式のrelease/tagの来歴のレビューが必要である。監査結果はその時点のevidenceであり、恒久的な保証ではない。
 
-実装時に参照した現行ドキュメントは、[GitHubのdeployment制御](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/control-deployments)、[artifactのアクセスとダウンロード](https://docs.github.com/en/actions/how-tos/monitor-workflows/download-workflow-artifacts)、[download action](https://github.com/actions/download-artifact)、[Terraformのsaved plan](https://developer.hashicorp.com/terraform/tutorials/cli/plan)、[npm audit](https://docs.npmjs.com/cli/v11/commands/npm-audit)、[npm SBOM](https://docs.npmjs.com/cli/v11/commands/npm-sbom)である。
+関係する現行ドキュメントは、[GitHubのdeployment制御](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/control-deployments)、[S3の条件付き書き込み](https://docs.aws.amazon.com/AmazonS3/latest/userguide/conditional-writes.html)、[S3のlifecycle](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html)、[Terraformのsaved plan](https://developer.hashicorp.com/terraform/tutorials/cli/plan)、[npm audit](https://docs.npmjs.com/cli/v11/commands/npm-audit)、[npm SBOM](https://docs.npmjs.com/cli/v11/commands/npm-sbom)である。
 
 ## 復元tableの選択
 
@@ -222,9 +323,11 @@ CIはNode 24.21.0/npm 11.11.1、Python 3.13.16、Terraform 1.16.5と、checked-i
 
 コマンドが失敗した場合、通常のログに出るのはphase、exit status、privateな診断directoryだけである。
 
-- 失敗したprivate runの `failure-diagnostics-<job>-<run_id>` artifactを、そのrunのActions artifacts panelから1日以内にダウンロードする。CIでのprivate repositoryのinfrastructure失敗では `failure-diagnostics-infra-<run_id>` を使う。
-- アクセスはprivate repositoryの閲覧権限によって制限される。environment reviewerだけに限定されるわけではない。それらの閲覧者は制限したままにする。
-- fileはローカルで0700のdirectory権限と0600のfile権限で復元・作成される。レビュー用にダウンロードしたものは使用後に削除する。public repositoryではartifactをアップロードしない。
+- `deploy.yml` のjobが失敗し、roleをassumeできていれば、診断のJSONをcustody bucketの `failure-diagnostics/<run_id>/<run_attempt>/<job>/` に置く（`<job>` は `register`、`plan`、`apply`）。operatorが自分のAWSの権限で、1日以内に読む。GitHubのartifactにはしない。
+- roleをassumeする前に失敗した場合（authorize job、依存関係のinstallなど）は、S3に書けない。通常のログにphaseとexit statusだけが出て、診断は残らない。authorizeの検査の内容は秘密ではないので、失敗の理由はログの短いエラーで分かる。
+- 診断を書くことに失敗しても、jobの結果は失敗のままである。
+- CIでのprivate repositoryのinfrastructure失敗では、そのrunのActions artifacts panelから `failure-diagnostics-infra-<run_id>` を1日以内にダウンロードする。アクセスはprivate repositoryの閲覧権限で制限され、environment reviewerだけに限定されるわけではない。public repositoryではartifactをアップロードしない。PRのCIはAWSの認証を持たないため、S3には置けない。
+- ダウンロードしたfileは、ローカルで0700のdirectory権限と0600のfile権限で扱い、使用後に削除する。
 
 ローカルの `infra:check` の失敗は `<RUNNER_TEMP or OS temp>/infra-diagnostics` を、releaseコマンドは `release-diagnostics` を使う。
 
@@ -232,7 +335,7 @@ CIはNode 24.21.0/npm 11.11.1、Python 3.13.16、Terraform 1.16.5と、checked-i
 - 1日より古いfileは、次の失敗時に削除される。その後コマンドを実行しない場合でも、ローカルの診断は1日以内に削除する。
 - 成功時の出力、コマンド引数、環境変数は決して永続化しない。plan/show/outputのstdoutは省略する。
 - 一般的な認証情報の代入はredactされるが、診断は引き続きprivateであり、通常のログに貼り付けてはならない。
-- 失敗したworkflow runは成功previewの来歴検査を通過できない。診断はrelease custodyとは別のpath/名前を使う。
+- 失敗したworkflow runは成功previewの来歴検査を通過できない。診断はrelease custodyのレビューとは別のprefix（`failure-diagnostics/`）を使い、workflowが読むことは無い。
 
 ## release CLIの入力
 
@@ -244,7 +347,7 @@ CIはNode 24.21.0/npm 11.11.1、Python 3.13.16、Terraform 1.16.5と、checked-i
 | `npm run release:inspect-plan -- <明示のflag>` | root、保存したplan、正確な入力、baseline、commitの私有照合 |
 | `npm run release:verify -- --artifact /private/artifact.json --outputs /private/outputs.json --region <region>` | 実Lambdaの2つのaliasとCodeSha256の照合 |
 | `npm run release:smoke -- --baseline /private/baseline.json --base-url <known-api-url> --published false` | statusだけを見るHTTPの読み取り。baselineとの一致が必須 |
-| `npm run release:workflow -- plan` | GHA専用の有限のhelper。authorize、secure、plan、applyのうち1つのphaseだけを実行する。必須の環境変数とcustodyはこの文書の上の節にある |
+| `npm run release:workflow -- plan` | GHA専用の有限のhelper。authorize、secure、register-custody、plan、apply、diagnosticsのうち1つのphaseだけを実行する。custodyを読み書きするphaseは `CUSTODY_BUCKET` を要する。必須の環境変数とcustodyはこの文書の上の節と `deploy.yml` にある |
 | `npm run migrate:json -- --mode dry-run --source /private/source-copy.json --mapping /private/owner-map.json --config /private/target.json` | AWS clientを作らないdry-run（[移行手順](migration.md)） |
 | `npm run recovery:verify -- --source-config /private/live.json --restored-config /private/restored.json --owner-identities /private/current-owners.json --run-id <uuid>` | 実AWSの読み取り。明示したprepare、preserve、mapだけが復旧先を変更する（[復旧手順](recovery.md)） |
 
