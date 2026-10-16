@@ -36,7 +36,7 @@ const path=(c:WorkflowContext,name:string)=>join(resolve(c.directory),name);
 const parseJson=async(p:string):Promise<unknown>=>JSON.parse(await readFile(p,"utf8"));
 async function privateFile(p:string,value:string|Uint8Array):Promise<void>{await writeFile(p,value,{mode:0o600});await chmod(p,0o600);}
 async function privateJson(p:string,value:unknown):Promise<void>{await privateFile(p,JSON.stringify(value,null,2)+"\n");}
-/** Artifact downloads lose permissions. Reject symlinks and restore private modes before reads. */
+/** private なディレクトリを 0700 で用意し、symlink と通常のファイルでないものを拒否して、各ファイルを 0600 に戻す。 */
 export async function secureDirectory(directory:string):Promise<void>{
   await mkdir(directory,{recursive:true,mode:0o700});const dir=await lstat(directory);if(!dir.isDirectory()||dir.isSymbolicLink())throw Error("Invalid private directory");await chmod(directory,0o700);
   for(const name of await readdir(directory)){const p=join(directory,name),s=await lstat(p);if(!s.isFile()||s.isSymbolicLink())throw Error("Only regular private release files are accepted");await chmod(p,0o600);}
@@ -316,11 +316,11 @@ async function writeDiagnostics(inject:WorkflowInjection,io:WorkflowIO):Promise<
   }finally{client?.destroy();await rm(staging,{recursive:true,force:true});}
 }
 export async function workflowMain(argv:string[],inject:WorkflowInjection={}):Promise<void>{
-  if(argv.length!==1||!["authorize","secure","register-custody","plan","apply","diagnostics"].includes(argv[0]!))throw Error("Unknown finite workflow phase");
+  if(argv.length!==1||!["authorize","register-custody","plan","apply","diagnostics"].includes(argv[0]!))throw Error("Unknown finite workflow phase");
   const phase=argv[0]!,services=inject.services??defaultServices,io=inject.io??processIO;
   // 診断は失敗した job の最後に書く。release の設定には依存しない。
   if(phase==="diagnostics"){await writeDiagnostics(inject,io);return;}
-  const directory=join(required("RUNNER_TEMP"),"release");if(phase==="secure"){await secureDirectory(directory);return;}
+  const directory=join(required("RUNNER_TEMP"),"release");
   const base={directory,root:required("RELEASE_ROOT") as ReleaseRoot,commit:required("RELEASE_COMMIT"),region:required("AWS_REGION"),apply:boolean("RELEASE_APPLY"),published:boolean("RELEASE_PUBLISHED"),schedulerEnabled:boolean("RELEASE_SCHEDULER_ENABLED")};
   if(phase==="authorize"){
     const c=base;

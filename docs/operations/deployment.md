@@ -361,7 +361,7 @@ CIはNode 24.21.0/npm 11.11.1、Python 3.13.16、Terraform 1.16.5と、checked-i
 | `npm run release:inspect-plan -- <明示のflag>` | root、保存したplan、正確な入力、baseline、commitの私有照合 |
 | `npm run release:verify -- --artifact /private/artifact.json --outputs /private/outputs.json --region <region>` | 実Lambdaの2つのaliasとCodeSha256の照合 |
 | `npm run release:smoke -- --baseline /private/baseline.json --base-url <known-api-url> --published false` | statusだけを見るHTTPの読み取り。baselineとの一致が必須 |
-| `npm run release:workflow -- plan` | GHA専用の有限のhelper。authorize、secure、register-custody、plan、apply、diagnosticsのうち1つのphaseだけを実行する。custodyを読み書きするphaseは `CUSTODY_BUCKET` を要する。必須の環境変数とcustodyはこの文書の上の節と `deploy.yml` にある |
+| `npm run release:workflow -- plan` | GHA専用の有限のhelper。authorize、register-custody、plan、apply、diagnosticsのうち1つのphaseだけを実行する。custodyを読み書きするphaseは `CUSTODY_BUCKET` を要する。必須の環境変数とcustodyはこの文書の上の節と `deploy.yml` にある |
 | `npm run migrate:json -- --mode dry-run --source /private/source-copy.json --mapping /private/owner-map.json --config /private/target.json` | AWS clientを作らないdry-run（[移行手順](migration.md)） |
 | `npm run recovery:verify -- --source-config /private/live.json --restored-config /private/restored.json --owner-identities /private/current-owners.json --run-id <uuid>` | 実AWSの読み取り。明示したprepare、preserve、mapだけが復旧先を変更する（[復旧手順](recovery.md)） |
 

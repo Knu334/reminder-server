@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {mkdir,mkdtemp,readFile,readdir,writeFile,rm,stat,symlink} from "node:fs/promises";
+import {lstat,mkdir,mkdtemp,readFile,readdir,writeFile,rm,stat,symlink} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {createHash} from "node:crypto";
@@ -503,4 +503,11 @@ void test("diagnostics_phase_writes_only_bounded_json_files",async()=>{
   // symlink は読まずに止まり、何も書かない。
   const s=await fixture();try{await diagnostics(s,"infra-diagnostics",{"ok.json":"{}"});await symlink(join(s.runnerTemp,"github-output"),join(s.runnerTemp,"infra-diagnostics","link.json"));
     const r=await cli(s,"diagnostics",{GITHUB_JOB:"plan"});assert.equal(r.code,1);assert.equal(s.store.order.length,0);}finally{await s.cleanup();}
+});
+void test("workflow_cli_accepts_only_phases_deploy_uses",async()=>{
+  // secure phase は GitHub の artifact を使っていたときの名残で、deploy.yml は使わない。受け付けず、何も作らない。
+  const f=await fixture();try{
+    for(const phase of ["secure","register","","plan "]){const r=await cli(f,phase,{});assert.equal(r.code,1,phase);assert.equal(r.stdout,"");assert.equal(f.store.order.length,0);}
+    await assert.rejects(lstat(join(f.runnerTemp,"release")));
+  }finally{await f.cleanup();}
 });
