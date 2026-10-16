@@ -37,15 +37,22 @@ export async function secureDirectory(directory:string):Promise<void>{
   await mkdir(directory,{recursive:true,mode:0o700});const dir=await lstat(directory);if(!dir.isDirectory()||dir.isSymbolicLink())throw Error("Invalid private directory");await chmod(directory,0o700);
   for(const name of await readdir(directory)){const p=join(directory,name),s=await lstat(p);if(!s.isFile()||s.isSymbolicLink())throw Error("Only regular private release files are accepted");await chmod(p,0o600);}
 }
-export function authorizeDispatch(input:{privateRepository:boolean;event:string;ref:string;commit:string;head:string;mainContainsCommit:boolean;apply:boolean;reviewedRun:string;expectedReviewSha256:string;root:string}):void{
-  commit.parse(input.commit);if(!input.privateRepository||input.event!=="workflow_dispatch"||input.ref!=="refs/heads/main"||input.head!==input.commit||!input.mainContainsCommit||!["platform","application"].includes(input.root))throw Error("Private main immutable-commit dispatch required");
+export function authorizeDispatch(input:{event:string;ref:string;commit:string;head:string;mainContainsCommit:boolean;apply:boolean;reviewedRun:string;expectedReviewSha256:string;root:string}):void{
+  commit.parse(input.commit);if(input.event!=="workflow_dispatch"||input.ref!=="refs/heads/main"||input.head!==input.commit||!input.mainContainsCommit||!["platform","application"].includes(input.root))throw Error("Main immutable-commit dispatch required");
   if(input.reviewedRun!==""&&!/^[1-9][0-9]*$/.test(input.reviewedRun))throw Error("Invalid reviewed run");
-  if(input.apply&&(!input.reviewedRun||!sha.safeParse(input.expectedReviewSha256).success))throw Error("Apply requires a reviewed preview run and digest");
+  if(input.apply&&!input.reviewedRun)throw Error("Apply requires a reviewed preview run and digest");
+  if(input.reviewedRun&&!sha.safeParse(input.expectedReviewSha256).success)throw Error("Reviewed run requires the reviewed preview digest");
 }
-/** Cross-run artifact source must be this private repository's completed main manual workflow. */
+/** reviewed_run は、この repository の main で手動実行され成功した deploy.yml の run に限る。公開設定は条件にしない。 */
 export function verifyReviewedRunMetadata(input:unknown,repository:string):void{
   const run=jsonObject.parse(input),head=jsonObject.parse(run.head_repository);
-  if(run.event!=="workflow_dispatch"||run.head_branch!=="main"||run.path!==".github/workflows/deploy.yml"||run.conclusion!=="success"||run.status!=="completed"||head.full_name!==repository||head.private!==true)throw Error("Reviewed run lacks private main dispatch provenance");
+  if(run.event!=="workflow_dispatch"||run.head_branch!=="main"||run.path!==".github/workflows/deploy.yml"||run.conclusion!=="success"||run.status!=="completed"||head.full_name!==repository)throw Error("Reviewed run lacks main dispatch provenance");
+}
+const jobsResponse=z.object({jobs:z.array(z.object({name:z.string(),conclusion:z.string().nullable(),run_attempt:z.number().int().positive()}))});
+/** jobs API（filter=all）の応答から、成功した plan job の最大の run_attempt を返す。deploy.yml の job に name は無いので job id の plan が name になる。 */
+export function selectReviewedPlanAttempt(jobs:unknown):number{
+  const attempts=jobsResponse.parse(jobs).jobs.filter(j=>j.name==="plan"&&j.conclusion==="success").map(j=>j.run_attempt);
+  if(attempts.length===0)throw Error("Reviewed run has no successful plan job");return Math.max(...attempts);
 }
 const request=(c:WorkflowContext)=>({root:c.root,commit:c.commit,region:c.region,published:c.published,schedulerEnabled:c.schedulerEnabled});
 function equal(a:unknown,b:unknown):boolean{return JSON.stringify(a)===JSON.stringify(b);}
@@ -154,9 +161,14 @@ export async function workflowMain(argv:string[]):Promise<void>{
   const c:WorkflowContext={directory,root:required("RELEASE_ROOT") as ReleaseRoot,commit:required("RELEASE_COMMIT"),region:required("AWS_REGION"),apply:boolean("RELEASE_APPLY"),published:boolean("RELEASE_PUBLISHED"),schedulerEnabled:boolean("RELEASE_SCHEDULER_ENABLED"),expectedReviewSha256:process.env.EXPECTED_REVIEW_SHA256??"",...(process.env.EXPECTED_CUSTODY_SHA256?{expectedCustodySha256:process.env.EXPECTED_CUSTODY_SHA256}:{})};
   if(argv[0]==="authorize"){
     const head=(await localRun("git",["rev-parse","HEAD"])).trim();let contains=true;try{await localRun("git",["merge-base","--is-ancestor",c.commit,"origin/main"]);}catch{contains=false;}
-    const event=jsonObject.parse(await parseJson(required("GITHUB_EVENT_PATH"))),repository=jsonObject.parse(event.repository);
-    const reviewedRun=process.env.REVIEWED_RUN??"";authorizeDispatch({privateRepository:repository.private===true,event:required("GITHUB_EVENT_NAME"),ref:required("GITHUB_REF"),commit:c.commit,head,mainContainsCommit:contains,apply:c.apply,reviewedRun,expectedReviewSha256:c.expectedReviewSha256,root:c.root});
-    if(reviewedRun){const repo=required("GITHUB_REPOSITORY");if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))throw Error("Invalid repository");const response=await fetch(`https://api.github.com/repos/${repo}/actions/runs/${reviewedRun}`,{headers:{Authorization:`Bearer ${required("DRIVER_GITHUB_TOKEN")}`,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"}});if(!response.ok)throw Error("Reviewed run inaccessible");verifyReviewedRunMetadata(await response.json(),repo);}
+        const reviewedRun=process.env.REVIEWED_RUN??"";authorizeDispatch({event:required("GITHUB_EVENT_NAME"),ref:required("GITHUB_REF"),commit:c.commit,head,mainContainsCommit:contains,apply:c.apply,reviewedRun,expectedReviewSha256:c.expectedReviewSha256,root:c.root});
+    if(reviewedRun){
+      const repo=required("GITHUB_REPOSITORY");if(!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo))throw Error("Invalid repository");
+      const get=async(url:string):Promise<unknown>=>{const response=await fetch(url,{headers:{Authorization:`Bearer ${required("DRIVER_GITHUB_TOKEN")}`,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"}});if(!response.ok)throw Error("Reviewed run inaccessible");return response.json();};
+      verifyReviewedRunMetadata(await get(`https://api.github.com/repos/${repo}/actions/runs/${reviewedRun}`),repo);
+      const attempt=selectReviewedPlanAttempt(await get(`https://api.github.com/repos/${repo}/actions/runs/${reviewedRun}/jobs?filter=all&per_page=100`));
+      await writeFile(required("GITHUB_OUTPUT"),`reviewed_attempt=${attempt}\n`,{flag:"a"});
+    }
     return;
   }
   if(argv[0]==="plan"){

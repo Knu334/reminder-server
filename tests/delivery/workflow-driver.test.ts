@@ -26,9 +26,13 @@ async function fixture(root:"platform"|"application"="application") {
   const transferredDriver={...d,planRelease:async(c:WorkflowContext,cfg:WorkflowConfig,src:string|undefined,svc:ReleaseServices)=>{const review=await d.planRelease(c,cfg,src,svc);c.expectedCustodySha256=digest(await readFile(join(c.directory,"custody.json"),"utf8"));return review;}};
   return {d:transferredDriver,directory,context,config,source,registered,plan,commands,services,counts:()=>({headCount,verifyCount,smokeCount}),cleanup:async()=>{await rm(directory,{recursive:true,force:true});await rm(source,{recursive:true,force:true});}};
 }
-void test("dispatch_rejects_public_pr_nonmain_unreviewed_apply_before_aws",async()=>{
-  const d=await driver();const good={privateRepository:true,event:"workflow_dispatch",ref:"refs/heads/main",commit:artifact.commit,head:artifact.commit,mainContainsCommit:true,apply:false,reviewedRun:"",expectedReviewSha256:"",root:"platform"};
-  d.authorizeDispatch(good);for(const bad of [{privateRepository:false},{event:"pull_request"},{ref:"refs/heads/topic"},{head:"b".repeat(40)},{mainContainsCommit:false},{commit:"main"},{apply:true},{apply:true,reviewedRun:"12",expectedReviewSha256:"bad"},{root:"bootstrap"}])assert.throws(()=>d.authorizeDispatch({...good,...bad}));
+void test("dispatch_accepts_public_or_private_main_dispatch",async()=>{
+  const d=await driver();const good={event:"workflow_dispatch",ref:"refs/heads/main",commit:artifact.commit,head:artifact.commit,mainContainsCommit:true,apply:false,reviewedRun:"",expectedReviewSha256:"",root:"platform"};
+  d.authorizeDispatch(good);d.authorizeDispatch({...good,privateRepository:false} as typeof good);for(const bad of [{event:"pull_request"},{ref:"refs/heads/topic"},{head:"b".repeat(40)},{mainContainsCommit:false},{commit:"main"},{apply:true},{apply:true,reviewedRun:"12",expectedReviewSha256:"bad"},{root:"bootstrap"}])assert.throws(()=>d.authorizeDispatch({...good,...bad}));
+});
+void test("reused_preview_requires_reviewed_digest",async()=>{
+  const d=await driver();const good={event:"workflow_dispatch",ref:"refs/heads/main",commit:artifact.commit,head:artifact.commit,mainContainsCommit:true,apply:false,reviewedRun:"12",expectedReviewSha256:"a".repeat(64),root:"application"};
+  d.authorizeDispatch(good);for(const bad of ["","bad"])assert.throws(()=>d.authorizeDispatch({...good,expectedReviewSha256:bad}));
 });
 void test("application_plan_derives_json_from_saved_binary_and_transfers_only_allowed_outputs",async()=>{
   const f=await fixture();try{const sha=await f.d.planRelease(f.context,f.config,f.source,f.services);assert.match(sha,/^[0-9a-f]{64}$/);assert.equal(f.counts().headCount,1);assert.equal(f.commands.filter(c=>c[2]==="plan").length,1);const input=JSON.parse(await readFile(join(f.directory,"inputs.json"),"utf8"));assert.equal(input.operator_api_seed,false);assert.equal(input.production_api_id,baseline.apiId);assert.equal(input.cognito_client_id,baseline.cognitoClientId);assert.equal(input.unused_secret,undefined);assert.equal(input.artifact.version_id,artifact.versionId);for(const p of [f.directory,join(f.directory,"inputs.json"),join(f.directory,"saved.tfplan"),join(f.directory,"review.json")])assert.equal((await stat(p)).mode&0o777,p===f.directory?0o700:0o600);}finally{await f.cleanup();}
@@ -61,10 +65,17 @@ void test("post_apply_identity_alias_or_smoke_failure_never_produces_success_led
   for(const failure of ["identity","alias","smoke"]){const f=await fixture();try{const sha=await f.d.planRelease(f.context,f.config,f.source,f.services);const services={...f.services,...(failure==="identity"?{run:async(c:string,a:string[])=>a[1]==="output"?JSON.stringify({...outputs,api_id:{value:"wrong"}}):f.services.run(c,a)}:failure==="alias"?{verify:async()=>{throw Error("alias mismatch");}}:{smoke:async()=>{throw Error("unavailable");}})};await assert.rejects(f.d.applyRelease({...f.context,apply:true,expectedReviewSha256:sha},services));await assert.rejects(readFile(join(f.directory,"ledger.json")));}finally{await f.cleanup();}}
 });
 
-void test("reviewed_run_metadata_rejects_foreign_public_push_nonmain_or_failed_custody",async()=>{
-  const d=await driver();assert.ok("verifyReviewedRunMetadata" in d,"reviewed run validator required");const verify=(d as unknown as {verifyReviewedRunMetadata:(r:unknown,repo:string)=>void}).verifyReviewedRunMetadata;
-  const good={event:"workflow_dispatch",head_branch:"main",path:".github/workflows/deploy.yml",conclusion:"success",status:"completed",head_repository:{full_name:"synthetic/reminder",private:true}};verify(good,"synthetic/reminder");
-  for(const bad of [{event:"push"},{head_branch:"feature"},{path:".github/workflows/ci.yml"},{conclusion:"failure"},{status:"in_progress"},{head_repository:{full_name:"foreign/reminder",private:true}},{head_repository:{full_name:"synthetic/reminder",private:false}}])assert.throws(()=>verify({...good,...bad},"synthetic/reminder"));
+void test("reviewed_run_metadata_accepts_public_repository",async()=>{
+  const d=await driver();const verify=d.verifyReviewedRunMetadata;
+  const good={event:"workflow_dispatch",head_branch:"main",path:".github/workflows/deploy.yml",conclusion:"success",status:"completed",head_repository:{full_name:"synthetic/reminder",private:false}};verify(good,"synthetic/reminder");verify({...good,head_repository:{full_name:"synthetic/reminder",private:true}},"synthetic/reminder");
+  for(const bad of [{event:"push"},{head_branch:"feature"},{path:".github/workflows/ci.yml"},{conclusion:"failure"},{status:"in_progress"},{head_repository:{full_name:"foreign/reminder",private:false}}])assert.throws(()=>verify({...good,...bad},"synthetic/reminder"));
+});
+void test("reviewed_plan_attempt_uses_successful_plan_job_attempt",async()=>{
+  const d=await driver();const job=(name:string,conclusion:string,run_attempt:number)=>({name,conclusion,run_attempt});
+  assert.equal(d.selectReviewedPlanAttempt({jobs:[job("plan","failure",1),job("plan","success",2)]}),2);
+  assert.equal(d.selectReviewedPlanAttempt({jobs:[job("plan","success",1),job("plan","success",2),job("register","success",3)]}),2);
+  assert.throws(()=>d.selectReviewedPlanAttempt({jobs:[job("plan","failure",1),job("register","success",2)]}));
+  assert.throws(()=>d.selectReviewedPlanAttempt({jobs:[]}));assert.throws(()=>d.selectReviewedPlanAttempt({}));assert.throws(()=>d.selectReviewedPlanAttempt({jobs:[{name:"plan",conclusion:"success",run_attempt:0}]}));
 });
 void test("reused_preview_can_plan_and_apply_without_build_and_refuses_apply_run_as_preview",async()=>{
   const first=await fixture(),next=await fixture();try{const sha=await first.d.planRelease(first.context,first.config,first.source,first.services);const c={...next.context,apply:true,expectedReviewSha256:sha};const digest=await next.d.planRelease(c,next.config,first.directory,next.services);assert.equal(digest,sha);await next.d.applyRelease(c,next.services);assert.equal(next.commands.filter(c=>c[2]==="plan").length,1);assert.equal(next.commands.some(c=>/build|package|register/.test(c.join(" "))),false);
