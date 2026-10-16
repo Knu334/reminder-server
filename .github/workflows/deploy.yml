@@ -16,11 +16,11 @@ on:
         type: boolean
         default: false
       reviewed_run:
-        description: Successful preview run ID; required for apply or ZIP reuse
+        description: 元の preview の run ID。apply と ZIP 再利用に必要
         type: string
         default: ''
       expected_review_sha256:
-        description: Reviewed preview digest; required for every apply including first create
+        description: 元の preview の manifest の SHA-256。apply と ZIP 再利用に必要
         type: string
         default: ''
       published:
@@ -50,14 +50,17 @@ env:
   EXPECTED_REVIEW_SHA256: ${{ inputs.expected_review_sha256 }}
   REVIEWED_RUN: ${{ inputs.reviewed_run }}
   AWS_REGION: ${{ vars.AWS_REGION }}
+  CUSTODY_BUCKET: ${{ vars.CUSTODY_BUCKET }}
 jobs:
   authorize:
-    if: github.event.repository.private == true && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
       actions: read
+    outputs:
+      reviewed_attempt: ${{ steps.authorize.outputs.reviewed_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -76,21 +79,11 @@ jobs:
       - run: |
           npm install --global npm@11.11.1
           npm ci
-      - name: Authorize private manual release and reviewed run provenance
+      - name: Authorize manual main release and reviewed run provenance
+        id: authorize
         run: npm run release:workflow -- authorize
         env:
           DRIVER_GITHUB_TOKEN: ${{ github.token }}
-      - name: Retain private failure diagnostics
-        if: ${{ failure() && github.event.repository.private == true }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: failure-diagnostics-authorize-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/release-diagnostics/*.json
-            ${{ runner.temp }}/infra-diagnostics/*.json
-          retention-days: 1
-          if-no-files-found: ignore
-          include-hidden-files: false
   register:
     needs: [authorize]
     if: needs.authorize.result == 'success' && inputs.target == 'application' && !inputs.apply && inputs.reviewed_run == ''
@@ -100,6 +93,10 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      custody_run_id: ${{ steps.custody.outputs.custody_run_id }}
+      custody_attempt: ${{ steps.custody.outputs.custody_attempt }}
+      custody_manifest_sha256: ${{ steps.custody.outputs.custody_manifest_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -164,24 +161,12 @@ jobs:
             --tests-id "sha256:$(sha256sum "$RUNNER_TEMP/registered/tests.txt" | cut -d ' ' -f 1)" > /dev/null
         env:
           ARTIFACT_BUCKET: ${{ vars.ARTIFACT_BUCKET }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: registered-release
-          path: ${{ runner.temp }}/registered/
-          if-no-files-found: error
-          retention-days: 1
-          include-hidden-files: false
-      - name: Retain private failure diagnostics
-        if: ${{ failure() && github.event.repository.private == true }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: failure-diagnostics-register-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/release-diagnostics/*.json
-            ${{ runner.temp }}/infra-diagnostics/*.json
-          retention-days: 1
-          if-no-files-found: ignore
-          include-hidden-files: false
+      - name: Keep registration and evidence in private custody for this run
+        id: custody
+        run: npm run release:workflow -- register-custody
+      - name: Keep failure diagnostics in private custody
+        if: failure()
+        run: npm run release:workflow -- diagnostics
   plan:
     needs: [authorize, register]
     if: always() && needs.authorize.result == 'success' && (needs.register.result == 'success' || needs.register.result == 'skipped')
@@ -190,11 +175,12 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
-      actions: read
       id-token: write
     outputs:
+      custody_run_id: ${{ steps.plan.outputs.custody_run_id }}
+      custody_attempt: ${{ steps.plan.outputs.custody_attempt }}
+      custody_manifest_sha256: ${{ steps.plan.outputs.custody_manifest_sha256 }}
       review_sha256: ${{ steps.plan.outputs.review_sha256 }}
-      custody_sha256: ${{ steps.plan.outputs.custody_sha256 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -213,20 +199,6 @@ jobs:
         run: |
           npm install --global npm@11.11.1
           npm ci
-      - name: Download registration produced by this preview
-        if: inputs.target == 'application' && inputs.reviewed_run == ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: registered-release
-          path: ${{ runner.temp }}/selected/
-      - name: Download original private preview including unchanged ZIP evidence
-        if: inputs.reviewed_run != ''
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: release-review
-          path: ${{ runner.temp }}/selected/
-          run-id: ${{ inputs.reviewed_run }}
-          github-token: ${{ github.token }}
       - name: Assume isolated plan role
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
         with:
@@ -238,32 +210,19 @@ jobs:
           unset-current-credentials: true
           mask-aws-account-id: true
           retry-max-attempts: 1
-      - name: Derive guarded review from saved binary and exact private inputs
+      - name: Read source custody, derive guarded review and keep it in private custody
         id: plan
         run: npm run release:workflow -- plan
         env:
-          RELEASE_SOURCE: ${{ inputs.target == 'application' || inputs.reviewed_run != '' }}
+          SOURCE_RUN_ID: ${{ inputs.reviewed_run != '' && inputs.reviewed_run || needs.register.outputs.custody_run_id }}
+          SOURCE_ATTEMPT: ${{ inputs.reviewed_run != '' && needs.authorize.outputs.reviewed_attempt || needs.register.outputs.custody_attempt }}
+          SOURCE_MANIFEST_SHA256: ${{ inputs.reviewed_run != '' && inputs.expected_review_sha256 || needs.register.outputs.custody_manifest_sha256 }}
           RELEASE_INPUTS_JSON: ${{ inputs.target == 'platform' && secrets.PLATFORM_INPUTS_JSON || secrets.APPLICATION_INPUTS_JSON }}
           RELEASE_BASELINE_JSON: ${{ inputs.target == 'platform' && secrets.PLATFORM_BASELINE_JSON || secrets.APPLICATION_BASELINE_JSON }}
           STATE_BUCKET: ${{ vars.STATE_BUCKET }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: release-review
-          path: ${{ runner.temp }}/release/
-          if-no-files-found: error
-          retention-days: 1
-          include-hidden-files: false
-      - name: Retain private failure diagnostics
-        if: ${{ failure() && github.event.repository.private == true }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: failure-diagnostics-plan-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/release-diagnostics/*.json
-            ${{ runner.temp }}/infra-diagnostics/*.json
-          retention-days: 1
-          if-no-files-found: ignore
-          include-hidden-files: false
+      - name: Keep failure diagnostics in private custody
+        if: failure()
+        run: npm run release:workflow -- diagnostics
   apply:
     needs: [authorize, plan]
     if: ${{ !cancelled() && needs.authorize.result == 'success' && needs.plan.result == 'success' && inputs.apply }}
@@ -291,13 +250,6 @@ jobs:
         run: |
           npm install --global npm@11.11.1
           npm ci
-      - name: Download this run's exact saved binary and private context
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: release-review
-          path: ${{ runner.temp }}/release/
-      - name: Restore private permissions after artifact download
-        run: npm run release:workflow -- secure
       - name: Assume isolated apply role
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
         with:
@@ -309,23 +261,15 @@ jobs:
           unset-current-credentials: true
           mask-aws-account-id: true
           retry-max-attempts: 1
-      - name: Recheck saved binary, apply once, prove both aliases and smoke
+      - name: Read this run's review custody, recheck saved binary, apply once, prove both aliases and smoke
         run: npm run release:workflow -- apply
         env:
-          EXPECTED_CUSTODY_SHA256: ${{ needs.plan.outputs.custody_sha256 }}
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: release-result
-          path: ${{ runner.temp }}/release/
-          if-no-files-found: error
-          retention-days: 1
-          include-hidden-files: false
-      - name: Retain private failure diagnostics
-        if: ${{ failure() && github.event.repository.private == true }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: failure-diagnostics-apply-${{ github.run_id }}
-          path: ${{ runner.temp }}/release-diagnostics/*.json
-          retention-days: 1
-          if-no-files-found: ignore
-          include-hidden-files: false
+          PLAN_CUSTODY_RUN_ID: ${{ needs.plan.outputs.custody_run_id }}
+          PLAN_CUSTODY_ATTEMPT: ${{ needs.plan.outputs.custody_attempt }}
+          PLAN_CUSTODY_MANIFEST_SHA256: ${{ needs.plan.outputs.custody_manifest_sha256 }}
+          REVIEWED_RUN: ${{ inputs.reviewed_run }}
+          REVIEWED_ATTEMPT: ${{ needs.authorize.outputs.reviewed_attempt }}
+          EXPECTED_REVIEW_SHA256: ${{ inputs.expected_review_sha256 }}
+      - name: Keep failure diagnostics in private custody
+        if: failure()
+        run: npm run release:workflow -- diagnostics
