@@ -22,7 +22,7 @@ callbackは`https://<extension-id>.chromiumapp.org/cognito`、sign-outは`https:
 
 Manifest V3では`identity`と`storage`権限を要求し、host_permissionsを実際のCognitoドメインとAPIドメインへ限定する。画像の取得にfetchを使う場合は、署名URLに使用する実際のS3画像バケットのホストも許可する。`<all_urls>`を認証通信のために要求しない。CSPにconnect-srcを設定する場合は同じ接続先を許可する。
 
-APIのCORS originに必要なのは拡張の`chrome-extension://<extension-id>`等の呼び出し元であり、認証のcallback URLとは別である。トークン交換・更新・API通信は拡張のService Workerに集約する。content scriptから任意URLを指定してBearer付きfetchを実行できるメッセージAPIを作らない。
+APIの呼び出し元のoriginは拡張の`chrome-extension://<extension-id>`等であり、認証のcallback URLとは別である。API GatewayのHTTP APIは`chrome-extension://`のCORS originを受け付けないため、originが`chrome-extension://`のときはAPIのCORSを設定しない。拡張のService Workerからのfetchは、host_permissionsにAPIドメインがあればCORSの対象外になる。HTTPSのoriginを使う場合だけ、APIはそのoriginに限ったCORSを返す。トークン交換・更新・API通信は拡張のService Workerに集約する。content scriptから任意URLを指定してBearer付きfetchを実行できるメッセージAPIを作らない。
 
 ## 2. ログイン
 
