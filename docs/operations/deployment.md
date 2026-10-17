@@ -303,12 +303,12 @@ custody bucketを持たない、bootstrap済みの環境を更新する手順で
 
 ### repository variableからsecretへの移行
 
-以前の手順では、`AWS_ACCOUNT_ID`、`STATE_BUCKET`、`ARTIFACT_BUCKET`、`ARTIFACT_ROLE_ARN`、`PLAN_ROLE_ARN`、`APPLY_ROLE_ARN` をrepository variableに設定していた。今の `deploy.yml` はこれらをsecretから読むので、次の順に移す。`AWS_REGION` はvariableのままにする。
+以前の手順では、`AWS_ACCOUNT_ID`、`STATE_BUCKET`、`ARTIFACT_BUCKET`、`ARTIFACT_ROLE_ARN`、`PLAN_ROLE_ARN`、`APPLY_ROLE_ARN` をrepository variableに設定していた。custody bucketを先に作った環境では、`CUSTODY_BUCKET` もrepository variableに設定している場合がある。今の `deploy.yml` はこれらをsecretから読むので、次の順に移す。`AWS_REGION` はvariableのままにする。
 
 1. 実行中、または承認待ちのdeployのrunが無いことを確かめる。
 2. 各値を、同じ名前のrepository secretに設定する。値はレビュー済みのbootstrapの入力とoutputから取る。
 3. secretを設定した後で、同じ名前のrepository variableを削除する。variableが残っていても `deploy.yml` は読まないが、設定の二重管理になる。
-4. 次のpreviewで、各jobがroleをassumeできることを確かめる。secretが無いと、値は空になり、assumeで失敗する。
+4. 次のpreviewが成功することを確かめる。各jobがroleをassumeでき、plan jobが `release-review` を書けていれば、設定はそろっている。secretが無いと値は空になり、assumeかcustodyの読み書きで失敗する。
 
 publicのrepositoryで以前の `deploy.yml` を実行していた場合、そのrunのログにrole ARNとaccount IDが残っている。必要なら、そのrunのログを削除する。
 

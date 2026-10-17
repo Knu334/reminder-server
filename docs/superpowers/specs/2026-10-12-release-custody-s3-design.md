@@ -93,6 +93,7 @@ prefix は `<種類>/<run_id>/<run_attempt>/` とする。`run_attempt` は、�
 - GitHub に出すのは、job summary の要約だけとする（root、commit、action の件数、`review_sha256`（manifest の SHA-256。16進数と、S3 コンソールの checksum と比べるための Base64 の両方）、custody の置き場所の run ID と `run_attempt`）。
 - `scripts/release/workflow.ts` は、apply の結果の ledger を標準出力に出さない。ledger は S3 に置き、標準出力と job summary には上の要約だけを出す。
 - authorize job の「private のリポジトリだけ」という検査を外す。`main` だけ、手動の dispatch だけ、`main` から到達できる commit だけ、という検査は残す。
+- public のリポジトリでは、runner が action の `with:` と step の `env:` の値をログに出し、repository variable は mask されない。そのため、role ARN（`ARTIFACT_ROLE_ARN`、`PLAN_ROLE_ARN`、`APPLY_ROLE_ARN`）、`AWS_ACCOUNT_ID`、account ID を含む bucket 名（`ARTIFACT_BUCKET`、`STATE_BUCKET`、`CUSTODY_BUCKET`）は GitHub の secret から、必要な step にだけ渡す。repository variable に残すのは `AWS_REGION` だけとする。既存の環境では、これらの variable を同じ名前の secret に移す。
 - `ci.yml` の失敗時の診断は、今のまま private のリポジトリのときだけ artifact にする。PR の CI は AWS の認証を持たないため、S3 には置けない。
 
 ## 権限
@@ -214,7 +215,7 @@ hash の照合は「内容が変わっていない」ことを確かめるだけ
 - operator の手順:
   1. 更新後の `infra/bootstrap` で、既存の backend の設定を使って `terraform init -backend-config=backend.hcl` を実行する。
   2. `terraform plan -out=...` を実行し、追加と role の policy の変更だけであることをレビューしてから apply する。
-  3. output `custody_bucket` を、repository variable `CUSTODY_BUCKET` に設定する。
+  3. output `custody_bucket` を、repository secret `CUSTODY_BUCKET` に設定する。
 - 移行の前に GitHub の artifact に置いたレビューは使えない。移行の後は、新しい preview を作ってから apply する。
 
 ## リポジトリを public に切り替えるとき
@@ -240,7 +241,7 @@ private のリポジトリを public に切り替える場合は、切り替え�
   - `upload-artifact` と `download-artifact` の step を削除し、custody の読み書きを role の assume の後に置く。
   - `repository.private` の条件を外す。
   - job の output と `needs` で、custody の置き場所を受け渡す。
-  - `CUSTODY_BUCKET` の variable を使う。
+  - `CUSTODY_BUCKET` の secret を使う。
 - `infra/bootstrap`: bucket、bucket policy、lifecycle、role の権限、output を追加する。
 
 ### 3つの digest の区別
@@ -305,7 +306,7 @@ private のリポジトリを public に切り替える場合は、切り替え�
 ## 文書
 
 - `docs/operations/deployment.md`:
-  - 新しい bucket、repository variable `CUSTODY_BUCKET`、lifecycle と利用期限を書く。
+  - 新しい bucket、repository secret `CUSTODY_BUCKET`、lifecycle と利用期限を書く。
   - S3 のコンソールでのレビューの手順（`plan.txt`、`request.json`）と、`post-baseline.json` を取り出して secret を更新する手順を書く。
   - 「bootstrap の更新」と「リポジトリを public に切り替えるとき」の手順を書く。
   - GitHub の artifact と、「private のリポジトリだけ」という前提の記述を書き換える。
