@@ -147,7 +147,8 @@ export function createPlanManifest(plan:unknown,binary:Uint8Array,inputs:Uint8Ar
   if(root==="platform"&&artifact!==null)throw new Error("Platform has no release artifact");
   const b=baseline===null?null:baselineSchema.parse(baseline),a=artifact===null?null:validateRegisteredArtifact(artifact);
   if(a&&a.commit!==commit)throw new Error("Artifact commit mismatch");
-  const review=inspectPlan(plan,b);if(!review.allowed)throw new Error("Plan protection failed");
+  // 拒否の address と code だけを入れる（ID、URL などの値は入れない）。文面は private な診断にだけ残る。
+  const review=inspectPlan(plan,b);if(!review.allowed)throw new Error(`Plan protection failed: ${review.violations.map(v=>`${v.address}:${v.code}`).join(", ")}`);
   const p=planSchema.parse(plan),own=root==="application"?appTypes:platformTypes,other=root==="application"?platformTypes:appTypes;
   if(p.resource_changes.some(r=>r.mode==="managed"&&(other.includes(r.type)||(root==="platform"&&["aws_apigatewayv2_route","aws_lambda_function"].includes(r.type))))||own.some(t=>p.resource_changes.filter(r=>r.mode==="managed"&&r.type===t).length!==1))throw new Error("Wrong root protected structure");
   if(b===null&&p.resource_changes.some(r=>r.mode==="managed"&&own.includes(r.type)&&(r.change.before!==null||!same(r.change.actions,["create"]))))throw new Error("Existing platform requires a baseline");
