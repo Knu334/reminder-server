@@ -416,6 +416,23 @@ void test('suite driver runs sequentially and resolves logs before reset and ski
   assert.deepEqual(order, ['create:harness', 'action:SAFE-01/one', 'flush:harness', 'reset:harness', 'blocked:SAFE-01/two']);
 });
 
+void test('progress lines carry elapsed seconds and a fixed prefix', async () => {
+  const { progressLine } = await import('../../../scripts/e2e/run.ts');
+  assert.equal(progressLine(1_000, 13_499, 'phase provision'), 'E2E_PROGRESS +12s phase provision');
+  assert.equal(progressLine(1_000, 1_000, 'phase preflight'), 'E2E_PROGRESS +0s phase preflight');
+});
+
+void test('suite driver reports progress with suite names and counts only', async () => {
+  // 公開のログに出る進捗は、固定の suite 名と件数だけにする（resource 名、ID、エラーの文面は出さない）。
+  const { executeSuites } = await import('../../../scripts/e2e/run.ts'); const lines: string[] = [];
+  const defs = [definition('SAFE-01/one'), definition('SAFE-01/two'), { ...definition('SAFE-01/three'), suite: 'second' }, { ...definition('SAFE-01/four'), suite: 'third' }];
+  await executeSuites(defs, {
+    async create(suite) { return { suite }; }, async action(def) { if (def.id === 'SAFE-01/three') throw new Error('secret-resource-name failed'); }, async flush() {}, async reset() {}, async blocked() {},
+    progress: line => lines.push(line),
+  });
+  assert.deepEqual(lines, ['suite harness start cases=2', 'suite harness done cases=2', 'suite second start cases=1', 'suite second failed started=1/1', 'suite third blocked cases=1']);
+});
+
 void test('local SDK transport copies byte views without calling unsafe adapter string conversion', async t => {
   const { localS3 } = await import('../../../scripts/e2e/terraform.ts'); const client = localS3(target); t.after(() => client.destroy());
   let input = Buffer.alloc(0); t.mock.method(http, 'request', (_url: URL, _options: http.RequestOptions, callback: (response: http.IncomingMessage) => void) => { const outgoing = new PassThrough(); outgoing.on('data', chunk => { input = Buffer.concat([input, chunk]); }); const response = Readable.from([Buffer.from('{}')]) as http.IncomingMessage; response.statusCode = 200; response.rawHeaders = []; process.nextTick(() => callback(response)); return outgoing; });
