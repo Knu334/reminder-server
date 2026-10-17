@@ -366,6 +366,7 @@ CIはNode 24.21.0/npm 11.11.1、Python 3.13.16、Terraform 1.16.5と、checked-i
 
 ローカルの `infra:check` の失敗は `<RUNNER_TEMP or OS temp>/infra-diagnostics` を、releaseコマンドは `release-diagnostics` を使う。
 
+- releaseの照合（manifest、期限、planのdigest、入力の一致など）でworkflow自身が止まった場合、通常のログには固定の文言 `Protected release denied` だけが出る。エラーの文面は、phase `workflow` の診断として `release-diagnostics` に書かれ、上の手順で `failure-diagnostics/` に置かれる。原因は、この診断の `stderr` で確かめる。
 - JSON fileには、phase、exitStatus、signal/errorCode、上限付きの診断を記録する。各streamが保持するのは最大128KiBで、残る失敗fileは最大8個である。
 - 1日より古いfileは、次の失敗時に削除される。その後コマンドを実行しない場合でも、ローカルの診断は1日以内に削除する。
 - 成功時の出力、コマンド引数、環境変数は決して永続化しない。plan/show/outputのstdoutは省略する。

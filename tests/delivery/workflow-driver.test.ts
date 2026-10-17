@@ -291,6 +291,19 @@ void test("plan_summary_lists_only_allowed_fields",async()=>{
     assert.equal(result.stdout,"");assert.equal(result.stderr,"");
   }finally{await f.cleanup();}
 });
+void test("workflow_error_is_kept_only_as_private_diagnostic",async()=>{
+  const f=await fixture();try{
+    const ref=await f.src(),secrets=fixtureSecrets(f);const failing:ReleaseServices={...f.services,run:async(c,a)=>{if(a[1]==="plan")throw Error(`New plan differs for ${secrets[0]}`);return f.services.run(c,a);}};
+    const result=await cli(f,"plan",{SOURCE_RUN_ID:ref.location.runId,SOURCE_ATTEMPT:"1",SOURCE_MANIFEST_SHA256:ref.manifestSha256},failing);
+    assert.equal(result.code,1);
+    for(const text of [result.stdout,result.stderr,result.summary,result.output])assert.equal(text.includes("New plan differs"),false);
+    const directory=join(f.runnerTemp,"release-diagnostics"),names=await readdir(directory);
+    assert.equal(names.length,1);assert.match(names[0]!,/^failure-[0-9]+-[0-9a-f-]+\.json$/);
+    assert.equal((await stat(directory)).mode&0o777,0o700);assert.equal((await stat(join(directory,names[0]!))).mode&0o777,0o600);
+    const kept=JSON.parse(await readFile(join(directory,names[0]!),"utf8")) as Record<string,unknown>;
+    assert.equal(kept.phase,"workflow");assert.match(String(kept.stderr),/New plan differs/);
+  }finally{await f.cleanup();}
+});
 void test("plan_failure_leaks_no_fixture_values_at_cli_boundary",async()=>{
   const f=await fixture();try{
     const ref=await f.src(),secrets=fixtureSecrets(f);const failing:ReleaseServices={...f.services,run:async(c,a)=>{if(a[1]==="plan")throw Error(`terraform failed for ${secrets.join(" ")}`);return f.services.run(c,a);}};
