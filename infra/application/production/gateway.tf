@@ -2,12 +2,17 @@ resource "aws_apigatewayv2_api" "production" {
   name                         = "${local.production}-api"
   protocol_type                = "HTTP"
   disable_execute_api_endpoint = false
-  cors_configuration {
-    allow_origins     = [var.chrome_origin]
-    allow_methods     = ["GET", "POST", "PATCH", "DELETE", "PUT", "OPTIONS"]
-    allow_headers     = ["authorization", "content-type", "if-match"]
-    expose_headers    = ["ETag", "Location", "X-Request-Id", "Retry-After", "Allow"]
-    allow_credentials = false
+  # API Gateway の HTTP API は chrome-extension:// の CORS origin を拒否する。拡張機能の service worker は
+  # host_permissions に API の domain があれば CORS の対象外なので、CORS は HTTPS の origin のときだけ作る。
+  dynamic "cors_configuration" {
+    for_each = startswith(var.chrome_origin, "https://") ? [var.chrome_origin] : []
+    content {
+      allow_origins     = [cors_configuration.value]
+      allow_methods     = ["GET", "POST", "PATCH", "DELETE", "PUT", "OPTIONS"]
+      allow_headers     = ["authorization", "content-type", "if-match"]
+      expose_headers    = ["ETag", "Location", "X-Request-Id", "Retry-After", "Allow"]
+      allow_credentials = false
+    }
   }
   lifecycle {
     prevent_destroy = true

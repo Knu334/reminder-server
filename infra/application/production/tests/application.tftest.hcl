@@ -110,6 +110,15 @@ run "jwt_routes_and_cors_are_exact" {
     error_message = "Only v2 routes use JWT/read-write scopes; health, ready and legacy410 are public, OPTIONS is Gateway CORS."
   }
   assert {
+    # API Gateway の HTTP API は chrome-extension:// の CORS origin を拒否する。拡張機能の service worker は host_permissions で CORS の対象外になる。
+    condition     = length(aws_apigatewayv2_api.production.cors_configuration) == 0
+    error_message = "A Chrome extension origin must not be sent to API Gateway CORS, which rejects that scheme."
+  }
+}
+run "https_origin_keeps_exact_cors" {
+  command = plan
+  variables { chrome_origin = "https://extension.example.test" }
+  assert {
     condition     = aws_apigatewayv2_api.production.cors_configuration[0].allow_origins == toset([var.chrome_origin]) && aws_apigatewayv2_api.production.cors_configuration[0].allow_methods == toset(["GET", "POST", "PATCH", "DELETE", "PUT", "OPTIONS"]) && aws_apigatewayv2_api.production.cors_configuration[0].allow_headers == toset(["authorization", "content-type", "if-match"]) && aws_apigatewayv2_api.production.cors_configuration[0].expose_headers == toset(["ETag", "Location", "X-Request-Id", "Retry-After", "Allow"]) && !aws_apigatewayv2_api.production.cors_configuration[0].allow_credentials
     error_message = "CORS needs exact origin and supported request/response headers without credentials or wildcard."
   }
