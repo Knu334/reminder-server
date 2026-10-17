@@ -118,8 +118,17 @@ void test("protects_literal_api_runtime_auth_and_both_lambda_artifact_inputs",()
 });
 
 void test("fallback allowlist rejects greedy or default routes and any auth drift",()=>{
- for(const bad of [{route_key:"ANY /{proxy+}"},{route_key:"$default"},{authorization_type:"JWT"},{authorization_scopes:["reminder-api/read"]}]){
+ for(const bad of [{route_key:"ANY /{proxy+}"},{route_key:"$default"},{authorization_type:"JWT"},{authorization_scopes:["reminder-api/read"]},{authorization_scopes:"none"}]){
   const p=applicationPlan();const fallback=p.resource_changes.find(r=>r.change.after.route_key==="ANY /v2/reminders")!;
   Object.assign(fallback.change.after,bad);assert.equal(inspectPlan(p,baseline).allowed,false);
  }
+});
+void test("fallback_route_accepts_provider_null_for_empty_scopes",()=>{
+  // AWS provider（SDKv2）は、設定の空の authorization_scopes を plan では null にする。空と同じ意味として扱う。
+  for(const empty of [null,undefined]){
+    const p=applicationPlan();for(const r of p.resource_changes)if(typeof r.change.after?.route_key==="string"&&r.change.after.route_key.startsWith("ANY ")){if(empty===null)r.change.after.authorization_scopes=null;else delete r.change.after.authorization_scopes;}
+    assert.deepEqual(inspectPlan(p,baseline).violations,[]);
+  }
+  const p=applicationPlan(),fallback=p.resource_changes.find(r=>r.change.after.route_key==="ANY /v2/reminders")!;
+  fallback.change.after.authorization_scopes=null;(fallback.change.after_unknown as Record<string,unknown>).authorization_scopes=true;assert.equal(inspectPlan(p,baseline).allowed,false);
 });
