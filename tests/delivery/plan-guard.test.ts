@@ -35,6 +35,18 @@ void test("blocks_signup_or_longer_access_token_and_auth_reopening",()=>{
   ].map(bad=>(p:ReturnType<typeof platformPlan>)=>Object.assign(p.resource_changes[1]!.change.after,bad)),(p:ReturnType<typeof platformPlan>)=>{p.resource_changes[1]!.change.after_unknown={allowed_oauth_scopes:true};}];
   assert.equal(inspectPlan(platformPlan(),platformBaseline).allowed,true);for(const mutate of mutations){const p=platformPlan();mutate(p);assert.equal(inspectPlan(p,platformBaseline).allowed,false);}
 });
+void test("review_digest_treats_root_relevant_attributes_as_a_set",()=>{
+  // Terraform は root の relevant_attributes を実行ごとに違う順番で出す。並びは無視し、中身は束縛する。
+  const ra=[{resource:"aws_s3_bucket.images",attribute:["arn"]},{resource:"aws_cognito_user_pool.main",attribute:["id"]},{resource:"aws_dynamodb_table.data[\"reminders\"]",attribute:["name"]}];
+  const a={...applicationPlan(),relevant_attributes:ra},b={...applicationPlan(),relevant_attributes:[ra[2],ra[0],ra[1]]};
+  assert.equal(reviewPlanSha256(a),reviewPlanSha256(b));
+  assert.notEqual(reviewPlanSha256(a),reviewPlanSha256({...a,relevant_attributes:[ra[0],ra[1]]}));
+  assert.notEqual(reviewPlanSha256(a),reviewPlanSha256({...a,relevant_attributes:[ra[0],ra[1],{...ra[2],attribute:["arn"]}]}));
+  assert.notEqual(reviewPlanSha256({...a,relevant_attributes:[ra[0],ra[0]]}),reviewPlanSha256({...a,relevant_attributes:[ra[0]]}));
+  // root 以外の配列の順番は今までどおり束縛する。
+  assert.notEqual(reviewPlanSha256({nested:{relevant_attributes:[1,2]}}),reviewPlanSha256({nested:{relevant_attributes:[2,1]}}));
+  assert.throws(()=>reviewPlanSha256({relevant_attributes:"bad"}));
+});
 void test("review_digest_removes_only_root_timestamp_and_keeps_array_order",()=>{
   const a=applicationPlan(),b=applicationPlan();b.timestamp="other";assert.equal(reviewPlanSha256(a),reviewPlanSha256(b));
   assert.equal(reviewPlanSha256({b:2,a:1}),"43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777");
