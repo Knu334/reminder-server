@@ -33,6 +33,19 @@ GitHub Actionsの `deploy.yml` を使って、本番のAWS環境を構築し、Z
 
 bootstrap rootを作成した後（[初回の構築](#初回の構築)の手順1）、そのレビュー済みのprivate outputから設定する。
 
+設定する場所の一覧:
+
+| 設定する場所 | 名前 | 読むjob |
+| --- | --- | --- |
+| environment `production-artifact` | secretは無い（保護の設定だけ） | register |
+| environment `production-plan` | secret `PLATFORM_INPUTS_JSON`、`APPLICATION_INPUTS_JSON`、`PLATFORM_BASELINE_JSON`、`APPLICATION_BASELINE_JSON` | plan |
+| environment `production` | secretは無い（保護の設定だけ） | apply |
+| repository secret | `AWS_ACCOUNT_ID`、`ARTIFACT_ROLE_ARN`、`PLAN_ROLE_ARN`、`APPLY_ROLE_ARN`、`ARTIFACT_BUCKET`、`STATE_BUCKET`、`CUSTODY_BUCKET` | register、plan、apply（必要なstepだけ） |
+| repository variable | `AWS_REGION` | すべて |
+
+- environment secretが必要なのは `production-plan` だけである。ほかの2つのenvironmentには、deployment branchの制限やrequired reviewersなどの保護だけを設定する。
+- environment secretと同じ名前のrepository secretがあると、jobの中ではenvironment secretが優先される。repository secretの7つは、environmentに同じ名前で置かない。
+
 ### environment
 
 - 3つのenvironment `production-artifact`、`production-plan`、`production` を設定し、いずれもdeployment branchをmainに限定する。
