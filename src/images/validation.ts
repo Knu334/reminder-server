@@ -9,23 +9,44 @@ function invalidImage(): never {
 }
 
 function identifyMime(data: Buffer): string {
-  if (data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "image/png";
-  if (data.length >= 3 && data[0] === 255 && data[1] === 216 && data[2] === 255) return "image/jpeg";
+  if (
+    data.length >= 8 &&
+    data.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+  )
+    return "image/png";
+  if (data.length >= 3 && data[0] === 255 && data[1] === 216 && data[2] === 255)
+    return "image/jpeg";
   const gif = data.toString("latin1", 0, 6);
   if (gif === "GIF87a" || gif === "GIF89a") return "image/gif";
-  if (data.length >= 12 && data.toString("latin1", 0, 4) === "RIFF" && data.toString("latin1", 8, 12) === "WEBP") return "image/webp";
+  if (
+    data.length >= 12 &&
+    data.toString("latin1", 0, 4) === "RIFF" &&
+    data.toString("latin1", 8, 12) === "WEBP"
+  )
+    return "image/webp";
   return invalidImage();
 }
 
 /** Sniff supported signatures and preserve the original bytes; no image transcoding. */
-export function decodeThumbnail(value: string | null, maxBytes = MAX_IMAGE_BYTES): DecodedImage | null {
+export function decodeThumbnail(
+  value: string | null,
+  maxBytes = MAX_IMAGE_BYTES,
+): DecodedImage | null {
   if (value === null || value === "") return null;
   let payload = value;
   let declaredMime: string | undefined;
   if (value.startsWith("data:")) {
     const comma = value.indexOf(",");
     const header = value.slice(0, comma);
-    if (!["data:image/png;base64", "data:image/jpeg;base64", "data:image/gif;base64", "data:image/webp;base64"].includes(header)) return invalidImage();
+    if (
+      ![
+        "data:image/png;base64",
+        "data:image/jpeg;base64",
+        "data:image/gif;base64",
+        "data:image/webp;base64",
+      ].includes(header)
+    )
+      return invalidImage();
     declaredMime = header.slice(5, -7);
     payload = value.slice(comma + 1);
   }
@@ -39,10 +60,12 @@ export function decodeThumbnail(value: string | null, maxBytes = MAX_IMAGE_BYTES
     if (code >= 48 && code <= 57) return code + 4;
     return code === 43 ? 62 : code === 47 ? 63 : -1;
   }
-  for (let index = 0; index < end; index++) if (digit(payload.charCodeAt(index)) < 0) return invalidImage();
+  for (let index = 0; index < end; index++)
+    if (digit(payload.charCodeAt(index)) < 0) return invalidImage();
   const last = digit(payload.charCodeAt(end - 1));
-  if ((padding === 2 && (last & 15) !== 0) || (padding === 1 && (last & 3) !== 0)) return invalidImage();
-  const bytes = payload.length / 4 * 3 - padding;
+  if ((padding === 2 && (last & 15) !== 0) || (padding === 1 && (last & 3) !== 0))
+    return invalidImage();
+  const bytes = (payload.length / 4) * 3 - padding;
   const mime = identifyMime(Buffer.from(payload.slice(0, 16), "base64"));
   if (declaredMime !== undefined && declaredMime !== mime) return invalidImage();
   if (bytes > maxBytes) throw new ApiError(413, "THUMBNAIL_TOO_LARGE", "Thumbnail too large");

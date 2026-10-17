@@ -1,7 +1,10 @@
 import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 
 /** Replace only SDK transport: real command objects and adapter code still execute. */
-export function captureCommands(replies: unknown[]): { client: DynamoDBDocumentClient; sent: unknown[] } {
+export function captureCommands(replies: unknown[]): {
+  client: DynamoDBDocumentClient;
+  sent: unknown[];
+} {
   const sent: unknown[] = [];
   const client = {
     send(command: unknown): Promise<unknown> {

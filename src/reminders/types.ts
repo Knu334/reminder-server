@@ -35,9 +35,15 @@ export interface ReminderDto extends ReminderFields {
   updatedAt: string;
   thumbnail: Pick<ImageRef, "imageId" | "mime" | "bytes" | "sha256"> | null;
 }
-export interface CreateInput extends ReminderFields { thumbnail: string | null }
+export interface CreateInput extends ReminderFields {
+  thumbnail: string | null;
+}
 export type PatchInput = Partial<Omit<CreateInput, "id">>;
-export interface Representation { dto: ReminderDto; body: string; etag: string }
+export interface Representation {
+  dto: ReminderDto;
+  body: string;
+  etag: string;
+}
 export interface ChangeSet {
   ownerId: OwnerId;
   previous: ActiveReminder | null;
@@ -47,4 +53,7 @@ export interface ChangeSet {
   jobs: JobTransition[];
   clientRequestToken: string;
 }
-export interface QueryPage { records: StoredReminder[]; lastId: string | null }
+export interface QueryPage {
+  records: StoredReminder[];
+  lastId: string | null;
+}

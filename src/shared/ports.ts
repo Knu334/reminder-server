@@ -1,12 +1,31 @@
 import type { ChangeSet, OwnerId, QueryPage, StoredReminder } from "../reminders/types";
-import type { CleanupCheckpoint, CleanupPage, CleanupPartition, DecodedImage, ImageHead, ImageJob, ImageRef } from "../images/types";
+import type {
+  CleanupCheckpoint,
+  CleanupPage,
+  CleanupPartition,
+  DecodedImage,
+  ImageHead,
+  ImageJob,
+  ImageRef,
+} from "../images/types";
 
-export interface Budget { signal: AbortSignal; remainingMs(): number }
-export interface PublicationGate { published: boolean; runId: string | null }
+export interface Budget {
+  signal: AbortSignal;
+  remainingMs(): number;
+}
+export interface PublicationGate {
+  published: boolean;
+  runId: string | null;
+}
 /** Each adapter must validate DB records before returning them. */
 export interface RemindersStore {
   get(ownerId: OwnerId, id: string, budget: Budget): Promise<StoredReminder | null>;
-  query(ownerId: OwnerId, limit: number, afterId: string | null, budget: Budget): Promise<QueryPage>;
+  query(
+    ownerId: OwnerId,
+    limit: number,
+    afterId: string | null,
+    budget: Budget,
+  ): Promise<QueryPage>;
   commit(change: ChangeSet, budget: Budget): Promise<void>;
 }
 export interface OwnerStore {
@@ -26,7 +45,12 @@ export interface JobsStore {
   createPending(job: ImageJob, budget: Budget): Promise<void>;
   recordUpload(ref: ImageRef, budget: Budget): Promise<void>;
   get(jobId: string, budget: Budget): Promise<ImageJob | null>;
-  queryDue(partition: CleanupPartition, cutoffMs: number, after: Record<string, string> | null, budget: Budget): Promise<CleanupPage>;
+  queryDue(
+    partition: CleanupPartition,
+    cutoffMs: number,
+    after: Record<string, string> | null,
+    budget: Budget,
+  ): Promise<CleanupPage>;
   claim(jobId: string, runId: string, nowMs: number, budget: Budget): Promise<ImageJob | null>;
   complete(jobId: string, runId: string, budget: Budget): Promise<void>;
   checkpoint(budget: Budget): Promise<CleanupCheckpoint>;
