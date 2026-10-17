@@ -122,6 +122,10 @@ export async function runConstruction(evidence: Evidence, definition: CaseDefini
 export async function recordConstructionDependents(evidence: Evidence, selected: CaseDefinition[], stack?: ProvisionedStack): Promise<void> {
   for (const def of selected.filter(def => def.id !== 'TF-01/apply')) await evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: stack?.constructionOutputs.length ? 'implementation-pending' : 'prerequisite-failed' });
 }
+/** 公開のログに出す進捗の1行。経過秒と固定の文言だけを入れる（resource 名、ID、エラーの文面は入れない）。 */
+export function progressLine(startedMs: number, nowMs: number, text: string): string {
+  return `E2E_PROGRESS +${Math.floor((nowMs - startedMs) / 1000)}s ${text}`;
+}
 /** A run claims full completion only for the whole registry with no failure, no not-run case and a clean recovery; a passing subset is partial. */
 export function claimsFullCompletion(summary: RunSummary, selected: number, inventory: number): boolean {
   return selected === inventory && summary.selected === inventory && summary.exitCode === 0 && summary.failed === 0 && summary.notRun === 0 &&
@@ -142,6 +146,7 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
   if (!['floci', 'terraform'].includes(layer) || !selected.length) { console.error('E2E_INVALID_SELECTION'); return 2; }
   const partial = selected.length !== definitions.length || suite !== undefined || caseId !== undefined || layer === 'terraform';
   console.log(partial ? 'E2E_PARTIAL_SELECTION' : 'E2E_FOUNDATION_INVENTORY');
+  const startedMs = Date.now(); const progress = (text: string): void => { console.log(progressLine(startedMs, Date.now(), text)); };
   const budget = new RunBudget();
   let exit: 0 | 1 | 2 = 1; let driverFailed = false; let suiteErrors = 0;
   const controller = new AbortController(); const cancel = () => controller.abort();
@@ -156,12 +161,13 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
     try {
       if (!live.length) {
         // An I-only selection needs no Floci, Terraform or fixture: nothing is probed or constructed.
-        phase = 'offline'; await runIntegrationCases(evidence, integration, { budget, signal: controller.signal });
+        phase = 'offline'; progress(`phase offline cases=${integration.length}`); await runIntegrationCases(evidence, integration, { budget, signal: controller.signal });
       } else {
+      progress('phase preflight');
       const { preflight } = await import('./preflight.ts');
       const target = await preflight(result => recordProcess(evidence, result));
-      phase = 'offline'; await runIntegrationCases(evidence, integration, { budget, signal: controller.signal });
-      phase = 'provision';
+      phase = 'offline'; progress(`phase offline cases=${integration.length}`); await runIntegrationCases(evidence, integration, { budget, signal: controller.signal });
+      phase = 'provision'; progress('phase provision');
       const definition = layer === 'terraform' ? selected.find(def => def.id === 'TF-01/apply') : inventory.find(def => def.id === 'TF-01/apply');
       if (definition) {
         if (!budget.allow('terraform') || controller.signal.aborted) await evidence.record({ id: definition.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'budget-exhausted' });
@@ -177,7 +183,7 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
         }
       }
       if (layer !== 'terraform' && stack?.constructionOutputs.length === 4) {
-        phase = 'fixture'; const { createRunFixture, readDeployedSettings } = await import('../../tests/e2e/floci/support/fixture.ts');
+        phase = 'fixture'; progress('phase fixture'); const { createRunFixture, readDeployedSettings } = await import('../../tests/e2e/floci/support/fixture.ts');
         fixture = await createRunFixture(stack, evidence, { budget, signal: controller.signal });
         const ready = await runFixturePrerequisites(evidence, live, fixture);
         const remaining = live.filter(def => !['TF-01/apply', 'TF-03/settings', 'TF-03/settings-final', 'OBS-02/smoke', 'OBS-03/gateway-refusal', 'OBS-04/gateway-delivery'].includes(def.id));
@@ -192,11 +198,13 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
             async flush(suite) { const state = suiteLogStates.get(suite)!; await flushPendingLogs(evidence, async checks => { capCleanupGrace(state, checks); const results = await state.observer.flush(checks, Math.max(state.lastInput, fixtureState(suite).lastInput), 60_000, () => cleanupChecksMatch(state)); return results.map(result => ({ ...result, matched: result.matched && cleanupCaseMatches(state, result.caseId) })); }); },
             reset: suite => suite.resetSuite(),
             blocked: def => evidence.record({ id: def.id, status: 'not-run', phase: 'provision', durationMs: 0, reason: 'prerequisite-failed' }),
+            progress,
           });
           suiteErrors += suiteResult.errors;
         }
         await recordUnstarted(evidence, remaining, ready);
         const finalSettings = live.find(def => def.id === 'TF-03/settings-final');
+        progress('phase settings-final');
         const { fixtureState } = await import('../../tests/e2e/floci/support/fixture.ts');
         if (fixtureState(fixture).settingsComplete) {
           if (finalSettings) await runCase(finalSettings, evidence, async recorder => { await readDeployedSettings(fixture!); for (const output of finalSettings.outputs) recorder.recordOutput({ kind: output.kind, status: 'pass', assertions: output.assertions.map(name => ({ name, status: 'pass' })) }); });
@@ -209,7 +217,7 @@ export async function runMain(argv: string[]): Promise<0 | 1 | 2> {
       for (const def of selected) { try { await evidence.record({ id: def.id, status: 'not-run', phase: phase === 'preflight' ? 'preflight' : 'provision', durationMs: 0, reason: phase === 'preflight' ? 'preflight-failed' : 'prerequisite-failed' }); } catch (error) { if (!(error instanceof Error) || error.message !== 'INVALID_CASE_TRANSITION') throw error; } }
     } finally {
       await finalizeResults(evidence);
-      budget.beginCleanup();
+      progress('phase cleanup'); budget.beginCleanup();
       let cleanup = { attempted: 0, succeeded: 0, errors: 0, leaks: 0 };
       if (stack) cleanup = await disposeRunOwned(stack, fixture);
       cleanup.errors += suiteErrors + (driverFailed ? 1 : 0);
@@ -288,14 +296,16 @@ export async function runFixturePrerequisites(evidence: Evidence, selected: Case
   return fixtureState(fixture).smokeComplete;
 }
 
-export async function executeSuites<T>(selected: CaseDefinition[], hooks: { create(suite: string): Promise<T>; action(def: CaseDefinition, suite: T): Promise<void>; flush(suite: T): Promise<void>; reset(suite: T): Promise<unknown>; blocked(def: CaseDefinition): Promise<void> }): Promise<{ errors: number }> {
+/** Suite の進捗は、固定の suite 名と件数だけを progress に渡す（resource 名、ID、エラーの文面は渡さない）。 */
+export async function executeSuites<T>(selected: CaseDefinition[], hooks: { create(suite: string): Promise<T>; action(def: CaseDefinition, suite: T): Promise<void>; flush(suite: T): Promise<void>; reset(suite: T): Promise<unknown>; blocked(def: CaseDefinition): Promise<void>; progress?(line: string): void }): Promise<{ errors: number }> {
   let blocked = false; let errors = 0;
   for (const name of new Set(selected.map(def => def.suite))) {
     const definitions = selected.filter(def => def.suite === name);
-    if (blocked) { for (const def of definitions) await hooks.blocked(def); continue; }
+    if (blocked) { hooks.progress?.(`suite ${name} blocked cases=${definitions.length}`); for (const def of definitions) await hooks.blocked(def); continue; }
     let suite: T | undefined; let started = 0; let flushAttempted = false;
-    try { suite = await hooks.create(name); for (const def of definitions) { started++; await hooks.action(def, suite); } flushAttempted = true; await hooks.flush(suite); const cleanup = await hooks.reset(suite) as { errors?: number; leaks?: number } | undefined; if (cleanup?.errors || cleanup?.leaks) throw new Error('RESET_FAILED'); }
-    catch { blocked = true; errors++; if (suite && !flushAttempted) { try { await hooks.flush(suite); } catch { /* executed cases retain their failure */ } } for (const def of definitions.slice(started)) await hooks.blocked(def); }
+    hooks.progress?.(`suite ${name} start cases=${definitions.length}`);
+    try { suite = await hooks.create(name); for (const def of definitions) { started++; await hooks.action(def, suite); } flushAttempted = true; await hooks.flush(suite); const cleanup = await hooks.reset(suite) as { errors?: number; leaks?: number } | undefined; if (cleanup?.errors || cleanup?.leaks) throw new Error('RESET_FAILED'); hooks.progress?.(`suite ${name} done cases=${definitions.length}`); }
+    catch { blocked = true; errors++; hooks.progress?.(`suite ${name} failed started=${started}/${definitions.length}`); if (suite && !flushAttempted) { try { await hooks.flush(suite); } catch { /* executed cases retain their failure */ } } for (const def of definitions.slice(started)) await hooks.blocked(def); }
   }
   return { errors };
 }

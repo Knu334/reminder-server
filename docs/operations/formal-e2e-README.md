@@ -61,6 +61,13 @@ layer Iの24件は、同じrunの中で、`offlineEvidence`（`tests/e2e/floci/s
 
 ## 結果の読み方
 
+実行中は、最初の `E2E_FOUNDATION_INVENTORY`（部分選択では `E2E_PARTIAL_SELECTION`）の後に、`E2E_PROGRESS +<経過秒>s <内容>` の行が出る。内容は次のどれかで、固定の段階名、suite名、件数だけを含む。resource名、ID、エラーの文面は出さない。
+
+- `phase preflight`、`phase offline cases=<n>`、`phase provision`、`phase fixture`、`phase settings-final`、`phase cleanup`
+- `suite <suite名> start cases=<n>`、`suite <suite名> done cases=<n>`、`suite <suite名> failed started=<開始した数>/<n>`、`suite <suite名> blocked cases=<n>`
+
+`done` はsuiteを最後まで実行したことを表すだけで、各caseの合否は最後のJSONとevidenceで確かめる。
+
 出力の最後のJSONに `selected`、`passed`、`failed`、`notRun`、`unsupported`、`cleanup`、`exitCode`、`complete` が出る。
 
 - `complete` が真になるのは、registry全件を選び、failとnot-runが0で、回収に失敗も漏れも無いときだけである。部分選択は偽になる。測定済みの互換性調査のunsupportedは、`complete` を妨げない。layer Iの24件は、offlineの実測で合格すれば他のcaseと同じに数える（2026-10-12のユーザー判断）。
