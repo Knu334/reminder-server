@@ -95,12 +95,14 @@ locals {
   runtime_ceiling_statements = {
     for key, statements in local.runtime_operations : key => concat(
       [for statement in local.runtime_allow_operations[key] : merge(statement, { Effect = "Allow" }, key == "scheduler" ? {} : { Condition = merge(local.runtime_source_conditions[key], contains(statement.Action, "cloudwatch:PutMetricData") ? { StringEquals = { "cloudwatch:namespace" = "ReminderServer", "aws:RequestedRegion" = var.region } } : {}) })],
-      # Lambda decrypts a function's environment with its execution role session; the default
+      # Lambda decrypts a function's environment by calling KMS directly with the execution
+      # role's credentials (CloudTrail shows no invokedBy and no kms:ViaService). The default
       # aws/lambda key needs no Allow, but an explicit Deny breaks every invocation. Keep
-      # kms:Decrypt out of the catch-all Deny and deny it whenever it is not via Lambda.
+      # kms:Decrypt out of the catch-all Deny and deny it for every key but alias/aws/lambda
+      # (ForAllValues is also true for a key without aliases, so those stay denied).
       # https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars-encryption.html
       [{ Effect = "Deny", NotAction = key == "scheduler" ? local.runtime_actions[key] : concat(local.runtime_actions[key], ["kms:Decrypt"]), Resource = ["*"] }],
-      key == "scheduler" ? [] : [{ Effect = "Deny", Action = ["kms:Decrypt"], Resource = ["*"], Condition = { StringNotEquals = { "kms:ViaService" = "lambda.${var.region}.amazonaws.com" } } }],
+      key == "scheduler" ? [] : [{ Effect = "Deny", Action = ["kms:Decrypt"], Resource = ["*"], Condition = { "ForAllValues:StringNotEquals" = { "kms:ResourceAliases" = "alias/aws/lambda" } } }],
       # Explicit resource denials close session resource-policy escape paths.
       [for statement in statements : { Effect = "Deny", Action = statement.Action, NotResource = statement.Resource } if !contains(statement.Resource, "*")],
       key == "scheduler" ? [] : [{ Effect = "Deny", Action = local.runtime_function_guard_actions[key], Resource = ["*"], Condition = { ArnNotEquals = { "lambda:SourceFunctionArn" = local.runtime_function_arns[key] } } }],
