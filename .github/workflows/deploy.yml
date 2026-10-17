@@ -122,7 +122,6 @@ jobs:
           umask 077
           mkdir -m 700 "$RUNNER_TEMP/registered"
           {
-            git diff --exit-code 253e5e2 -- .devcontainer
             npm run typecheck
             npm run lint
             npm run test:runtime

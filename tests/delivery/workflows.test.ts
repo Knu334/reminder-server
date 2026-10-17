@@ -122,6 +122,10 @@ void test("deploy_uses_no_github_artifacts_or_visibility_gate",()=>{
   const text=readFileSync(".github/workflows/deploy.yml","utf8");
   for(const banned of ["upload-artifact","download-artifact","repository.private","release:workflow -- secure"])assert.equal(text.includes(banned),false,`deploy.yml must not use ${banned}`);
 });
+void test("deploy_does_not_gate_on_devcontainer",()=>{
+  // .devcontainer は ZIP にも Terraform にも入らない。開発環境の変更で deploy を止めない。
+  assert.equal(readFileSync(".github/workflows/deploy.yml","utf8").includes(".devcontainer"),false);
+});
 const stepIndex=(job:Job,predicate:(s:Step)=>boolean):number=>{const i=job.steps.findIndex(predicate);assert.ok(i>=0);return i;};
 void test("custody_runs_only_after_role_assumption",()=>{
   const d=workflow("deploy");
