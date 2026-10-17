@@ -1,6 +1,6 @@
 import {isDeepStrictEqual} from "node:util";
 import {requireRuntimeData, selectedRuntimeData, verifyRuntimeDataOutputs} from "./runtime-data";
-import {runPrivateCommand,PrivateCommandError} from "./private-command";
+import {keepWorkflowDiagnostic,runPrivateCommand,PrivateCommandError} from "./private-command";
 import {tmpdir} from "node:os";
 import {createHash} from "node:crypto";
 import {chmod,copyFile,lstat,mkdir,mkdtemp,readFile,readdir,rm,writeFile} from "node:fs/promises";
@@ -364,10 +364,18 @@ export async function workflowMain(argv:string[],inject:WorkflowInjection={}):Pr
     await writeFile(required("GITHUB_STEP_SUMMARY"),`Applied ${c.root} commit ${c.commit}\n\nresult: ${ledger.result}\n\nRelease result: run ${c.runId}, run_attempt ${c.runAttempt}\n`,{flag:"a"});
   }finally{client?.destroy();}
 }
-/** CLI の境界。失敗は PrivateCommandError の定型文か固定の文言だけを標準エラーに出し、終了コードを返す。 */
+/**
+ * CLI の境界。失敗は PrivateCommandError の定型文か固定の文言だけを標準エラーに出し、終了コードを返す。
+ * workflow 自身が投げたエラーの文面は、ログに出さず release-diagnostics に private な診断として残す（diagnostics phase が custody に置く）。
+ */
 export async function workflowCli(argv:string[],inject:WorkflowInjection={}):Promise<number>{
   const io=inject.io??processIO;
   try{await workflowMain(argv,{...inject,io});return 0;}
-  catch(error:unknown){io.stderr(error instanceof PrivateCommandError?`${error.message}\n`:"Protected release denied; no success claim. Review private inputs, evidence and plan.\n");return 1;}
+  catch(error:unknown){
+    if(error instanceof PrivateCommandError){io.stderr(`${error.message}\n`);return 1;}
+    // diagnostics phase 自身の失敗は、自分が custody に置くディレクトリへ書き足さない。
+    if(argv[0]!=="diagnostics")keepWorkflowDiagnostic(join(process.env.RUNNER_TEMP??tmpdir(),"release-diagnostics"),error);
+    io.stderr("Protected release denied; no success claim. Review private inputs, evidence, plan and private diagnostics.\n");return 1;
+  }
 }
 if(require.main===module)void workflowCli(process.argv.slice(2)).then(code=>{process.exitCode=code;});
