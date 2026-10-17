@@ -159,6 +159,22 @@ run "trust_is_exact_oidc_subject" {
   }
 }
 
+run "image_bucket_refresh_is_readable" {
+  command = plan
+  # AWS provider の aws_s3_bucket は、作成の待機と refresh で HeadBucket（s3:ListBucket）と各設定の Get を呼び、AccessDenied を許さない。
+  assert {
+    condition = length(setsubtract([
+      "s3:ListBucket", "s3:GetBucketPolicy", "s3:GetBucketAcl", "s3:GetBucketCORS", "s3:GetBucketWebsite", "s3:GetBucketVersioning",
+      "s3:GetAccelerateConfiguration", "s3:GetBucketRequestPayment", "s3:GetBucketLogging", "s3:GetLifecycleConfiguration",
+      "s3:GetReplicationConfiguration", "s3:GetEncryptionConfiguration", "s3:GetBucketObjectLockConfiguration"
+    ], flatten([for s in jsondecode(aws_iam_policy.production_read.policy).Statement : s.Action if s.Effect == "Allow" && s.Resource == ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images"]]))) == 0
+    error_message = "Plan and apply must be able to read every image bucket attribute the AWS provider refreshes."
+  }
+  assert {
+    condition     = alltrue([for s in jsondecode(aws_iam_policy.production_read.policy).Statement : !contains(s.Action, "s3:ListBucket") || s.Resource == ["arn:aws:s3:::synthetic-reminder-123456789012-us-east-1-images"]])
+    error_message = "The shared read policy may list only the image bucket."
+  }
+}
 run "roles_cannot_delete_artifacts_or_manage_cognito_users" {
   command = plan
   assert {

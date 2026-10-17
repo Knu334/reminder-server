@@ -61,7 +61,15 @@ locals {
         "s3:GetBucketTagging",
         "s3:GetBucketCORS",
         "s3:GetBucketOwnershipControls",
-        "s3:GetBucketAcl"
+        "s3:GetBucketAcl",
+        # AWS provider の aws_s3_bucket は、作成の待機と refresh で HeadBucket（s3:ListBucket）と次の Get を呼び、AccessDenied を許さない。
+        "s3:ListBucket",
+        "s3:GetBucketWebsite",
+        "s3:GetAccelerateConfiguration",
+        "s3:GetBucketRequestPayment",
+        "s3:GetBucketLogging",
+        "s3:GetReplicationConfiguration",
+        "s3:GetBucketObjectLockConfiguration"
       ],
       "Resource" : [
         "arn:aws:s3:::${var.name_prefix}-${var.account_id}-${var.region}-images"
