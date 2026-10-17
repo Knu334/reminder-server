@@ -259,7 +259,7 @@ prefixは `<種類>/<run_id>/<run_attempt>/` である。`run_attempt` は、そ
    - 参照元は、このrepositoryの、完了して成功したmainでの手動の `deploy.yml` のrunでなければならず、applyのrunではなくpreviewとして記録されていなければならない。repositoryの公開設定は条件にしない。
    - applicationのapplyはbuild/登録をskipし、元のpreviewの `release-review` から、RegisteredArtifactと、hashを検査した監査・SBOM・試験のfileを再利用する。HEADで、固定したS3のversion/size/checksumを再確認する。
 4. **planを確認して `production` を承認する**
-   - そのrunは、元のpreviewの `manifest.json` を `expected_review_sha256` で照合し、期限内であることを確かめてから、レビュー済みの入力bytesとbaselineを正確に使って新しいsaved planを1つ作成する。新しいplanのdigestは、照合したmanifestの中のplanのdigestと一致しなければならない。planのdigestから除外するのは、Terraformのroot timestampだけである。
+   - そのrunは、元のpreviewの `manifest.json` を `expected_review_sha256` で照合し、期限内であることを確かめてから、レビュー済みの入力bytesとbaselineを正確に使って新しいsaved planを1つ作成する。新しいplanのdigestは、照合したmanifestの中のplanのdigestと一致しなければならない。planのdigestから除外するのは、Terraformのroot timestampだけである。rootの `relevant_attributes` はTerraformが実行ごとに違う順番で出すので、順番は無視して中身だけを照合する。
    - 新しいsaved planは、このrunの `release-review/<run_id>/<run_attempt>/` に、元のレビューの `expiresAt` を引き継いで置かれる。job summaryに、その置き場所と新しい `review_sha256` が出る。
    - driftその他のレビューとの差異があれば配布を停止する。初回作成の場合も同じである。実際の初回作成のpreviewどうしでは、unknownのIDが異なることがある。planのdigestが変わった場合は、比較を緩めるのではなく新しいpreviewをレビューする。
    - `production` environmentは、**現在のrun** の `release-review` のplanをレビューした後でのみ承認する。承認を待つ間に元のレビューの期限を過ぎると、apply jobは止まる。

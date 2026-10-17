@@ -43,10 +43,22 @@ function canonical(value:unknown,ancestors=new Set<object>()):string {
   ancestors.delete(value);return result;
 }
 const digest=(bytes:string|Uint8Array)=>createHash("sha256").update(bytes).digest("hex");
-/** Only Terraform's root timestamp is excluded; arrays and every other JSON field are bound. */
+/**
+ * Only Terraform's root timestamp is excluded; every other JSON field is bound.
+ * Array order is bound too, except the root relevant_attributes, which Terraform emits in a different order on each run:
+ * its entries are bound as a multiset by sorting their canonical forms.
+ */
 export function reviewPlanSha256(plan:unknown):string {
   canonical(plan);
-  if(plan!==null&&typeof plan==="object"&&!Array.isArray(plan)){const copy={...plan};delete (copy as Record<string,unknown>).timestamp;return digest(canonical(copy));}return digest(canonical(plan));
+  if(plan!==null&&typeof plan==="object"&&!Array.isArray(plan)){
+    const copy:Record<string,unknown>={...plan};delete copy.timestamp;
+    if("relevant_attributes" in copy){
+      if(!Array.isArray(copy.relevant_attributes))throw new Error("Invalid relevant_attributes");
+      copy.relevant_attributes=copy.relevant_attributes.map(entry=>canonical(entry)).sort();
+    }
+    return digest(canonical(copy));
+  }
+  return digest(canonical(plan));
 }
 const object=z.record(z.string(),z.unknown());
 const changeSchema=z.looseObject({actions:z.array(z.enum(["no-op","create","read","update","delete","forget"])).min(1),before:object.nullable(),after:object.nullable(),after_unknown:object});
