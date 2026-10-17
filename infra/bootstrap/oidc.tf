@@ -18,7 +18,7 @@ locals {
     Effect = "Allow", Action = ["apigateway:GET"], Resource = local.production_api_resources
   } if id != null])
   production_write = concat(local.production_write_base, [for id in [var.production_api_id] : {
-    Effect = "Allow", Action = ["apigateway:POST", "apigateway:PATCH", "apigateway:PUT", "apigateway:DELETE"], Resource = local.production_api_resources
+    Effect = "Allow", Action = ["apigateway:POST", "apigateway:PATCH", "apigateway:PUT", "apigateway:DELETE", "apigateway:TagResource", "apigateway:UntagResource"], Resource = local.production_api_resources
     } if id != null], [for id in [var.production_api_id] : {
     Effect    = "Allow"
     Action    = ["logs:CreateLogDelivery", "logs:PutResourcePolicy", "logs:UpdateLogDelivery", "logs:DeleteLogDelivery", "logs:GetLogDelivery", "logs:ListLogDeliveries", "logs:DescribeResourcePolicies"]
