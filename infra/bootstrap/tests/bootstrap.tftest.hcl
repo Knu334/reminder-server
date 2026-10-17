@@ -420,6 +420,11 @@ run "known_api_id_is_scoped_without_parent_tag_assumptions" {
     condition     = alltrue([for policy in concat([for p in aws_iam_role_policy.github : p.policy], [aws_iam_policy.production_read.policy]) : alltrue([for statement in jsondecode(policy).Statement : !anytrue([for action in statement.Action : startswith(action, "apigateway:")]) || toset(statement.Resource) == toset(["arn:aws:apigateway:us-east-1::/apis/a1b2c3d4e5", "arn:aws:apigateway:us-east-1::/apis/a1b2c3d4e5/*"]) && !can(statement.Condition)])]) && anytrue([for statement in jsondecode(aws_iam_role_policy.github["apply"].policy).Statement : contains(statement.Action, "apigateway:POST") && contains(statement.Action, "apigateway:PATCH") && contains(statement.Action, "apigateway:DELETE")])
     error_message = "Only the explicit API and its child ARNs may be managed, without tags/IfExists or foreign API wildcards."
   }
+  assert {
+    # provider の default_tags により、stage などの作成は apigateway:TagResource を要求する。
+    condition     = anytrue([for statement in jsondecode(aws_iam_role_policy.github["apply"].policy).Statement : contains(statement.Action, "apigateway:TagResource") && contains(statement.Action, "apigateway:UntagResource") && toset(statement.Resource) == toset(["arn:aws:apigateway:us-east-1::/apis/a1b2c3d4e5", "arn:aws:apigateway:us-east-1::/apis/a1b2c3d4e5/*"])])
+    error_message = "Apply must tag and untag only the explicit API and its child resources."
+  }
 }
 run "different_api_id_does_not_retain_old_or_foreign_scope" {
   command = plan
