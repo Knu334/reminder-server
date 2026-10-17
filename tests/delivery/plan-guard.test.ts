@@ -53,6 +53,16 @@ void test("review_digest_removes_only_root_timestamp_and_keeps_array_order",()=>
   assert.notEqual(reviewPlanSha256({nested:{timestamp:"a"}}),reviewPlanSha256({nested:{timestamp:"b"}}));assert.notEqual(reviewPlanSha256([1,2]),reviewPlanSha256([2,1]));
   assert.throws(()=>reviewPlanSha256({x:undefined}));assert.equal(inspectPlan({resource_changes:"bad"},baseline).allowed,false);
 });
+void test("plan_protection_failure_names_addresses_and_codes_without_values",()=>{
+  // 拒否の理由は private な診断にだけ残る。address と code だけを入れ、ID や URL などの値は入れない。
+  const p=applicationPlan(),inputs=Buffer.from(JSON.stringify({...dataInputs,operator_api_seed:false,production_api_id:baseline.apiId,artifact:p.variables.artifact.value})),binary=Buffer.from("synthetic saved plan");
+  const wrong={...baseline,apiId:"zzzzzzzzzz",apiBaseUrl:"https://zzzzzzzzzz.execute-api.us-east-1.amazonaws.com"};
+  assert.throws(()=>createPlanManifest(p,binary,inputs,artifact,artifact.commit,wrong,"application"),(error:Error)=>{
+    assert.match(error.message,/^Plan protection failed: /);assert.match(error.message,/aws_apigatewayv2_api\.production:BASELINE_IDENTITY_MISMATCH/);
+    for(const value of [wrong.apiId,wrong.apiBaseUrl,baseline.apiId,baseline.cognitoClientId])assert.equal(error.message.includes(value!),false,value!);
+    return true;
+  });
+});
 void test("saved_plan_binds_binary_commit_inputs_and_artifact_separately",()=>{
   const p=applicationPlan(),inputs=Buffer.from(JSON.stringify({...dataInputs,operator_api_seed:false,production_api_id:baseline.apiId,artifact:applicationPlan().variables.artifact.value})),binary=Buffer.from("synthetic saved plan");
   const m=createPlanManifest(p,binary,inputs,artifact,artifact.commit,baseline,"application");verifySavedPlan(m,p,binary,inputs,artifact,artifact.commit,baseline,"application");
