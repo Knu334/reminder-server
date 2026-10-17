@@ -104,8 +104,9 @@ export function inspectPlan(input:unknown,baseline:ReleaseBaseline|null):PlanRev
         const jwt=block(a.jwt_configuration),issuer=b?.cognitoIssuer??p.variables?.cognito_issuer?.value,client=b?.cognitoClientId??p.variables?.cognito_client_id?.value;
         if(anyUnknown(u.jwt_configuration)||anyUnknown(u.authorizer_type)||anyUnknown(u.identity_sources)||a.authorizer_type!=="JWT"||!exactSet(a.identity_sources,["$request.header.Authorization"])||typeof issuer!=="string"||typeof client!=="string"||jwt?.issuer!==issuer||!exactSet(jwt?.audience,[client]))reject(r.address,"JWT_IDENTITY_REOPENED");
       }
+      // AWS provider（SDKv2）は空の authorization_scopes を plan では null にするので、null と [] を同じ「scope 無し」として扱う。
       if(r.type==="aws_apigatewayv2_route"&&isFallback(a.route_key)) {
-        if(!fallbackRoutes.includes(String(a.route_key))||anyUnknown(u.route_key)||anyUnknown(u.authorization_type)||anyUnknown(u.authorization_scopes)||anyUnknown(u.authorizer_id)||a.authorization_type!=="NONE"||!exactSet(a.authorization_scopes,[])||(a.authorizer_id!==null&&a.authorizer_id!==undefined))reject(r.address,"UNBOUNDED_FALLBACK_ROUTE");
+        if(!fallbackRoutes.includes(String(a.route_key))||anyUnknown(u.route_key)||anyUnknown(u.authorization_type)||anyUnknown(u.authorization_scopes)||anyUnknown(u.authorizer_id)||a.authorization_type!=="NONE"||!(a.authorization_scopes===null||a.authorization_scopes===undefined||exactSet(a.authorization_scopes,[]))||(a.authorizer_id!==null&&a.authorizer_id!==undefined))reject(r.address,"UNBOUNDED_FALLBACK_ROUTE");
       } else if(r.type==="aws_apigatewayv2_route") {
         const scope=typeof a.route_key==="string"&&a.route_key.startsWith("GET ")?"reminder-api/read":"reminder-api/write";
         const authorizer=p.resource_changes.find(resource=>resource.type==="aws_apigatewayv2_authorizer")?.change;
