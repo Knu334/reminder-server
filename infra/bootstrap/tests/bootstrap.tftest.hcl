@@ -467,8 +467,14 @@ run "runtime_ceilings_enforce_exact_operation_scopes" {
     error_message = "scheduler ceiling must exactly match the adapter inventory and explicitly deny foreign resources, state and artifacts."
   }
   assert {
-    condition     = alltrue([for key in ["api", "cleanup", "scheduler"] : anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : statement.Effect == "Deny" && toset(try(statement.NotAction, [])) == toset(flatten([for allow in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : allow.Effect == "Allow" ? allow.Action : []])) && statement.Resource == ["*"]])])
+    # Lambda 関数の role だけは、環境変数の復号（kms:Decrypt）を包括的な拒否から外し、下の条件付きの拒否で囲む。
+    condition     = alltrue([for key in ["api", "cleanup", "scheduler"] : anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : statement.Effect == "Deny" && toset(try(statement.NotAction, [])) == toset(concat(flatten([for allow in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : allow.Effect == "Allow" ? allow.Action : []]), key == "scheduler" ? [] : ["kms:Decrypt"])) && statement.Resource == ["*"]])])
     error_message = "An arbitrary IAM/STS/Cognito grant must encounter an explicit Deny outside the exact runtime action inventory."
+  }
+  assert {
+    # Lambda は環境変数を実行 role の名前で復号する。既定の鍵では Allow は不要なので足さず、Lambda 経由でない復号を明示的に拒否する。
+    condition     = alltrue([for key in ["api", "cleanup"] : anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : statement.Effect == "Deny" && try(statement.Action, []) == ["kms:Decrypt"] && statement.Resource == ["*"] && try(statement.Condition.StringNotEquals["kms:ViaService"], "") == "lambda.us-east-1.amazonaws.com"]) && alltrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : statement.Effect != "Allow" || !anytrue([for action in statement.Action : startswith(action, "kms:")])])])
+    error_message = "Lambda must decrypt its environment only through the Lambda service, with no KMS grant in the ceiling."
   }
   assert {
     condition     = alltrue([for key in ["api", "cleanup"] : alltrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : statement.Effect != "Allow" || (key == "api" && try(statement.Action, []) == ["s3:GetObjectVersion"] && try(statement.Condition.StringEquals["s3:authType"], "") == "REST-QUERY-STRING") || try(statement.Condition.ArnEquals["lambda:SourceFunctionArn"], "") == "arn:aws:lambda:us-east-1:123456789012:function:synthetic-reminder-production-${key}"]) && anytrue([for statement in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : statement.Effect == "Deny" && try(statement.Condition.ArnNotEquals["lambda:SourceFunctionArn"], "") == "arn:aws:lambda:us-east-1:123456789012:function:synthetic-reminder-production-${key}" && toset(try(statement.Action, [])) == toset([for action in flatten([for allow in jsondecode(aws_iam_policy.runtime_ceiling[key].policy).Statement : allow.Effect == "Allow" ? allow.Action : []]) : action if key != "api" || action != "s3:GetObjectVersion"])])])
