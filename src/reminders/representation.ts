@@ -5,13 +5,25 @@ import type { ActiveReminder, ReminderDto, Representation } from "./types";
 /** This insertion order is the canonical public representation used for HTTP and ETags. */
 export function represent(item: ActiveReminder): Representation {
   const dto: ReminderDto = {
-    id: item.id, url: item.url, title: item.title, reminderTime: item.reminderTime,
-    autoOpen: item.autoOpen, webPush: item.webPush, hidden: item.hidden,
-    revision: item.revision, createdAt: item.createdAt, updatedAt: item.updatedAt,
-    thumbnail: item.thumbnail === null ? null : {
-      imageId: item.thumbnail.imageId, mime: item.thumbnail.mime,
-      bytes: item.thumbnail.bytes, sha256: item.thumbnail.sha256,
-    },
+    id: item.id,
+    url: item.url,
+    title: item.title,
+    reminderTime: item.reminderTime,
+    autoOpen: item.autoOpen,
+    webPush: item.webPush,
+    hidden: item.hidden,
+    revision: item.revision,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+    thumbnail:
+      item.thumbnail === null
+        ? null
+        : {
+            imageId: item.thumbnail.imageId,
+            mime: item.thumbnail.mime,
+            bytes: item.thumbnail.bytes,
+            sha256: item.thumbnail.sha256,
+          },
   };
   const body = JSON.stringify(dto);
   const hash = createHash("sha256").update(body, "utf8").digest("hex");

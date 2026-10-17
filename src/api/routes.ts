@@ -9,7 +9,8 @@ import type { Budget } from "../shared/ports";
 import { parseJsonBody, type GatewayRequest } from "./event";
 import { jsonResponse } from "./responses";
 
-export type ApiRoute = "health" | "ready" | "legacy" | "list" | "get" | "thumbnail" | "create" | "patch" | "remove";
+export type ApiRoute =
+  "health" | "ready" | "legacy" | "list" | "get" | "thumbnail" | "create" | "patch" | "remove";
 const routes: Record<string, Partial<Record<string, ApiRoute>>> = {
   "/healthz": { GET: "health" },
   "/readyz": { GET: "ready" },
@@ -20,33 +21,83 @@ const routes: Record<string, Partial<Record<string, ApiRoute>>> = {
 };
 
 /** rawPath classifies only default routes; Gateway pathParameters retain ID identity. */
-export function resolveRoute(request: GatewayRequest): { route: ApiRoute } | { status: 404 | 405; allow?: string } {
+export function resolveRoute(
+  request: GatewayRequest,
+): { route: ApiRoute } | { status: 404 | 405; allow?: string } {
   const fallback = request.routeKey === "$default" || request.routeKey.startsWith("ANY ");
-  let path = request.routeKey === "$default" ? request.rawPath : request.routeKey.slice(request.routeKey.indexOf(" ") + 1);
+  let path =
+    request.routeKey === "$default"
+      ? request.rawPath
+      : request.routeKey.slice(request.routeKey.indexOf(" ") + 1);
   if (request.routeKey === "$default") {
-    if (/^\/v2\/reminders\/[^/]+\/thumbnail-url$/.test(path)) path = "/v2/reminders/{id}/thumbnail-url";
+    if (/^\/v2\/reminders\/[^/]+\/thumbnail-url$/.test(path))
+      path = "/v2/reminders/{id}/thumbnail-url";
     else if (/^\/v2\/reminders\/[^/]+$/.test(path)) path = "/v2/reminders/{id}";
   }
   const methods = Object.hasOwn(routes, path) ? routes[path] : undefined;
   if (methods === undefined) return { status: 404 };
   const route = Object.hasOwn(methods, request.method) ? methods[request.method] : undefined;
-  return route === undefined ? { status: 405, allow: Object.keys(methods).join(", ") } : fallback ? { status: 404 } : { route };
+  return route === undefined
+    ? { status: 405, allow: Object.keys(methods).join(", ") }
+    : fallback
+      ? { status: 404 }
+      : { route };
 }
 
-export async function dispatchReminderRoute(route: ApiRoute, request: GatewayRequest, ownerId: OwnerId, service: RemindersService, config: Config, budget: Budget): Promise<APIGatewayProxyStructuredResultV2> {
+export async function dispatchReminderRoute(
+  route: ApiRoute,
+  request: GatewayRequest,
+  ownerId: OwnerId,
+  service: RemindersService,
+  config: Config,
+  budget: Budget,
+): Promise<APIGatewayProxyStructuredResultV2> {
   const requestId = request.requestId;
-  if (route === "list") return jsonResponse(200, JSON.stringify(await service.list(ownerId, parseLimit(request.query.limit), request.query.cursor ?? null, budget)), requestId);
+  if (route === "list")
+    return jsonResponse(
+      200,
+      JSON.stringify(
+        await service.list(
+          ownerId,
+          parseLimit(request.query.limit),
+          request.query.cursor ?? null,
+          budget,
+        ),
+      ),
+      requestId,
+    );
   if (route === "create") {
     const input = parseCreate(parseJsonBody(request, config));
     const location = `/v2/reminders/${encodeURIComponent(input.id)}`;
     const representation = await service.create(ownerId, input, budget);
-    return jsonResponse(201, representation.body, requestId, { ETag: representation.etag, Location: location });
+    return jsonResponse(201, representation.body, requestId, {
+      ETag: representation.etag,
+      Location: location,
+    });
   }
   const id = request.pathParameters.id;
   if (id === undefined) throw new ApiError(400, "INVALID_GATEWAY_EVENT", "Invalid gateway event");
-  if (route === "thumbnail") return jsonResponse(200, JSON.stringify(await service.thumbnailUrl(ownerId, id, budget)), requestId);
-  if (route === "remove") return jsonResponse(200, JSON.stringify(await service.remove(ownerId, id, request.headers["if-match"], budget)), requestId);
-  const representation = route === "get" ? await service.get(ownerId, id, budget)
-    : await service.patch(ownerId, id, request.headers["if-match"], parsePatch(parseJsonBody(request, config)), budget);
+  if (route === "thumbnail")
+    return jsonResponse(
+      200,
+      JSON.stringify(await service.thumbnailUrl(ownerId, id, budget)),
+      requestId,
+    );
+  if (route === "remove")
+    return jsonResponse(
+      200,
+      JSON.stringify(await service.remove(ownerId, id, request.headers["if-match"], budget)),
+      requestId,
+    );
+  const representation =
+    route === "get"
+      ? await service.get(ownerId, id, budget)
+      : await service.patch(
+          ownerId,
+          id,
+          request.headers["if-match"],
+          parsePatch(parseJsonBody(request, config)),
+          budget,
+        );
   return jsonResponse(200, representation.body, requestId, { ETag: representation.etag });
 }

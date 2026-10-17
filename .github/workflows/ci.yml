@@ -32,10 +32,11 @@ jobs:
         run: |
           npm install --global npm@11.11.1
           npm ci
-      - name: Check types, lint and independent tests
+      - name: Check types, lint, formatting and independent tests
         run: |
           npm run typecheck
           npm run lint
+          npm run format:check
           npm run test:runtime
           npm run test:operations
       - name: Build and package once before artifact-dependent tests

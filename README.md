@@ -40,6 +40,7 @@ flowchart LR
 npm ci
 npm run typecheck
 npm run lint
+npm run format:check
 npm run build
 npm run package     # artifacts/reminder-server.zip を作る
 npm run test:offline
@@ -61,6 +62,7 @@ npm test
 npm ci
 npm run typecheck
 npm run lint
+npm run format:check
 npm run build
 npm run package
 npm run verify:zip
@@ -80,6 +82,7 @@ npm sbom --sbom-format cyclonedx > artifacts/sbom.json
 | `npm run test:offline` | runtime、operations、delivery、結合試験、E2E の harness 試験。Floci は不要 |
 | `npm run test:runtime` / `test:operations` / `test:delivery` | 個別の試験群 |
 | `npm run typecheck` / `lint` | TypeScript の型検査と ESLint |
+| `npm run format` / `format:check` | Prettier で整形／書き換えずに整形を検査 |
 | `npm run build` / `package` / `verify:zip` | bundle、再現可能な ZIP の作成、ZIP の検証 |
 | `npm run test:packaging` | ZIP 作成（Python）の試験 |
 | `npm run infra:check` | 3つの Terraform root の init、validate、mock 試験、fmt。AWS の認証は不要。`-- --root=bootstrap` で1つに絞れる |
@@ -104,7 +107,7 @@ npm sbom --sbom-format cyclonedx > artifacts/sbom.json
 
 | workflow | 起動 | 内容 |
 | --- | --- | --- |
-| `ci.yml` | PR、`main` への push | 型検査、lint、試験、ZIP の作成と検証、`infra:check`、audit |
+| `ci.yml` | PR、`main` への push | 型検査、lint、整形検査、試験、ZIP の作成と検証、`infra:check`、audit |
 | `floci-e2e.yml` | `main` への push | JVM 版の Floci を起動し、`npm test` を実行する |
 | `deploy.yml` | 手動 | 実 AWS への ZIP 登録、Terraform の plan と apply。`main` だけで動く。plan などは private な S3 に置く |
 
@@ -144,6 +147,8 @@ DTO、エラー、上限は [API v2 仕様](docs/api-v2.md)、拡張機能の認
 設計と実装計画は `docs/superpowers/` にある。
 
 ## 開発上の注意
+
+コードを整形するときは `npm run format`、書き換えずに確認するときは `npm run format:check` を使う。対象は `src/`・`tests/`・`scripts/` の TypeScript、`tools/local-e2e/floci/` の JavaScript、ルートの `package.json`・`tsconfig.json`・`eslint.config.mjs`・`.prettierrc.json` である。CLI は対象パスを明示し、`.prettierignore` でも対象を限定する。整形は Prettier、コード品質の検査は ESLint が担当する。Terraform は `npm run infra:check` 内の `terraform fmt -check` で検査する。
 
 - 私有の `.env`、Terraform の state と plan、mapping、画像、backup は Git に入れない。公開の `.example` を使う。
 - 開発エージェント向けの指示は [CLAUDE.md](CLAUDE.md) にある。

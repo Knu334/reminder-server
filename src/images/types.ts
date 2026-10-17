@@ -8,8 +8,17 @@ export interface ImageRef {
   bytes: number;
   sha256: string;
 }
-export interface DecodedImage { data: Uint8Array; mime: string; bytes: number; sha256: string }
-export interface ImageHead { versionId: string; sha256: string | null; deleteMarker: boolean }
+export interface DecodedImage {
+  data: Uint8Array;
+  mime: string;
+  bytes: number;
+  sha256: string;
+}
+export interface ImageHead {
+  versionId: string;
+  sha256: string | null;
+  deleteMarker: boolean;
+}
 export interface ImageJob {
   jobId: string;
   ownerId: OwnerId;
@@ -35,6 +44,18 @@ export interface JobTransition {
   expectedVersionId?: string;
 }
 export type CleanupPartition = `${"pending" | "retired" | "deleting"}#${"00" | "01" | "02" | "03"}`;
-export interface CleanupPage { jobs: ImageJob[]; evaluated: number; lastKey: Record<string, string> | null }
-export interface CleanupCheckpoint { roundRobinIndex: number; cursors: Partial<Record<CleanupPartition, Record<string, string> | null>> }
-export interface CleanupResult { evaluated: number; deletes: number; incomplete: boolean; skippedUnpublished: boolean }
+export interface CleanupPage {
+  jobs: ImageJob[];
+  evaluated: number;
+  lastKey: Record<string, string> | null;
+}
+export interface CleanupCheckpoint {
+  roundRobinIndex: number;
+  cursors: Partial<Record<CleanupPartition, Record<string, string> | null>>;
+}
+export interface CleanupResult {
+  evaluated: number;
+  deletes: number;
+  incomplete: boolean;
+  skippedUnpublished: boolean;
+}

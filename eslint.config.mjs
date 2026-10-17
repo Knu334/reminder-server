@@ -1,9 +1,18 @@
 import globals from "globals";
 import pluginJs from "@eslint/js";
 import tseslint from "typescript-eslint";
+import eslintConfigPrettier from "eslint-config-prettier/flat";
 
 export default tseslint.config(
-  { ignores: ["**/dist/**", "**/coverage/**", "**/.terraform/**", "**/.devcontainer/**", "**/.superpowers/**"] },
+  {
+    ignores: [
+      "**/dist/**",
+      "**/coverage/**",
+      "**/.terraform/**",
+      "**/.devcontainer/**",
+      "**/.superpowers/**",
+    ],
+  },
   {
     files: ["**/*.{js,mjs,cjs}"],
     extends: [pluginJs.configs.recommended],
@@ -19,11 +28,19 @@ export default tseslint.config(
     rules: {
       "@typescript-eslint/no-floating-promises": "error",
       "@typescript-eslint/no-misused-promises": "error",
-      "@typescript-eslint/no-unused-vars": ["error", {
-        args: "all", argsIgnorePattern: "^_", caughtErrors: "all",
-        caughtErrorsIgnorePattern: "^_", destructuredArrayIgnorePattern: "^_",
-        varsIgnorePattern: "^_", ignoreRestSiblings: true,
-      }],
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          args: "all",
+          argsIgnorePattern: "^_",
+          caughtErrors: "all",
+          caughtErrorsIgnorePattern: "^_",
+          destructuredArrayIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+          ignoreRestSiblings: true,
+        },
+      ],
     },
   },
+  eslintConfigPrettier,
 );

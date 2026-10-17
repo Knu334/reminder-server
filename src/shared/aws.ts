@@ -4,7 +4,11 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
 import type { Config } from "../config";
 
-export interface AwsClients { dynamo: DynamoDBDocumentClient; s3: S3Client; cloudWatch: CloudWatchClient }
+export interface AwsClients {
+  dynamo: DynamoDBDocumentClient;
+  s3: S3Client;
+  cloudWatch: CloudWatchClient;
+}
 const environments = new Map<string, AwsClients>();
 
 /** SDK transport retries are disabled; adapters own their bounded, budget-aware attempts. */
