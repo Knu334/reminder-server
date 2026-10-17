@@ -1,0 +1,13 @@
+{
+  "accountId": "123456789012",
+  "region": "us-east-1",
+  "remindersTable": "synthetic-reminders",
+  "ownerStateTable": "synthetic-owners",
+  "imageJobsTable": "synthetic-jobs",
+  "imagesBucket": "synthetic-images",
+  "expectedApiId": "synthetic-api",
+  "expectedStage": "synthetic",
+  "issuer": "https://synthetic.invalid/pool",
+  "clientId": "synthetic-client",
+  "sourceIps": []
+}

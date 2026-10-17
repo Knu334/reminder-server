@@ -1,0 +1,22 @@
+# Synthetic values; replace every value with explicit reviewed deployment inputs.
+account_id = "123456789012"
+region = "us-east-1"
+repository = "synthetic/reminder-server"
+github_environment = "production"
+name_prefix = "synthetic-reminder"
+# Use actual sub values from the job's OIDC configuration, never guess or use '*'.
+oidc_subjects = {
+  artifact = "repo:synthetic/reminder-server:environment:production-artifact"
+  plan = "repo:synthetic/reminder-server:environment:production-plan"
+  apply = "repo:synthetic/reminder-server:environment:production"
+}
+
+# Initial bootstrap: null grants no GHA HTTP API configuration permissions.
+# A separately authorized operator seeds the first API from application/production;
+# pass that root's API ID back here before normal GitHub plan/apply releases.
+production_api_id = null
+
+# Normal selection is original tables. Exceptional reviewed PITR selection must
+# match across bootstrap/platform/application; see docs/operations/recovery.md.
+restored_tables = {}
+# restored_tables = { reminders = "reviewed-restored-reminders", owner_state = "reviewed-restored-owners", image_jobs = "reviewed-restored-jobs" }

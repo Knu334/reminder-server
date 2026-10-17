@@ -1,15 +1,36 @@
 {
   "permissions": {
-    "deny": ["Read(**/.env)", "Read(**/*.env)"]
+    "deny": [
+      "Read(.env)",
+      "Read(.env.*)",
+      "Read(!.env.example)",
+      "Read(*.env)",
+      "Read(reminders*.json)",
+      "Read(credentials)",
+      "Read(.aws/**)",
+      "Read(~/.aws/**)",
+      "Read(.terraform/**)",
+      "Read(*.tfstate)",
+      "Read(*.tfstate.*)",
+      "Read(*.tfplan)",
+      "Read(*.tfvars)",
+      "Read(*.tfvars.json)",
+      "Read(backend.hcl)",
+      "Read(private/**)",
+      "Read(/images/**)",
+      "Read(backups/**)",
+      "Read(artifacts/**)"
+    ]
   },
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "^Bash$",
         "hooks": [
           {
             "type": "command",
-            "command": "/workspace/.claude/hooks/check-bash-command.sh"
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/.claude/hooks/check-bash-command.sh\"",
+            "timeout": 10
           }
         ]
       }

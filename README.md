@@ -1,135 +1,153 @@
 # reminder-server
 
-[WebPageReminder](https://github.com/Knu334/WebPageReminder)用の Express サーバーです。
+Chrome 拡張機能 [WebPageReminder](https://github.com/Knu334/WebPageReminder) のリマインダーを保存・同期する API である。利用者ごとにリマインダーを1件単位で作成、取得、更新、削除し、サムネイル画像を保存する。
 
-主な特徴:
-- シンプルな REST API（`/reminders`）でリマインダーの取得・更新を行います
-- 開発モードは TypeScript を ts-node/ nodemon で直接実行
-- 本番はビルド済みの `dist/app.js` を Node で動かすか Docker イメージを利用
-- 本番モードでは HTTPS を使い、証明書ディレクトリの変更検知でサーバー再起動（ホットリロード）します
+## 構成
 
-## 必要条件
-- Node.js 22 系（Docker イメージは Node 22.21.1 ベース）
-- npm
-- 開発時: `ts-node`, `nodemon`（devDependencies に含まれています）
-
-## リポジトリ構成（主要ファイル）
-- `src/app.ts` - Express アプリ本体（証明書の監視・再読み込み処理含む）
-- `src/router/index.ts` - `/reminders` のルーティング
-- `src/util/reminderUtils.ts` - 簡易的なファイルベースのストレージ（デフォルトは `./reminders.txt`）
-- `Dockerfile` - マルチ段階ビルド（tsup でバンドルして最終イメージで実行）
-- `nodemon.json` - 開発時の起動設定
-
-## 環境変数
-- `NODE_ENV` - `development`（デフォルト）または `production`
-- `PORT` - サーバーがリッスンするポート（デフォルト: `3000`）
-- `CERT_PATH` - production 時に使用する証明書ディレクトリ（`cert.pem` と `privkey.pem` を配置）
-- `STORAGE_FILE` - リマインダー保存先ファイル（デフォルト: `./reminders.txt`）
-
-## 開発（ローカル）
-1. 依存パッケージをインストール
-
-```bash
-npm install
+```mermaid
+flowchart LR
+  ext[WebPageReminder] -- "Authorization Code + PKCE" --> cognito[Cognito]
+  ext -- "Bearer access token" --> api[API Gateway HTTP API]
+  api --> lambda_api["Lambda api"]
+  lambda_api --> ddb[("DynamoDB<br>reminders / owner-state / image-jobs")]
+  lambda_api --> s3[("S3 画像バケット")]
+  ext -- "署名付き URL（15分）" --> s3
+  scheduler[EventBridge Scheduler] --> lambda_cleanup["Lambda cleanup"]
+  lambda_cleanup --> ddb
+  lambda_cleanup --> s3
 ```
 
-2. 開発モードで起動（`nodemon` → `ts-node` を利用）
+- 本番環境は production の1つだけである。AWS の構成は Terraform の3つの root（`infra/bootstrap`、`infra/platform`、`infra/application`）で定義する。
+- Lambda は Node.js 24 の ZIP で、1つの ZIP に `api` と `cleanup` の2つの handler を入れる。
+- 画像の清掃（`cleanup`）は毎日 03:00 UTC に動く。初期状態は無効である。
+- このリポジトリはローカルで HTTP を listen する起動 script を持たない。動作は試験と、AWS のエミュレーター Floci で確かめる。
 
-```bash
-npm run start
-# nodemon は `nodemon.json` の設定により: ts-node -r tsconfig-paths/register ./src/app.ts を実行します
+## 必要なもの
+
+| ツール | 版 |
+| --- | --- |
+| Node.js | 24.21.0 |
+| npm | 11.11.1 |
+| Python | 3.13.16（`uv python install 3.13.16` で導入できる） |
+| Terraform | 1.16.5（AWS provider 6.67.0） |
+| Floci | `npm test` の正式 E2E に必要。開発コンテナで起動する（[手順](docs/operations/formal-e2e-README.md)） |
+
+開発コンテナ（`.devcontainer`）を使うと、Floci も含めて準備できる。
+
+## はじめかた
+
+```sh
+npm ci
+npm run typecheck
+npm run lint
+npm run build
+npm run package     # artifacts/reminder-server.zip を作る
+npm run test:offline
 ```
 
-開発モードでは `NODE_ENV` が `development` と判定され、通常の HTTP サーバー（`app.listen`）で起動します。
+`npm run test:offline` は Floci を使わない試験である。ZIP を検査する試験があるので、先に `build` と `package` を実行する。
 
-## 本番（ローカルでの簡易ビルド）
-1. ビルド
+Floci を起動した環境では、次のコマンドで offline 試験と正式 E2E をまとめて実行する（約15分）。
 
-```bash
-npx tsup
+```sh
+npm test
 ```
 
-2. ビルド済みファイルを Node で実行
+## 変更の確認
 
-```bash
-NODE_ENV=production CERT_PATH=/path/to/certs PORT=443 node dist/app.js
+変更を commit する前に、次のコマンドを順に実行する。CI の `ci.yml` もほぼ同じ内容を実行する。
+
+```sh
+npm ci
+npm run typecheck
+npm run lint
+npm run build
+npm run package
+npm run verify:zip
+npm test            # Floci が無い環境では npm run test:offline
+npm run test:packaging
+npm run infra:check
+npm run audit:runtime
+npm run audit:all
+npm sbom --sbom-format cyclonedx > artifacts/sbom.json
 ```
 
-注意: production モードでは HTTPS（`https.createServer`）を使用します。`CERT_PATH` に `cert.pem` と `privkey.pem` を置いてください。
-サーバーはそのディレクトリのファイル変更を監視し、`cert.pem` または `privkey.pem` が更新されたら再起動して新しい証明書をロードします。
+## 主なコマンド
 
-## Docker
-Dockerfile は multi-stage ビルドを使用しています（tsup でビルド → 軽量イメージで実行）。
+| コマンド | 内容 |
+| --- | --- |
+| `npm test` | `test:offline` の後に Floci の正式 E2E（`test:e2e:floci`）を実行する。Floci が無いと exit 2 |
+| `npm run test:offline` | runtime、operations、delivery、結合試験、E2E の harness 試験。Floci は不要 |
+| `npm run test:runtime` / `test:operations` / `test:delivery` | 個別の試験群 |
+| `npm run typecheck` / `lint` | TypeScript の型検査と ESLint |
+| `npm run build` / `package` / `verify:zip` | bundle、再現可能な ZIP の作成、ZIP の検証 |
+| `npm run test:packaging` | ZIP 作成（Python）の試験 |
+| `npm run infra:check` | 3つの Terraform root の init、validate、mock 試験、fmt。AWS の認証は不要。`-- --root=bootstrap` で1つに絞れる |
+| `npm run audit:runtime` / `audit:all` / `sbom` | 依存関係の audit と CycloneDX の SBOM。High 以上で失敗する |
 
-簡単なビルド / 実行例:
-### Docker Compose での実行
-このリポジトリには既に `docker-compose.yml` がルートにあります。内容は主に以下の点を想定しています（実際のファイルはリポジトリの `docker-compose.yml` を参照してください）：
+本番の操作に使うコマンド（`release:*`、`migrate:json`、`recovery:verify`）は、[deployment 手順](docs/operations/deployment.md)、[移行手順](docs/operations/migration.md)、[復旧手順](docs/operations/recovery.md)にある。
 
-- ローカルの `reminders.json` をコンテナ内 `/app/reminders.json` にマウント
-- ホストの Let's Encrypt 証明書（例: `/etc/letsencrypt`）をコンテナの同パスに読み取り専用でマウント
-- 環境変数として `NODE_ENV=production`、`CERT_PATH`、`STORAGE_FILE` 等を設定可能
-- ポート 3000 を公開
+## ディレクトリ構成
 
-リポジトリ付属の `docker-compose.yml`（抜粋、実際のファイルを参照）:
+| パス | 内容 |
+| --- | --- |
+| `src/` | Lambda の handler（`api.ts`、`cleanup.ts`）と、API、リマインダー、画像、清掃の実装 |
+| `scripts/build/` | bundle と ZIP の作成、検証 |
+| `scripts/release/` | ZIP の登録、Terraform plan の照合、release の検証、GHA 用の helper |
+| `scripts/operations/` | JSON からの移行と、PITR 復旧の検証 |
+| `scripts/e2e/` | 正式 E2E の runner |
+| `infra/` | Terraform の3つの root |
+| `tests/` | 試験と合成の fixture |
+| `docs/` | 仕様と運用手順 |
 
-```yaml
-services:
-  reminder-server:
-    build: 
-      context: .
-      args:
-          ARCH: 
-    image: reminder-server:latest
-    volumes:
-        - ./reminders.json:/app/reminders.json
-        - /etc/letsencrypt:/etc/letsencrypt:ro
-    environment:
-        TZ: Asia/Tokyo
-        NODE_ENV: production
-        PORT: 
-        STORAGE_FILE: 
-        ALLOW_DOMAIN: 
-        CERT_PATH: 
-    ports:
-        - 3000:3000
-    init: true
-    restart: always
-```
+## CI/CD
 
-Compose を使ったビルドと起動コマンド:
+| workflow | 起動 | 内容 |
+| --- | --- | --- |
+| `ci.yml` | PR、`main` への push | 型検査、lint、試験、ZIP の作成と検証、`infra:check`、audit |
+| `floci-e2e.yml` | `main` への push | JVM 版の Floci を起動し、`npm test` を実行する |
+| `deploy.yml` | 手動 | 実 AWS への ZIP 登録、Terraform の plan と apply。`main` だけで動く。plan などは private な S3 に置く |
 
-```bash
-# イメージをビルドしてコンテナを起動
-docker compose up --build -d
+## API
 
-# コンテナのログを追う
-docker compose logs -f reminder-server
+認証は Cognito の access token（Bearer）で、読み取りは `reminder-api/read`、書き込みは `reminder-api/write` の scope が要る。
 
-# 停止して削除
-docker compose down
-```
+| メソッドとパス | 内容 |
+| --- | --- |
+| `GET /v2/reminders` | 一覧（cursor でページ送り） |
+| `GET /v2/reminders/{id}` | 1件の取得 |
+| `GET /v2/reminders/{id}/thumbnail-url` | 画像の署名付き URL |
+| `POST /v2/reminders` | 作成 |
+| `PATCH /v2/reminders/{id}` | 更新（`If-Match` が必須） |
+| `DELETE /v2/reminders/{id}` | 削除（`If-Match` が必須） |
+| `GET /healthz` / `GET /readyz` | 死活監視（認証は不要） |
 
-実運用時のポイント:
-- `CERT_PATH` を `docker-compose.yml` の `environment` か `volumes` と合わせて適切に設定してください（このリポジトリの例では `/etc/letsencrypt` をマウントしているので `CERT_PATH=/etc/letsencrypt/live/your-domain` のように指定します）。
-- `STORAGE_FILE` を設定すると、デフォルトの `./reminders.txt` ではなく指定ファイルを使用します（Compose ではボリュームマウントで永続化してください）。
-- `reminders.json` を `/app/reminders.json` にマウントしているため、Compose 構成の `STORAGE_FILE` を `/app/reminders.json` に合わせると動作が分かりやすくなります。
-- ホスト側で証明書を更新するとコンテナ内の `chokidar` が検知してサーバーを再起動し新しい証明書を読み込みます。chokidarはDockerやボリュームマウント環境でも安定して変更検知できるようポーリング（`usePolling: true`）を利用しています。
+DTO、エラー、上限は [API v2 仕様](docs/api-v2.md)、拡張機能の認証は [Chrome 拡張機能の Cognito 認証](docs/chrome-extension-cognito-auth.md)にある。設定項目は [.env.example](.env.example) にある。これは `loadConfig` が読む環境変数の公開サンプルで、dotenv による自動読み込みはしない。
 
-レスポンスは `src/util/reminderUtils.ts` に基づき、`STORAGE_FILE`（デフォルト `./reminders.txt`）に JSON オブジェクトとして保存／読取します。
+## 文書
 
-簡単な curl 例:
+| 文書 | 内容 |
+| --- | --- |
+| [API v2 仕様](docs/api-v2.md) | エンドポイント、DTO、エラー、上限 |
+| [Chrome 拡張機能の Cognito 認証](docs/chrome-extension-cognito-auth.md) | Hosted UI、PKCE、token の更新 |
+| [deployment 手順](docs/operations/deployment.md) | GHA による登録、plan、apply と rollback |
+| [移行手順](docs/operations/migration.md) | 旧 JSON からの移行 |
+| [復旧手順](docs/operations/recovery.md) | DynamoDB の PITR 復旧 |
+| [画像の清掃](docs/operations/cleanup.md) | 日次と手動の清掃 |
+| [受け入れ記録](docs/operations/acceptance.md) | 受け入れの手順と記録 |
+| [seed 手順](infra/application/production/README.md) | 初回構築の API seed |
+| [正式 E2E 手順](docs/operations/formal-e2e-README.md) | Floci での E2E の実行方法 |
+| [正式 E2E の結果](docs/operations/formal-e2e-results.md) / [限界](docs/operations/formal-e2e-limitations.md) | E2E の実測結果と、検証していないこと |
+| [実装結果](docs/implementation-results.md) | 実装と検証の記録 |
+| [料金の見積もり](docs/aws-cost-estimate-2026-10-02.md) | AWS 費用の予算係数（実測ではない） |
 
-```bash
-# 保存
-curl -X PUT -H "Content-Type: application/json" \
-  -d '{"key":"me","reminders":[{"title":"テスト","time":"2025-11-03T09:00:00Z"}]}' \
-  http://localhost:3000/reminders
+設計と実装計画は `docs/superpowers/` にある。
 
-# 取得
-curl -X POST -H "Content-Type: application/json" \
-  -d '{"key":"me"}' http://localhost:3000/reminders
-```
+## 開発上の注意
 
-## 注意点 / 制限
-- 現状のストレージは単一ファイルの同期的な読み書きです。大量のデータや同時書き込みが発生するユースケースではデータ破損やパフォーマンス問題があります。必要ならデータベース（SQLite / PostgreSQL など）への移行を検討してください。
-- 証明書の再読み込みは [chokidar](https://github.com/paulmillr/chokidar) を利用して行っています。
+- 私有の `.env`、Terraform の state と plan、mapping、画像、backup は Git に入れない。公開の `.example` を使う。
+- 開発エージェント向けの指示は [CLAUDE.md](CLAUDE.md) にある。
+
+## ライセンス
+
+[MIT](LICENSE)

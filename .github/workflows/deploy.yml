@@ -1,0 +1,287 @@
+name: Protected production ZIP delivery
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Terraform production root
+        type: choice
+        options: [platform, application]
+        required: true
+      commit:
+        description: Full immutable commit already on main
+        type: string
+        required: true
+      apply:
+        description: レビューした成功済みの preview の後でだけ apply する
+        type: boolean
+        default: false
+      reviewed_run:
+        description: 元の preview の run ID。apply と ZIP 再利用に必要
+        type: string
+        default: ''
+      expected_review_sha256:
+        description: 元の preview の manifest の SHA-256。apply と ZIP 再利用に必要
+        type: string
+        default: ''
+      published:
+        description: Expected publication state for application smoke; does not change data
+        type: boolean
+        default: false
+      scheduler_enabled:
+        description: Reviewed application Scheduler setting
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: reminder-production
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+env:
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: 'false'
+  RELEASE_ROOT: ${{ inputs.target }}
+  RELEASE_COMMIT: ${{ inputs.commit }}
+  RELEASE_APPLY: ${{ inputs.apply }}
+  RELEASE_PUBLISHED: ${{ inputs.published }}
+  RELEASE_SCHEDULER_ENABLED: ${{ inputs.scheduler_enabled }}
+  EXPECTED_REVIEW_SHA256: ${{ inputs.expected_review_sha256 }}
+  REVIEWED_RUN: ${{ inputs.reviewed_run }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+jobs:
+  authorize:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      reviewed_attempt: ${{ steps.authorize.outputs.reviewed_attempt }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Confirm immutable main ancestry before running selected code
+        run: |
+          [[ "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - run: |
+          npm install --global npm@11.11.1
+          npm ci
+      - name: Authorize manual main release and reviewed run provenance
+        id: authorize
+        run: npm run release:workflow -- authorize
+        env:
+          DRIVER_GITHUB_TOKEN: ${{ github.token }}
+  register:
+    needs: [authorize]
+    if: needs.authorize.result == 'success' && inputs.target == 'application' && !inputs.apply && inputs.reviewed_run == ''
+    runs-on: ubuntu-24.04
+    environment: production-artifact
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      custody_run_id: ${{ steps.custody.outputs.custody_run_id }}
+      custody_attempt: ${{ steps.custody.outputs.custody_attempt }}
+      custody_manifest_sha256: ${{ steps.custody.outputs.custody_manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.13.16'
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: '1.16.5'
+          terraform_wrapper: false
+      - name: Install locked dependencies
+        run: |
+          npm install --global npm@11.11.1
+          npm ci
+      - name: Build once and retain current validation evidence privately
+        run: |
+          umask 077
+          mkdir -m 700 "$RUNNER_TEMP/registered"
+          {
+            git diff --exit-code 253e5e2 -- .devcontainer
+            npm run typecheck
+            npm run lint
+            npm run test:runtime
+            npm run test:operations
+            npm run build
+            npm run package
+            npm run verify:zip
+            npm run test:packaging
+            npm run test:delivery
+            npm run infra:check
+          } > "$RUNNER_TEMP/registered/tests.txt" 2>&1
+          npm run --silent audit:runtime -- --json > "$RUNNER_TEMP/registered/audit-runtime.json"
+          npm run --silent audit:all -- --json > "$RUNNER_TEMP/registered/audit.json"
+          npm run --silent sbom > "$RUNNER_TEMP/registered/sbom.json"
+      - name: Assume isolated artifact role
+        id: assume
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ secrets.ARTIFACT_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ secrets.AWS_ACCOUNT_ID }}
+          role-session-name: reminder-${{ github.run_id }}-artifact
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+          mask-aws-account-id: true
+          retry-max-attempts: 1
+      - name: Register exact ZIP once with explicit verified provenance
+        run: |
+          npm run release:register -- \
+            --zip artifacts/reminder-server.zip \
+            --manifest "$RUNNER_TEMP/registered/registered.json" \
+            --bucket "$ARTIFACT_BUCKET" --region "$AWS_REGION" --commit "$RELEASE_COMMIT" \
+            --npm-version "$(npm --version)" --esbuild-version "$(node -p 'require("esbuild/package.json").version')" \
+            --audit-id "sha256:$(sha256sum "$RUNNER_TEMP/registered/audit.json" | cut -d ' ' -f 1)" \
+            --sbom-id "sha256:$(sha256sum "$RUNNER_TEMP/registered/sbom.json" | cut -d ' ' -f 1)" \
+            --tests-id "sha256:$(sha256sum "$RUNNER_TEMP/registered/tests.txt" | cut -d ' ' -f 1)" > /dev/null
+        env:
+          ARTIFACT_BUCKET: ${{ secrets.ARTIFACT_BUCKET }}
+      - name: Keep registration and evidence in private custody for this run
+        id: custody
+        run: npm run release:workflow -- register-custody
+        env:
+          CUSTODY_BUCKET: ${{ secrets.CUSTODY_BUCKET }}
+      - name: Keep failure diagnostics in private custody
+        if: failure() && steps.assume.outcome == 'success'
+        run: npm run release:workflow -- diagnostics
+        env:
+          CUSTODY_BUCKET: ${{ secrets.CUSTODY_BUCKET }}
+  plan:
+    needs: [authorize, register]
+    if: always() && needs.authorize.result == 'success' && (needs.register.result == 'success' || needs.register.result == 'skipped')
+    runs-on: ubuntu-24.04
+    environment: production-plan
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      custody_run_id: ${{ steps.plan.outputs.custody_run_id }}
+      custody_attempt: ${{ steps.plan.outputs.custody_attempt }}
+      custody_manifest_sha256: ${{ steps.plan.outputs.custody_manifest_sha256 }}
+      review_sha256: ${{ steps.plan.outputs.review_sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: '1.16.5'
+          terraform_wrapper: false
+      - name: Install locked dependencies
+        run: |
+          npm install --global npm@11.11.1
+          npm ci
+      - name: Assume isolated plan role
+        id: assume
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ secrets.PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ secrets.AWS_ACCOUNT_ID }}
+          role-session-name: reminder-${{ github.run_id }}-plan
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+          mask-aws-account-id: true
+          retry-max-attempts: 1
+      - name: Read source custody, derive guarded review and keep it in private custody
+        id: plan
+        run: npm run release:workflow -- plan
+        env:
+          SOURCE_RUN_ID: ${{ inputs.reviewed_run != '' && inputs.reviewed_run || needs.register.outputs.custody_run_id }}
+          SOURCE_ATTEMPT: ${{ inputs.reviewed_run != '' && needs.authorize.outputs.reviewed_attempt || needs.register.outputs.custody_attempt }}
+          SOURCE_MANIFEST_SHA256: ${{ inputs.reviewed_run != '' && inputs.expected_review_sha256 || needs.register.outputs.custody_manifest_sha256 }}
+          RELEASE_INPUTS_JSON: ${{ inputs.target == 'platform' && secrets.PLATFORM_INPUTS_JSON || secrets.APPLICATION_INPUTS_JSON }}
+          RELEASE_BASELINE_JSON: ${{ inputs.target == 'platform' && secrets.PLATFORM_BASELINE_JSON || secrets.APPLICATION_BASELINE_JSON }}
+          STATE_BUCKET: ${{ secrets.STATE_BUCKET }}
+          CUSTODY_BUCKET: ${{ secrets.CUSTODY_BUCKET }}
+      - name: Keep failure diagnostics in private custody
+        if: failure() && steps.assume.outcome == 'success'
+        run: npm run release:workflow -- diagnostics
+        env:
+          CUSTODY_BUCKET: ${{ secrets.CUSTODY_BUCKET }}
+  apply:
+    needs: [authorize, plan]
+    if: ${{ !cancelled() && needs.authorize.result == 'success' && needs.plan.result == 'success' && inputs.apply }}
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.21.0'
+          package-manager-cache: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e
+        with:
+          terraform_version: '1.16.5'
+          terraform_wrapper: false
+      - name: Install locked dependencies
+        run: |
+          npm install --global npm@11.11.1
+          npm ci
+      - name: Assume isolated apply role
+        id: assume
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd
+        with:
+          role-to-assume: ${{ secrets.APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ secrets.AWS_ACCOUNT_ID }}
+          role-session-name: reminder-${{ github.run_id }}-apply
+          role-duration-seconds: 3600
+          unset-current-credentials: true
+          mask-aws-account-id: true
+          retry-max-attempts: 1
+      - name: Read this run's review custody, recheck saved binary, apply once, prove both aliases and smoke
+        run: npm run release:workflow -- apply
+        env:
+          PLAN_CUSTODY_RUN_ID: ${{ needs.plan.outputs.custody_run_id }}
+          PLAN_CUSTODY_ATTEMPT: ${{ needs.plan.outputs.custody_attempt }}
+          PLAN_CUSTODY_MANIFEST_SHA256: ${{ needs.plan.outputs.custody_manifest_sha256 }}
+          REVIEWED_RUN: ${{ inputs.reviewed_run }}
+          REVIEWED_ATTEMPT: ${{ needs.authorize.outputs.reviewed_attempt }}
+          EXPECTED_REVIEW_SHA256: ${{ inputs.expected_review_sha256 }}
+          CUSTODY_BUCKET: ${{ secrets.CUSTODY_BUCKET }}
+      - name: Keep failure diagnostics in private custody
+        if: failure() && steps.assume.outcome == 'success'
+        run: npm run release:workflow -- diagnostics
+        env:
+          CUSTODY_BUCKET: ${{ secrets.CUSTODY_BUCKET }}

@@ -2,6 +2,9 @@ services:
   devcontainer:
     init: true
     command: sleep infinity
+    depends_on:
+      floci:
+        condition: service_healthy
     build:
       context: .
       dockerfile: Dockerfile
@@ -30,6 +33,32 @@ services:
       CONTEXT7_API_KEY: ${CONTEXT7_API_KEY:-}
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-https://proxy.bar504.net}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      FLOCI_ENDPOINT_URL: http://floci:4566
+
+  floci:
+    image: floci-local:2.2.0-refresh.7-native
+    build:
+      context: ./floci
+      dockerfile: Dockerfile
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:24566:4566"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./floci/local-jwt-command.sh:/usr/local/bin/local-jwt-command.sh:ro
+    tmpfs:
+      - /app/data
+    environment:
+      FLOCI_SECURITY_ALLOW_PRIVATE_JWT_TARGETS: "true"
+      FLOCI_STORAGE_MODE: memory
+    command: ["bash", "/usr/local/bin/local-jwt-command.sh"]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
 volumes:
   claude-code-bashhistory:
