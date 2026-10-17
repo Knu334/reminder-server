@@ -74,6 +74,11 @@ const v2Routes=["GET /v2/reminders","POST /v2/reminders","GET /v2/reminders/{id}
 const fallbackRoutes=["ANY /healthz","ANY /readyz","ANY /reminders","ANY /v2/reminders","ANY /v2/reminders/{id}","ANY /v2/reminders/{id}/thumbnail-url"];
 const isFallback=(key:unknown)=>typeof key==="string"&&(key.startsWith("ANY ")||key==="$default");
 const isV2=(key:unknown)=>typeof key==="string"&&/^[A-Z]+ \/v2(?:\/|$)/.test(key);
+/** 診断に使う値の形。値そのものは返さない。 */
+function valueShape(value:unknown,unknown:unknown):string {
+  if(anyUnknown(unknown))return "unknown";if(value===undefined)return "absent";if(value===null)return "null";
+  if(value==="")return "empty-string";if(typeof value==="string")return "string";if(Array.isArray(value))return `array(${value.length})`;return typeof value;
+}
 function anyUnknown(value:unknown):boolean {return value===true||(Array.isArray(value)?value.some(anyUnknown):value!==null&&typeof value==="object"&&Object.values(value).some(anyUnknown));}
 function same(a:unknown,b:unknown):boolean {return canonical(a)===canonical(b);}
 function exactSet(value:unknown,expected:string[]):boolean {return Array.isArray(value)&&value.length===expected.length&&value.every(v=>typeof v==="string")&&new Set(value).size===value.length&&expected.every(v=>value.includes(v));}
@@ -106,7 +111,15 @@ export function inspectPlan(input:unknown,baseline:ReleaseBaseline|null):PlanRev
       }
       // AWS provider（SDKv2）は空の authorization_scopes を plan では null にするので、null と [] を同じ「scope 無し」として扱う。
       if(r.type==="aws_apigatewayv2_route"&&isFallback(a.route_key)) {
-        if(!fallbackRoutes.includes(String(a.route_key))||anyUnknown(u.route_key)||anyUnknown(u.authorization_type)||anyUnknown(u.authorization_scopes)||anyUnknown(u.authorizer_id)||a.authorization_type!=="NONE"||!(a.authorization_scopes===null||a.authorization_scopes===undefined||exactSet(a.authorization_scopes,[]))||(a.authorizer_id!==null&&a.authorizer_id!==undefined))reject(r.address,"UNBOUNDED_FALLBACK_ROUTE");
+        // 外れた項目と値の形だけを code に付ける（ID などの値は入れない）。
+        const checks:Array<[string,boolean]>=[
+          ["route_key",fallbackRoutes.includes(String(a.route_key))&&!anyUnknown(u.route_key)],
+          ["authorization_type",a.authorization_type==="NONE"&&!anyUnknown(u.authorization_type)],
+          ["authorization_scopes",(a.authorization_scopes===null||a.authorization_scopes===undefined||exactSet(a.authorization_scopes,[]))&&!anyUnknown(u.authorization_scopes)],
+          ["authorizer_id",(a.authorizer_id===null||a.authorizer_id===undefined)&&!anyUnknown(u.authorizer_id)],
+        ];
+        const failed=checks.filter(([,ok])=>!ok).map(([field])=>`${field}=${valueShape(a[field],u[field])}`);
+        if(failed.length)reject(r.address,`UNBOUNDED_FALLBACK_ROUTE(${failed.join(",")})`);
       } else if(r.type==="aws_apigatewayv2_route") {
         const scope=typeof a.route_key==="string"&&a.route_key.startsWith("GET ")?"reminder-api/read":"reminder-api/write";
         const authorizer=p.resource_changes.find(resource=>resource.type==="aws_apigatewayv2_authorizer")?.change;
