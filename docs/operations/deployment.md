@@ -190,7 +190,15 @@ prefixは `<種類>/<run_id>/<run_attempt>/` である。`run_attempt` は、そ
       4. `terraform init -migrate-state -backend-config=backend.hcl` を実行する。決して盲目的に強制コピーしない。
       5. 移行を確認してから、ローカルのbackupを安全に保管するか、削除する。
 
-   4. `terraform output` の値から、「[GitHubの設定](#githubの設定)」のenvironment、variable、secretを設定する。
+   4. `terraform output` の値から、「[GitHubの設定](#githubの設定)」のenvironment、variable、secretを設定する。この時点で決まらない値があるため、secretは段階に分けて設定する。
+
+      | 時点 | 設定するもの |
+      | --- | --- |
+      | この手順（1-4） | 3つのenvironmentと保護の設定、repository variable `AWS_REGION`、7つのrepository secret、`production-plan` のsecret `PLATFORM_INPUTS_JSON` と、リテラルのJSON `null` を入れた `PLATFORM_BASELINE_JSON` |
+      | 手順2のapplyの後 | `PLATFORM_BASELINE_JSON` を、custodyの `post-baseline.json` の内容で上書きする |
+      | 手順4 | `APPLICATION_INPUTS_JSON`（nullでない `production_api_id` を含む）と `APPLICATION_BASELINE_JSON` を作る |
+
+      `APPLICATION_INPUTS_JSON` と `APPLICATION_BASELINE_JSON` は、手順2のplatformのpreviewとapplyでは使わないので、手順4まで設定しなくてよい。
 2. **platformのpreviewとapply（`deploy.yml`）**
    - `target=platform`、`apply=false`、main上の完全なimmutable commit、明示的なnullのplatform baselineでpreviewする。この段階ではZIPのbuildも登録も**行わない**。
    - 「[workflowの実行](#workflowの実行previewとapply)」の2回のrunによるgateでレビューしてapplyする。
