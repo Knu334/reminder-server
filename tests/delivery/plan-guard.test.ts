@@ -117,6 +117,21 @@ void test("protects_literal_api_runtime_auth_and_both_lambda_artifact_inputs",()
   for(const name of ["api","cleanup"]){const p=applicationPlan();p.resource_changes.find(r=>r.type==="aws_lambda_function"&&r.name===name)!.change.after.s3_object_version="wrong";assert.throws(()=>createPlanManifest(p,binary,inputs,artifact,artifact.commit,baseline,"application"));}
 });
 
+void test("fallback_route_rejection_names_the_field_and_value_shape_only",()=>{
+  // 拒否の code には、外れた項目と値の形だけを付ける。ID などの値は入れない。
+  const reject=(change:(after:Record<string,unknown>,unknown:Record<string,unknown>)=>void)=>{
+    const p=applicationPlan(),fallback=p.resource_changes.find(r=>r.change.after.route_key==="ANY /healthz")!;
+    change(fallback.change.after as Record<string,unknown>,fallback.change.after_unknown as Record<string,unknown>);
+    return inspectPlan(p,baseline).violations.filter(v=>v.address===fallback.address).map(v=>v.code);
+  };
+  assert.deepEqual(reject(a=>{a.authorizer_id="";}),["UNBOUNDED_FALLBACK_ROUTE(authorizer_id=empty-string)"]);
+  assert.deepEqual(reject(a=>{a.authorizer_id="abc123secret";}),["UNBOUNDED_FALLBACK_ROUTE(authorizer_id=string)"]);
+  assert.deepEqual(reject(a=>{a.authorization_scopes=["reminder-api/read"];}),["UNBOUNDED_FALLBACK_ROUTE(authorization_scopes=array(1))"]);
+  assert.deepEqual(reject(a=>{a.authorization_type="JWT";}),["UNBOUNDED_FALLBACK_ROUTE(authorization_type=string)"]);
+  assert.deepEqual(reject((_a,u)=>{u.authorizer_id=true;}),["UNBOUNDED_FALLBACK_ROUTE(authorizer_id=unknown)"]);
+  assert.deepEqual(reject(a=>{a.authorizer_id="";a.authorization_scopes=["x"];}),["UNBOUNDED_FALLBACK_ROUTE(authorization_scopes=array(1),authorizer_id=empty-string)"]);
+  assert.deepEqual(reject(()=>{}),[]);
+});
 void test("fallback allowlist rejects greedy or default routes and any auth drift",()=>{
  for(const bad of [{route_key:"ANY /{proxy+}"},{route_key:"$default"},{authorization_type:"JWT"},{authorization_scopes:["reminder-api/read"]},{authorization_scopes:"none"}]){
   const p=applicationPlan();const fallback=p.resource_changes.find(r=>r.change.after.route_key==="ANY /v2/reminders")!;
