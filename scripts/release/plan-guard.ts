@@ -357,8 +357,9 @@ export function inspectPlan(input: unknown, baseline: ReleaseBaseline | null): P
               !anyUnknown(u.authorization_scopes),
           ],
           [
+            // 実 AWS は、authorizer の無い route の authorizer_id を空文字で返す。どの authorizer も指さないので許す。
             "authorizer_id",
-            (a.authorizer_id === null || a.authorizer_id === undefined) &&
+            (a.authorizer_id === null || a.authorizer_id === undefined || a.authorizer_id === "") &&
               !anyUnknown(u.authorizer_id),
           ],
         ];
