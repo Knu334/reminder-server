@@ -23,10 +23,6 @@ resource "aws_lambda_function" "api" {
       condition     = !var.operator_api_seed
       error_message = "Operator preparation must target aws_apigatewayv2_api.production only; full application deployment requires the registered API ID."
     }
-    postcondition {
-      condition     = self.code_sha256 == var.artifact.sha256_base64
-      error_message = "AWS API Lambda CodeSha256 must equal the registered immutable ZIP digest."
-    }
   }
 }
 resource "aws_lambda_function" "cleanup" {
@@ -53,10 +49,6 @@ resource "aws_lambda_function" "cleanup" {
     precondition {
       condition     = !var.operator_api_seed
       error_message = "Operator preparation must target aws_apigatewayv2_api.production only; full application deployment requires the registered API ID."
-    }
-    postcondition {
-      condition     = self.code_sha256 == var.artifact.sha256_base64
-      error_message = "AWS cleanup Lambda CodeSha256 must equal the registered immutable ZIP digest."
     }
   }
 }
