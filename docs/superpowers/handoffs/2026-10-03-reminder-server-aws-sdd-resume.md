@@ -9,7 +9,7 @@ build/test/audit検証と一度限りのscoped独立re-reviewも完了しまし�
 する再開地点ではありません。
 
 現行の[実装結果](../../implementation-results.md)と[受け入れ記録](../../operations/acceptance.md)、
-feature/aws-sdd-implementation（/workspace/.worktrees/aws-sdd）の実ソースを参照します。
+リポジトリ直下（`/workspace`）の実ソースを参照します。旧worktree `/workspace/.worktrees/aws-sdd` は2026-10-18に削除し、branch `feature/aws-sdd-implementation` は残しています。
 元の[承認handoff](2026-10-03-reminder-server-aws-sdd.md)、設計、auditは履歴として維持します。
 全52件の[判断と誤った場合の影響](../../implementation-rulings.md)を収集済みです。
 今回の3つのSDD一時領域は完了後に片付ける対象であり、再開地点ではありません。

@@ -46,7 +46,7 @@ API Lambdaに1呼び出し1件の結果ログを追加する案を採る。費�
 依存関係の準備から後片付けまで再現できることを成功条件とする。ケース件数を網羅性の根拠にしない。
 
 2026-10-08の調査で、rootは `/workspace` / `feature/aws-modernization`、アプリは
-リンクされたworktree `/workspace/.worktrees/aws-sdd` / `feature/aws-sdd-implementation`、
+リンクされたworktree `/workspace/.worktrees/aws-sdd`（2026-10-18に削除。現在はリポジトリ直下 `/workspace` を使う） / `feature/aws-sdd-implementation`、
 調査開始時のHEADは `c13272424a3bcb65b6a4613682889be02335c978` と確認した。再開時は実際のHEADと変更状態を確認する。
 アプリの `src/api/event.ts`、`tests/runtime/api.test.ts`、`tests/runtime/boundaries.test.ts` の
 未コミットのnull-body修正と、未追跡の過去報告書・ハンドオフ・計画は保持する。

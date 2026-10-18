@@ -36,7 +36,7 @@ TFの実apply・設定確認はL、driver/sourceの負例はI。`--layer floci|t
 
 ## Global Constraints
 
-- 既存worktree `/workspace/.worktrees/aws-sdd` / `feature/aws-sdd-implementation` を使用し、reset/checkout/historyの改変はしない。旧19タスクを再dispatchしない。
+- 既存worktree `/workspace/.worktrees/aws-sdd`（2026-10-18に削除。現在はリポジトリ直下 `/workspace` を使う） / `feature/aws-sdd-implementation` を使用し、reset/checkout/historyの改変はしない。旧19タスクを再dispatchしない。
 - 未コミットのnull-body修正、過去の未追跡成果物、root FWのユーザー変更を保持する。本計画では新E2Eの明示したpathだけをstageする。API結果ログは独立計画で先に完了させる。
 - 実AWS/GHA/push/PR/mergeは禁止。実データ/私有.env/AWS credentials/private mapping/state/plan/画像backupの読み取り・hash計算・表示・コピーも禁止する。
 - Node24.21.0/npm11.11.1/Python3.13.16、TFを使う場合1.16.5/provider6.67.0。全npm/npx/Python/準備commandは `PATH=/tmp/aws-sdd-tools/node_modules/.bin:/tmp/aws-sdd-tools/bin:$PATH` を付ける。
