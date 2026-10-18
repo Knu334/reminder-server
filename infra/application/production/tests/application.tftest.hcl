@@ -233,6 +233,11 @@ run "code_update_plan_is_not_blocked_by_the_previous_digest" {
     condition     = aws_lambda_function.api.source_code_hash == var.artifact.sha256_base64 && aws_lambda_function.cleanup.source_code_hash == var.artifact.sha256_base64
     error_message = "Both functions must deploy the registered ZIP digest."
   }
+  assert {
+    # apply の後も provider は state の code_sha256 を前の ZIP の値のまま残すことがある。output は deploy に使った digest にする。
+    condition     = output.release_sha256_base64 == var.artifact.sha256_base64
+    error_message = "The release digest output must be the ZIP this state deployed, not the provider's stale code_sha256."
+  }
 }
 run "runtime_overrides_preserve_numeric_strings_and_ip_json" {
   command = plan
