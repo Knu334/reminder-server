@@ -475,11 +475,12 @@ void test("fallback_route_rejection_names_the_field_and_value_shape_only", () =>
       .violations.filter((v) => v.address === fallback.address)
       .map((v) => v.code);
   };
+  // 実 AWS の route は、authorizer の無い route の authorizer_id を空文字で返す。どの authorizer も指さないので許す。
   assert.deepEqual(
     reject((a) => {
       a.authorizer_id = "";
     }),
-    ["UNBOUNDED_FALLBACK_ROUTE(authorizer_id=empty-string)"],
+    [],
   );
   assert.deepEqual(
     reject((a) => {
@@ -507,10 +508,10 @@ void test("fallback_route_rejection_names_the_field_and_value_shape_only", () =>
   );
   assert.deepEqual(
     reject((a) => {
-      a.authorizer_id = "";
+      a.authorizer_id = "abc123secret";
       a.authorization_scopes = ["x"];
     }),
-    ["UNBOUNDED_FALLBACK_ROUTE(authorization_scopes=array(1),authorizer_id=empty-string)"],
+    ["UNBOUNDED_FALLBACK_ROUTE(authorization_scopes=array(1),authorizer_id=string)"],
   );
   assert.deepEqual(
     reject(() => {}),
