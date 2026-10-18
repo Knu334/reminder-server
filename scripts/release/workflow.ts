@@ -32,7 +32,7 @@ import {
   type ReleaseRoot,
   type PrivatePlanManifest,
 } from "./plan-guard";
-import { verifyMain } from "./verify-release";
+import { verifyReleaseFiles } from "./verify-release";
 import {
   applicationCustodyNames,
   assertUsable,
@@ -766,7 +766,6 @@ function boolean(name: string): boolean {
   if (value !== "true" && value !== "false") throw Error("Invalid workflow boolean");
   return value === "true";
 }
-const quietIO = { stdout: (_s: string) => {}, stderr: (_s: string) => {} };
 const defaultServices: ReleaseServices = {
   run: localRun,
   head: async (a, r) => {
@@ -777,21 +776,13 @@ const defaultServices: ReleaseServices = {
       client.destroy();
     }
   },
+  // 失敗の具体的な理由（alias、version、ZIP、環境変数、AWS の拒否）は workflowCli が private な診断にだけ残す。
   verify: async (_a, _o, r) => {
-    if (
-      (await verifyMain(
-        [
-          "--artifact",
-          join(required("RUNNER_TEMP"), "release", "artifact.json"),
-          "--outputs",
-          join(required("RUNNER_TEMP"), "release", "outputs.json"),
-          "--region",
-          r,
-        ],
-        quietIO,
-      )) !== 0
-    )
-      throw Error("Lambda release proof failed");
+    await verifyReleaseFiles(
+      join(required("RUNNER_TEMP"), "release", "artifact.json"),
+      join(required("RUNNER_TEMP"), "release", "outputs.json"),
+      r,
+    );
   },
   smoke: async (b, p) => {
     if (!b.apiBaseUrl) throw Error("Known URL required");

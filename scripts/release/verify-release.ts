@@ -63,6 +63,50 @@ export async function verifyRelease(
   }
 }
 export type VerificationClientFactory = (region: string) => LambdaClient;
+/** ファイルの artifact と Terraform の output から公開した release を検証する。失敗は具体的な理由で投げる（workflow はそれを private な診断に残す）。 */
+export async function verifyReleaseFiles(
+  artifactPath: string,
+  outputsPath: string,
+  region: string,
+  createClient: VerificationClientFactory = (r) => new LambdaClient({ region: r, maxAttempts: 1 }),
+): Promise<void> {
+  const artifact = validateRegisteredArtifact(JSON.parse(await readFile(artifactPath, "utf8")));
+  const value = z
+    .object({
+      api_alias_arn: z.object({ value: z.string() }),
+      cleanup_alias_arn: z.object({ value: z.string() }),
+      api_version: z.object({ value: z.string() }),
+      cleanup_version: z.object({ value: z.string() }),
+      runtime_data: z.object({
+        value: z.object({
+          reminders_table: z.string().min(1),
+          owner_state_table: z.string().min(1),
+          image_jobs_table: z.string().min(1),
+          images_bucket: z.string().min(1),
+          restored_tables: z.record(z.string(), z.string()),
+        }),
+      }),
+      release_sha256_base64: z.object({ value: z.string() }),
+    })
+    .parse(JSON.parse(await readFile(outputsPath, "utf8")));
+  if (value.release_sha256_base64.value !== artifact.sha256Base64)
+    throw new Error("Output ZIP mismatch");
+  const aliases = aliasesSchema.parse({
+    api: { aliasArn: value.api_alias_arn.value, version: value.api_version.value },
+    cleanup: { aliasArn: value.cleanup_alias_arn.value, version: value.cleanup_version.value },
+  });
+  const client = createClient(region);
+  try {
+    await verifyRelease(
+      artifact,
+      aliases,
+      client,
+      runtimeDataEnvironment(value.runtime_data.value),
+    );
+  } finally {
+    client.destroy();
+  }
+}
 export async function verifyMain(
   argv: string[],
   io: ReleaseIO,
@@ -83,47 +127,13 @@ export async function verifyMain(
     io.stderr("Invalid release verification arguments\n");
     return 2;
   }
-  let client: LambdaClient | undefined;
   try {
-    const artifact = validateRegisteredArtifact(JSON.parse(await readFile(f.artifact!, "utf8")));
-    const value = z
-      .object({
-        api_alias_arn: z.object({ value: z.string() }),
-        cleanup_alias_arn: z.object({ value: z.string() }),
-        api_version: z.object({ value: z.string() }),
-        cleanup_version: z.object({ value: z.string() }),
-        runtime_data: z.object({
-          value: z.object({
-            reminders_table: z.string().min(1),
-            owner_state_table: z.string().min(1),
-            image_jobs_table: z.string().min(1),
-            images_bucket: z.string().min(1),
-            restored_tables: z.record(z.string(), z.string()),
-          }),
-        }),
-        release_sha256_base64: z.object({ value: z.string() }),
-      })
-      .parse(JSON.parse(await readFile(f.outputs!, "utf8")));
-    if (value.release_sha256_base64.value !== artifact.sha256Base64)
-      throw new Error("Output ZIP mismatch");
-    const aliases = aliasesSchema.parse({
-      api: { aliasArn: value.api_alias_arn.value, version: value.api_version.value },
-      cleanup: { aliasArn: value.cleanup_alias_arn.value, version: value.cleanup_version.value },
-    });
-    client = createClient(f.region!);
-    await verifyRelease(
-      artifact,
-      aliases,
-      client,
-      runtimeDataEnvironment(value.runtime_data.value),
-    );
+    await verifyReleaseFiles(f.artifact!, f.outputs!, f.region!, createClient);
     io.stdout("Release identity verified\n");
     return 0;
   } catch {
     io.stderr("Release identity verification failed\n");
     return 1;
-  } finally {
-    client?.destroy();
   }
 }
 if (require.main === module)
