@@ -26,7 +26,7 @@ $yomiyasu:yomiyasu
 
 reminder-serverの承認済みAPI結果ログ追加と正式ローカルE2Eを実装し、必要な検証・独立レビュー・ローカルcommit・日本語の結果記録まで完了してください。
 引き継ぎ文書は次のファイルです。
-/workspace/.worktrees/aws-sdd/docs/superpowers/handoffs/2026-10-08-reminder-server-formal-e2e-implementation.md
+/workspace/docs/superpowers/handoffs/2026-10-08-reminder-server-formal-e2e-implementation.md
 
 承認状態と作業順
 - 2026-10-08、6指摘を反映したcommit 2d275c0の設計・対応表・APIログ計画・E2E計画をユーザーが承認済み。SDD方式も選択済み。設計し直したり、同じ範囲の承認・実行方式を再確認したりせず、実装から開始する。
@@ -43,7 +43,7 @@ reminder-serverの承認済みAPI結果ログ追加と正式ローカルE2Eを�
 6. 変更する機能の現行sourceと関連tests、公開infra README。過去local-e2e報告は補助資料として読み、今回の成功証拠へ転記しない。
 
 開始時の状態とツール
-- アプリworktreeは /workspace/.worktrees/aws-sdd、branch feature/aws-sdd-implementation。rootは /workspace、branch feature/aws-modernization。git status/worktree/HEADを確認する。記録のcommitへreset/checkoutしない。
+- アプリworktreeは /workspace/.worktrees/aws-sdd（2026-10-18に削除。現在はリポジトリ直下 /workspace を使う）、branch feature/aws-sdd-implementation。rootは /workspace、branch feature/aws-modernization。git status/worktree/HEADを確認する。記録のcommitへreset/checkoutしない。
 - src/api/event.ts、tests/runtime/api.test.ts、tests/runtime/boundaries.test.tsの未コミットnull-body修正、未追跡の過去報告/計画/旧ハンドオフ、root FW/Floci READMEのユーザー変更を保持する。既存worktreeを使用し、別worktreeへの未コミット変更のコピーをしない。
 - 現行sourceからZIPを作る。既存ユーザー修正はビルドへ含まれるが、実装commitへ混ぜない。非秘密の入力digest/dirty path/ZIP実測digestを記録する。古い固定ZIPだけが通る構成を引き継がない。
 - 全npm/npx/Python/準備commandに PATH=/tmp/aws-sdd-tools/node_modules/.bin:/tmp/aws-sdd-tools/bin:$PATH を付ける。Node24.21.0/npm11.11.1/Python3.13.16/Terraform1.16.5/provider6.67.0を使用。不足toolだけを復元する。前回はTerraformがPATHになくoffline validateも未実施だったため、固定版での確認をTask3で行う。
