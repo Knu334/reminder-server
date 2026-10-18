@@ -215,14 +215,24 @@ run "operator_seed_rejects_enabled_schedule" {
   }
   expect_failures = [var.operator_api_seed]
 }
-run "code_digest_mismatch_fails_closed" {
+run "code_update_plan_is_not_blocked_by_the_previous_digest" {
+  # AWS provider は、コードを更新する plan でも code_sha256 を今の（前の ZIP の）値のまま出す。
+  # ZIP の digest の照合は、apply の後の検証（scripts/release/verify-release.ts）が公開した version ごとに行う。
   command = plan
+  override_resource {
+    target          = aws_lambda_function.api
+    override_during = plan
+    values          = { code_sha256 = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=" }
+  }
   override_resource {
     target          = aws_lambda_function.cleanup
     override_during = plan
     values          = { code_sha256 = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=" }
   }
-  expect_failures = [aws_lambda_function.cleanup]
+  assert {
+    condition     = aws_lambda_function.api.source_code_hash == var.artifact.sha256_base64 && aws_lambda_function.cleanup.source_code_hash == var.artifact.sha256_base64
+    error_message = "Both functions must deploy the registered ZIP digest."
+  }
 }
 run "runtime_overrides_preserve_numeric_strings_and_ip_json" {
   command = plan
