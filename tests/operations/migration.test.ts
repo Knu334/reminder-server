@@ -933,3 +933,77 @@ void test("broken_chunk_chain_fails_closed_even_with_a_valid_local_content_hash"
   await assert.rejects(() => verifyMigration(identity, value, harness.deps()));
   assert.equal((await harness.deps().owners.gate(testBudget())).published, false);
 });
+void test("empty_source_and_mapping_import_verify_and_publish_through_cli_and_adapters", async () => {
+  const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { migrationMain } = await import("../../scripts/operations/migrate-json");
+  const { migrationAdapterHarness } = await import("../support/migration-store");
+  const directory = await mkdtemp(join(tmpdir(), "o02-empty-synthetic-"));
+  try {
+    const targetValue = {
+      ...identity.environment,
+      expectedApiId: "api123",
+      expectedStage: "$default",
+      clientId: "client123",
+    };
+    await writeFile(join(directory, "source.json"), "{}");
+    await writeFile(join(directory, "map.json"), "[]");
+    await writeFile(join(directory, "target.json"), JSON.stringify(targetValue));
+    // The production store is bound to the identity that the CLI derives from the file bytes.
+    let harness: Awaited<ReturnType<typeof migrationAdapterHarness>> | undefined;
+    const argv = [
+      "--source",
+      join(directory, "source.json"),
+      "--mapping",
+      join(directory, "map.json"),
+      "--config",
+      join(directory, "target.json"),
+    ];
+    const output: string[] = [];
+    const io = {
+      stdout: (line: string) => {
+        output.push(line);
+      },
+      stderr: (line: string) => {
+        output.push(line);
+      },
+    };
+    const runtime = {
+      async createDeps(_target: unknown, actual: MigrationIdentity, validation: LegacyValidation) {
+        harness ??= await migrationAdapterHarness(actual, validation);
+        return harness.deps();
+      },
+    };
+    assert.equal(await migrationMain(["--mode", "dry-run", ...argv], io, runtime), 0);
+    const run = [...argv, "--run-id", identity.runId];
+    assert.equal(
+      await migrationMain(["--mode", "import", ...run], io, runtime),
+      0,
+      output.join("\n"),
+    );
+    assert.equal(
+      await migrationMain(["--mode", "verify", ...run], io, runtime),
+      0,
+      output.join("\n"),
+    );
+    assert.ok(harness);
+    assert.equal((await harness.deps().owners.gate(testBudget())).published, false);
+    assert.equal(
+      await migrationMain(["--mode", "publish", ...run], io, runtime),
+      0,
+      output.join("\n"),
+    );
+    assert.equal((await harness.deps().owners.gate(testBudget())).published, true);
+    assert.equal(harness.versions, 0);
+    assert.equal(harness.snapshot(identity.environment.remindersTable).length, 0);
+    assert.equal(
+      harness.snapshot(identity.environment.ownerStateTable).filter((row) => row.sk === "STORAGE")
+        .length,
+      0,
+    );
+    assert.equal(await migrationMain(["--mode", "import", ...run], io, runtime), 2);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

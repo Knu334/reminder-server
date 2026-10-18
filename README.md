@@ -134,7 +134,7 @@ DTO、エラー、上限は [API v2 仕様](docs/api-v2.md)、拡張機能の認
 | [API v2 仕様](docs/api-v2.md) | エンドポイント、DTO、エラー、上限 |
 | [Chrome 拡張機能の Cognito 認証](docs/chrome-extension-cognito-auth.md) | Hosted UI、PKCE、token の更新 |
 | [deployment 手順](docs/operations/deployment.md) | GHA による登録、plan、apply と rollback |
-| [移行手順](docs/operations/migration.md) | 旧 JSON からの移行 |
+| [移行手順](docs/operations/migration.md) | 旧 JSON からの移行と、空で始める場合の公開 |
 | [復旧手順](docs/operations/recovery.md) | DynamoDB の PITR 復旧 |
 | [画像の清掃](docs/operations/cleanup.md) | 日次と手動の清掃 |
 | [受け入れ記録](docs/operations/acceptance.md) | 受け入れの手順と記録 |

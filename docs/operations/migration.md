@@ -42,4 +42,28 @@
    publishは、同じ入力で全件の検証を繰り返し、その結果を記録する。その後、条件付きtransactionで唯一の `GLOBAL/PUBLICATION` 行をtrueにし、runを公開済みにする。transactionは、同じrunのidentityと、永続化された成功の検証結果と完全に一致することを要求する。scheduleの有効化もデプロイも行わない。公開の応答が不確定な場合は、gateとrunの正確な状態を確認する。公開済みと確認されたrunは、importとverifyの再実行を拒否する。そのgateを戻して再取込してはならない。
 9. 清掃のscheduleやAPIの書込trafficを有効にする前に、次を確認する。想定したrunでpublicationがtrueであること、空のownerと空でないownerのquotaが一致すること、画像のversionが読めること、対象が意図した環境であること。別に管理する基盤で、PITRの保持期間が35日であり、非現行の画像versionが60日保持されることを確認する。scheduleは、別途承認されたデプロイ操作を通じてだけ有効にする。
 
+## 空で始める場合
+
+移行するデータが無い場合も、公開は同じ `migrate:json` の import → verify → publish で行う。DynamoDBの `GLOBAL/PUBLICATION` を手で書き換えてはならない。空の入力では、ownerの行もitemも画像も作らず、runのcheckpointとPUBLICATION行だけを書く。進捗の配列は `head: null, count: 0` になり、chunkは作らない。この流れは、合成のtransportと本番のadapterで `empty_source_and_mapping_import_verify_and_publish_through_cli_and_adapters`（`tests/operations/migration.test.ts`）が確かめている。実AWSでの受け入れは、別途この手順の実行で確かめる。
+
+1. 手順1のとおり、Cognitoのコンソールで、loginに使うuserを作る。mappingには入れないので、`sub` の記録は移行には要らない。
+2. 私有の場所に、内容が正確に `{}` の移行元と、内容が正確に `[]` のmappingを作る。hashはbyte列そのものを対象とするので、改行の有無も含めて、run が終わるまで変えない。例: `printf '{}' > /private/source-empty.json`、`printf '[]' > /private/owner-map-empty.json`。
+3. 手順3のとおり、私有の対象JSONを用意する。3つのtableが空であることと、APIの書込trafficと清掃のscheduleが無効であることも、同じく必要である。
+4. dry-runを実行し、`"valid":true,"owners":0,"items":0` と `"errors":[]` を確かめる。
+
+   ```sh
+   npm run migrate:json -- --mode dry-run --source /private/source-empty.json --mapping /private/owner-map-empty.json --config /private/target.json
+   ```
+
+5. 小文字のUUIDを一度だけ選び、手順5〜8と同じ引数で import、verify、publish を順に実行する。期待する出力は、import が `{"mode":"import","owners":0,"items":0,"imageBytes":0,"completed":true}`、verify と publish が `"exactMatch":true,"mismatches":[]` である。
+
+   ```sh
+   npm run migrate:json -- --mode import --run-id <uuid> --source /private/source-empty.json --mapping /private/owner-map-empty.json --config /private/target.json
+   npm run migrate:json -- --mode verify --run-id <uuid> --source /private/source-empty.json --mapping /private/owner-map-empty.json --config /private/target.json
+   npm run migrate:json -- --mode publish --run-id <uuid> --source /private/source-empty.json --mapping /private/owner-map-empty.json --config /private/target.json
+   ```
+
+6. 手順9のうち、想定したrunでpublicationがtrueであることと、対象が意図した環境であることを確かめる。ownerと画像は無いので、quotaと画像versionの確認は対象外である。PITRと非現行versionの保持期間の確認は省かない。
+7. 公開済みのrunは、importとverifyの再実行を拒否する（終了コード2）。後から旧JSONを取り込むことはできない。取り込む場合は、別の新しい空の環境を用意する。
+
 旧JSONのサービスへ切り戻せるのは、新サービスで書込が始まる前だけである。新しい書込が始まると、旧JSONは古くなる。旧JSONへ戻るには、別途計画した照合・復旧の操作が必要である。復旧のため、元の移行元とmappingは私有のまま保持する。検証の間は、移行adapter以外からの管理用の書込を無効にしておかなければならない。強い読み取りのtable走査はページ分割した読み取りであり、複数tableのsnapshotではないためである。
