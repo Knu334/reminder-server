@@ -7,6 +7,7 @@ import { LambdaClient, GetAliasCommand, GetFunctionCommand } from "@aws-sdk/clie
 import {
   verifyRelease,
   verifyMain,
+  verifyReleaseFiles,
   type ReleaseAliases,
 } from "../../scripts/release/verify-release";
 import { smoke, smokeMain } from "../../scripts/release/smoke";
@@ -217,4 +218,50 @@ void test("immutable cleanup environment drift fails after the API environment p
   );
   await assert.rejects(verifyRelease(artifact, aliases, f.client, dataEnvironment));
   assert.equal(f.calls.length, 4);
+});
+void test("release_file_verification_keeps_the_specific_reason", async () => {
+  // workflow は検証の理由を private な診断に残すので、ファイルからの検証は具体的な理由で reject する。
+  const dir = await mkdtemp(join(tmpdir(), "release-synthetic-"));
+  try {
+    const outputs = {
+      runtime_data: { value: runtimeData },
+      api_alias_arn: { value: aliases.api.aliasArn },
+      cleanup_alias_arn: { value: aliases.cleanup.aliasArn },
+      api_version: { value: "7" },
+      cleanup_version: { value: "9" },
+      release_sha256_base64: { value: artifact.sha256Base64 },
+    };
+    const paths = { artifact: join(dir, "artifact"), outputs: join(dir, "outputs") };
+    await writeFile(paths.artifact, JSON.stringify(artifact));
+    await writeFile(paths.outputs, JSON.stringify(outputs));
+    await verifyReleaseFiles(paths.artifact, paths.outputs, "us-east-1", () => fake().client);
+    await assert.rejects(
+      verifyReleaseFiles(
+        paths.artifact,
+        paths.outputs,
+        "us-east-1",
+        () => fake({ CodeSha256: "different" }).client,
+      ),
+      /Release version or ZIP mismatch/,
+    );
+    await assert.rejects(
+      verifyReleaseFiles(
+        paths.artifact,
+        paths.outputs,
+        "us-east-1",
+        () => fake({}, { FunctionVersion: "8" }).client,
+      ),
+      /Release alias mismatch/,
+    );
+    await writeFile(
+      paths.outputs,
+      JSON.stringify({ ...outputs, release_sha256_base64: { value: "wrong" } }),
+    );
+    await assert.rejects(
+      verifyReleaseFiles(paths.artifact, paths.outputs, "us-east-1", () => fake().client),
+      /Output ZIP mismatch/,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
